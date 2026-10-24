@@ -1,0 +1,1 @@
+{"identifier":"default","description":"Local app window with no blanket filesystem or shell access","windows":["main"],"permissions":["core:default"]}
