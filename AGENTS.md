@@ -1,47 +1,149 @@
 # Screenroom — agent instructions
 
-**CURRENT, SUPERSEDING GOVERNANCE (2026-10-25):** Screenroom is the approved product name, the ONLY project root is `~/Desktop/projects/screenroom`, and `docs/ADR-001_SELECTED_STACK.md` is the authoritative installed native-stack decision. Use Flutter/Dart UI, per-device native playback, SQLite, and a faithfully mapped Flutter adapter to the private Dropout Design System. Older statements such as “Screenroom is backup”, “Samsung TV cannot run `.tpk`”, and “Svelte/Tauri is the selected baseline” are explicitly SUPERSEDED. Keep one monorepo, offline/zero-paid constraints and hardware gates. Never claim tests happened without a real receipt.
+**CURRENT, SUPERSEDING GOVERNANCE (2026-10-26):** Screenroom is the approved
+product name, the only project root is `~/Desktop/projects/screenroom`, and
+[`docs/ADR-002_RUST_FIRST_STACK.md`](docs/ADR-002_RUST_FIRST_STACK.md) is the
+authoritative stack decision. Rust-first: shared Rust core, iced + wgpu + libmpv
+on desktop, SwiftUI + AVPlayer on iOS, Jetpack Compose + Media3 on Android,
+LightningJS 3 + Blits + TypeScript with platform-native playback on TVs, SQLite
+where supported, FFmpeg/FFprobe for media work, Dropout Design System for
+visuals, MIT for original first-party code, Flutter + Dart only as a recorded
+fallback.
 
-# Agent instructions — unnamed local-media-app monorepo (Screenroom = backup name)
+Older statements are **SUPERSEDED** and are history, not requirements:
+“Flutter is the selected stack” (ADR-001), “Svelte/Tauri is the baseline”,
+“Screenroom is a backup name”, “Samsung TV cannot run `.tpk`”, “the UI must be a
+WebView”. Do not act on them. Do not delete them: the archive is the audit trail.
 
-This is an **AI-operated**, personal, offline-first multimedia product. Human familiarity with a programming language is not a stack-selection criterion. Optimize actual usability, playback quality, portability, performance, operability and maintainability.
+Keep one monorepo, offline-first/zero-paid constraints and every hardware gate.
+Never claim a test, a device result or a rendering receipt that did not happen.
 
 ## Operating boundaries
 
-**2026-10-25 superseding decision — product shell:** every released target is an **installed local app**, never a hosted website, PWA or browser tab. The interface may use an **embedded native OS WebView**, but describe it accurately as hybrid, not pure native UI; Windows desktop services and video engine remain native, and Samsung TV ships an installed `.wgt` with native AVPlay playback because Samsung TVs do not support native `.tpk`. The end user must not need a browser, internet, an always-on server or a localhost HTTP server for normal operation. `tests/preview/` is strictly developer QA, not an end-user client.
+**Installed application contract.** Every released target is an installed local
+app: a desktop executable, an iOS/Android app, or a signed TV package
+(`.wgt` for Samsung Tizen, `.ipk` for LG webOS). Never a hosted website, PWA or
+browser tab. The user must not need a browser, internet, an always-on server or a
+localhost HTTP server for normal playback, browsing, resume or lists.
 
-**2026-10-25 superseding decision — visuals:** follow the owner's private **Dropout Studio Design System** as canonical visual/component source. Before frontend changes inspect its actual `DESIGN.md`, `GUIDELINES.md`, `README.md`, canonical DTCG `src/lib/tokens/tokens.json`, component lifecycle and current commit. Apply reviewed, immutable-commit-pinned private vendoring inside this monorepo through the DS's approved sync path; never fetch a public registry mirror, paste an unreviewed copy, or publish private DS source in planning bundles/public packages. Screen-specific cinematic compositions remain in the product. For TV M76, build/validate a documented compatibility presentation adapter using the same canonical semantic tokens; do not silently fork the design language. Read `docs/DROPOUT_DESIGN_INTEGRATION.md` and `docs/NATIVE_APP_STRATEGY.md`. The original pale-green palette is superseded.
+**Design authority.** Follow the owner's private **Dropout Studio Design System**
+as the canonical visual/component source. Before any UI work, inspect its actual
+`DESIGN.md`, `GUIDELINES.md`, `README.md`, canonical DTCG
+`src/lib/tokens/tokens.json`, component lifecycle and current commit. Apply
+reviewed, immutable-commit-pinned private vendoring inside this monorepo through
+the DS's approved sync path. Never fetch a public registry mirror, paste an
+unreviewed copy, or publish private DS source in planning bundles, public
+packages or screenshots. Each platform adapts the same semantic tokens and
+documented control behaviour; no platform may silently fork the design language.
+The original pale-green prototype palette is superseded.
 
-**Name:** final one-word name is still undecided. `Screenroom` is a backup historical label, not an approved product brand. Do not automate broad renaming until chosen.
+**Name.** Screenroom is finalized. Historical reference material keeps the old
+labels; active code and docs use Screenroom.
 
-- Keep **every first-party** platform app, package, crate, script, test, design source, decision and development document in this single root/repo. Do not create separate repos, submodules, external shared-project folders or unwritten local dependencies. SDKs, OS runtimes, caches and user videos are external by nature and are not part of Git.
-- Never modify, rename, delete, move or overwrite user videos. Scan/read in place and show failures without destructive cleanup. Conversion jobs require explicit user intent and write separately.
-- Do not introduce required paid services, SaaS infra, cloud accounts, always-on hosts, AI inference fees or hosted sync. Do not enable automatic purchases, submissions, posts or deployment.
-- No actual pirate-site integration, scraping, authentication automation, bypassing access controls, or distribution of protected works without an appropriate permissions/rights check. Preserve user-specified sources as bookmarks/capability research, never assume a public link is permission.
-- **Source state ≠ user approval ≠ hardware certification.** Never manufacture actual Samsung/Windows test receipts. Do not claim a feature is complete because it has a button, mock or browser-only test.
-- Use current official Svelte/SvelteKit, Tauri, Samsung, FFmpeg, mpv and provider docs when implementing anything version-sensitive. Verify APIs against the actual selected release and respect its lockfile. Do not prescribe an AI model or effort level in prompts.
-- Security: parameterized OS subprocess arguments, validated IPC, strict media-root authorization and canonicalization, no arbitrary privileged webviews, safe URL allowlists, bounded parser/file inputs, no credentials in Git/logs/export. No destructive cleanup on scan misses or disconnects.
+## Repository layout
+
+- `crates/screenroom-core` — Rust domain, SQLite library, scanning, filename
+  interpretation, fingerprints. No UI, no network, no platform player.
+- `crates/screenroom-player` — libmpv runtime boundary and the player state
+  machine. libmpv is loaded at runtime, never linked into Git.
+- `apps/desktop` — iced + wgpu desktop client (Windows/Linux/macOS), including the
+  libmpv → wgpu presentation bridge.
+- `apps/ios`, `apps/android`, `apps/tv` — per-platform clients. TV clients do not
+  run the Rust core; they follow the documented core contract.
+- `docs/` — ADRs, architecture, roadmap, progress ledger, gates, licensing.
+- `reference/` — preserved historical prototype and handoff. Read-only source of
+  ideas; never the active build.
+- `.worktrees/` — archived agent worktrees, Git-ignored but recoverable through
+  the `archive/*` branches. Do not delete them.
+
+Keep **every first-party** app, crate, package, script, test, design source,
+decision and development document in this single root. No submodules, no sibling
+repos, no unwritten local dependencies. SDKs, OS runtimes, caches and user videos
+are external and are not part of Git.
+
+## Hard rules
+
+- Never modify, rename, delete, move or overwrite user media. Scan and read in
+  place; report failures instead of cleaning up destructively. Conversion jobs
+  need explicit user intent and write to separate output.
+- No required paid service, SaaS infrastructure, cloud account, always-on host,
+  AI inference fee or hosted sync. Never enable automatic purchases, submissions,
+  posts or deployment.
+- No pirate-site integration, scraping, authentication automation, access-control
+  bypass or distribution of protected works without a rights check. A user-listed
+  source is a bookmark and a capability question, never an assumed permission.
+- **Source state ≠ user approval ≠ hardware certification.** No invented Samsung,
+  Windows, iOS, Android, Tizen or webOS receipts. A mock or a browser-only test is
+  not a device test.
+- Verify version-sensitive work against current official docs for the *actual*
+  selected release, and respect the lockfiles. Current provisional pins: iced
+  0.14 / wgpu 27 (must match iced), UniFFI 0.32, Lighting 3 / Blits 2.x, Rust
+  edition 2024.
+- Security: parameterized arguments (no shell interpolation of filenames),
+  validated IPC/bindings, strict media-root authorization and canonicalization,
+  bounded parser and file inputs, safe URL allowlists, no credentials in
+  Git/logs/backups/exports. No destructive cleanup on scan misses or disconnects.
+- The private Dropout Design System source and generated private token values
+  stay out of Git and out of any public artifact.
 
 ## Required evidence gates
 
-Read `docs/FEASIBILITY_GATES.md`, `docs/NATIVE_APP_STRATEGY.md`, and `docs/DROPOUT_DESIGN_INTEGRATION.md` first. Determine actual Windows hardware and prove native-player/UI integration. On the **physical Samsung UA50AU8000RXER**, prove signed package installation, USB enumeration, AVPlay local playback, lifecycle/focus and durable state/artwork **before** treating Tizen support as achieved. If the device is inaccessible, mark its gate BLOCKED and work independently, never greenwash it.
+Read [`docs/FEASIBILITY_GATES.md`](docs/FEASIBILITY_GATES.md) first. Gates are per
+capability and per device, never per framework:
+
+1. **Desktop presentation** — a libmpv frame must be presented through wgpu in an
+   iced window on real Windows hardware (and macOS for the OpenGL bridge).
+   Compiling the bridge is not presenting a frame.
+2. **Desktop playback quality** — hardware decode, 1080p/4K, HDR, audio and
+   subtitle switching measured on the owner's GPU.
+3. **Samsung Tizen (physical UA50AU8000RXER)** — signed `.wgt` install, Lightning 3
+   bundle running on the Tizen 6.0 engine, USB enumeration, AVPlay local playback,
+   lifecycle/focus and durable storage/artwork.
+4. **iOS / Android** — UniFFI bindings built into the app, AVPlayer/Media3 local
+   playback, scoped storage / file access, and background/rotation lifecycle.
+5. **Concurrency and durability** — interruption, power loss, low storage and
+   stale player callbacks on the real device.
+
+If a device is inaccessible, mark its gate **BLOCKED** and keep working on what is
+independently verifiable. Never greenwash a missing gate.
 
 ## Implementation discipline
 
-1. Check actual repo state and user modifications before edits. Do not overwrite a user's existing project or extract the archived prototype on top of the root.
-2. Record design/architecture/provider decisions as ADR entries with status and evidence; update the capability matrix and test evidence when a behavior changes.
-3. Build thin vertical slices with runnable tests, stable contracts and typed boundaries. Prioritize source authorization → a real playable file → durable progress on both priority devices.
-4. Keep domain IDs independent of file path or metadata-provider IDs; persist state transactionally and migrate without silent resets. Keep device state independent initially.
-5. Prove offline behavior with network disabled and the app restarted; persist **permitted actual image bytes**, not just remote URLs.
-6. Treat feature capabilities per platform. Unsupported combination → truthful reason and recovery/conversion option. No dead buttons, fake data, false empty results or pretend HDR/format support.
-7. Keep runtime workload bounded, queue heavy work outside watching, measure on actual hardware. TV D-pad navigation must be deterministic, accessible and reliably restore focus.
-8. Use generated or rights-cleared test media, never commit private viewing content, accounts, tokens, DUIDs, certificates, passwords or personal addresses.
-9. Document commands and reproducible results for unit, contract, integration, browser and physical-device checks. Do not mark mock-only tests as physical checks.
-10. A release stage is complete only with satisfied acceptance checks or explicit user-accepted exceptions; report implemented/verified/blocked/deferred separately.
+1. Check actual repo state and uncommitted work before editing. Preserve, do not
+   overwrite. Archived worktrees stay on their `archive/*` branches.
+2. Record design/architecture/provider decisions as dated ADR entries with
+   evidence; update the capability matrix and progress ledger when behaviour
+   changes.
+3. Build thin vertical slices with runnable tests and typed boundaries. Priority
+   order: authorized source → real playable file → durable progress → parity on
+   each priority device.
+4. Domain IDs stay independent of file path and provider ID. Persist
+   transactionally and migrate without silent resets. Per-device state is
+   independent by design; there is no cross-device sync requirement.
+5. Prove offline behaviour with the network disabled and the app restarted.
+   Persist **permitted actual image bytes**, not remote URLs.
+6. Capabilities are per platform. An unsupported combination gets a truthful
+   reason and an achievable recovery path. No dead buttons, fake data, false empty
+   results, or pretend HDR/format support.
+7. Bound runtime work; queue heavy jobs outside watching; measure on the actual
+   device. TV D-pad focus must be deterministic and must restore predictably.
+8. Use generated or rights-cleared test media. Never commit private viewing
+   content, accounts, tokens, DUIDs, certificates, passwords or addresses.
+9. Document reproducible commands and results for unit, contract, integration and
+   physical-device checks. Do not label mock-only tests as device checks.
+10. A milestone is complete only with satisfied acceptance checks or an explicit
+    user-accepted exception. Report **Completed / Verified / Blocked / Next**
+    separately, with links to evidence.
 
-## Status format
+## Commands
 
-Give compact: **Completed / Verified / Blocked / Next**. Link evidence when available. When uncertain, state what failed or cannot yet be measured.
+```bash
+cargo test --workspace          # core + player + desktop logic tests
+cargo clippy --workspace --all-targets
+cargo fmt --all --check
+cargo run -p screenroom-player --example capability   # libmpv on this device
+cargo run -p screenroom-desktop                       # desktop shell
+```
 
 <!-- trail:start -->
 ## Trail — repo context graph

@@ -1,3 +1,5 @@
+> **Status: SUPERSEDED on 2026-10-26 by [`ADR-002_RUST_FIRST_STACK.md`](ADR-002_RUST_FIRST_STACK.md).** Flutter + Dart is now a recorded fallback only. This ADR is kept as the historical record of the previous decision; do not implement it.
+
 # ADR-001 — Screenroom's selected technology direction (2026-10-25)
 
 **Status: SELECTED architecture baseline, NOT physically benchmarked or proven.** This ADR overrides prior provisional Svelte/Tauri/.wgt-only claims in the 2026-10-24 and v1.1 planning package. **Screenroom** is the owner's final chosen name, not a backup. Project lives in **`~/Desktop/projects/screenroom`** on the owner's Mac. The package retains exactly **one first-party Git repository** for all platform applications, platform plugins, tests, assets, docs, build scripts and native bindings.

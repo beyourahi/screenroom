@@ -1,75 +1,141 @@
-> **2026-10-25 Screenroom decision supersedes outdated technology/name claims:** See [`ADR-001_SELECTED_STACK.md`](ADR-001_SELECTED_STACK.md) for the authoritative **Flutter + native platform media + SQLite** stack and `~/Desktop/projects/screenroom` path. Samsung 2021 officially supports Flutter `.tpk` apps; older “`.wgt` only” statements are WRONG and kept below only as historical proposal text. Dropout Design System remains the canonical visual spec, mapped to Flutter; its Svelte components cannot be used directly in Flutter. Windows/Tizen hardware performance and media features are NOT tested.
+# Feasibility gates
 
-# Feasibility gates — prove hardware before major implementation
+> **2026-10-26:** rewritten for the Rust-first architecture
+> ([ADR-002](ADR-002_RUST_FIRST_STACK.md)). Gates are per capability and per
+> device; a framework label never satisfies one.
 
-**2026-10-25 scope update:** treat the installed-app contract and Dropout DS compatibility as hard gates in addition to media/TV persistence. Installed `.wgt` on Samsung is a web-engine UI by official platform restriction, *not a website or an all-native executable*. `NATIVE_APP_STRATEGY.md` and `DROPOUT_DESIGN_INTEGRATION.md` define evidence gates for Tauri OS WebView overhead, Dropout private source adoption, M76 token/CSS compilation, D-pad focus, UI responsiveness, and offline packaged assets. If incompatible, document an alternative adapter or propose a justified platform-specific deviation **for explicit owner approval**; never silently ship a different UI.
+A gate is **PASSED** only with a first-hand receipt recorded in
+[`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md): command, device model,
+firmware/OS, package hash where relevant, and the observed behaviour. Otherwise it
+is **NOT RUN**, **IN PROGRESS** or **BLOCKED**. A compile, a unit test, a simulator,
+a browser tab or a mock never closes a gate.
 
-Status as of 2026-10-24: **all real-device tests NOT RUN**. Documentation-backed feasibility is not implementation proof. Gates use reproducible, rights-cleared sample media; do not automate network scans or test copyrighted titles without permission. Conduct in **single monorepo** when the user later starts Codex CLI development.
+Current summary:
 
-## G0 — Environment, sources and zero-cost prerequisites
+| Gate | State |
+| --- | --- |
+| G1 Rust workspace builds and tests on the dev host | **PASSED** (macOS ARM64) |
+| G2 libmpv client API (load, command, event, property) | **PASSED** (macOS ARM64, libmpv API 2.5) |
+| G3 libmpv frame presented through wgpu in an iced window | **IN PROGRESS** (bridge compiles; no frame presented) |
+| G4 Desktop playback quality on owner hardware | **BLOCKED** (no Windows hardware) |
+| G5 Samsung Tizen physical device | **BLOCKED** (device/SDK/signing unavailable) |
+| G6 LG webOS / other TV | **NOT RUN** |
+| G7 iOS UniFFI + AVPlayer | **NOT RUN** (no full Xcode) |
+| G8 Android UniFFI + Media3 | **NOT RUN** (no verified SDK setup) |
+| G9 Durability, interruption and low-storage behaviour | **NOT RUN** |
 
-**Inputs:** inspect actual current repo, Windows OS+CPU/GPU+ultrawide resolution/scaling/audio chain (no serial/IP), TV actual model/firmware and Tizen dev mode, usable FAT32/exFAT/NTFS USB media details if visible, realistic/legal test media, SDK availability, local free storage and certificates. Never presume the existing Mac is a Windows machine; execute Windows observations on Windows, and Samsung observations on the physical TV.
+---
 
-**Pass evidence:** machine info (non-sensitive), complete free toolchain paths/versions, TV signing/test-install method (no hidden paywall), codec fixture inventory and disk free space in an ignored local evidence report. On inaccessible hardware status **BLOCKED—not PASS**.
+## G1 — Toolchain and workspace
 
-## G1 — Windows native player + premium UI composition
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets
+cargo fmt --all --check
+```
 
-**Question:** can libmpv (or libVLC) provide genuine broad codec/audio/subtitle playback and controllable video surface with **Tauri 2 + shared Svelte UI** on actual Windows?
+Pass condition: all tests green, no first-party lint warnings, formatting clean.
+Recorded: 53 tests, 0 failures, 2026-10-26.
 
-**Experiment:** minimal isolated test client in same monorepo; use documented `libmpv` API with tested package provenance. Compare child-window/WID embedding and render-API approach for video under/alongside HTML overlay; try fullscreen, ultrawide sizing, DPI/monitor change, resizing, layered native controls, correct letterboxing, switching tracks, pause/seek/rate, power sleep/relaunch, hardware decode off/auto, HDR if supported by chain, long path/unicode/space filenames. Test 1080p H.264/AAC, 4K HEVC Main10 MKV/MP4, alternative audio and subtitle tracks; record actual media specs and observed CPU/GPU/memory. Test cancellation and release native resources.
+## G2 — libmpv client API
 
-**Pass:** reliable first frame and responsive controls with correct aspect, good overlays or an explicitly acceptable native-control alternative; seek/resume checkpoints are actionable with event timings; reproducible packaging/licensing plan; no crashes for basic/repeated open-close cycles.
+```bash
+cargo run -p screenroom-player --example capability
+cargo test -p screenroom-player --test libmpv_smoke -- --nocapture
+```
 
-**Fallback if fail:** compare libVLC; test a separate native player surface/window explicitly integrated into desktop shell; only then reconsider desktop framework. A webview `<video>`-only solution **does not** satisfy broad-format ambition without an accepted limitation.
+Pass condition: libmpv is found at runtime, a core is created and destroyed
+cleanly, a real file reaches `FILE_LOADED`, and a property read returns a plausible
+value.
 
-## G2 — Samsung developer install and actual USB to AVPlay
+This gate covers the *client API*. It says nothing about video output.
 
-**Question:** on `UA50AU8000RXER`, will a signed Tizen Web package reach USB files and play them through AVPlay?
+## G3 — The desktop presentation bridge
 
-**Experiment:** use genuine Tizen 6/M76-compatible static bundle, proper WebAPI script & privileges; sign with Samsung certificate and device authorization; install via the documented TV developer workflow, **not USB sideload**. Use `tizen.filesystem.listStorages`/`resolve`/read-only enumeration; record storage label, mount state, file URI without disclosing personal paths; create AVPlay `object`, call `open` with absolute local file URI, register listener, async prepare, set rect/letterbox, play/seek/pause/stop/close. Test H.264+AAC baseline, HEVC Main10, MKV, and intentionally unsupported DTS-only audio (expect truthful failure, not a crash). Never move or alter originals.
+The question: can a libmpv frame reach an iced window through wgpu at an
+acceptable rate with correct colour and aspect?
 
-**Pass:** on-screen real playback with audio, remote controls and correct aspect/size; USB removal/reconnect yields unavailable/recover state; developer logs and exact on-device version/codec matrix saved. Mock or emulator pass is **not** G2 pass.
+Steps:
+1. Software bridge: mpv `sw` renderer → RGBA buffer → wgpu texture upload in
+   `Primitive::prepare` → draw. Compile: **done**. Present a decoded frame:
+   **not yet**.
+2. Measure on this host at 1080p: CPU time per frame, dropped frames, memory.
+3. macOS: OpenGL render context → IOSurface/readback → wgpu. Evaluate only if the
+   software bridge cannot keep up or hardware decoding requires it.
+4. Windows: D3D11 texture → wgpu shared import. Required for 4K/HDR parity.
 
-**Fallback:** determine whether Samsung filesystem `toURI`, AVPlay absolute path, permissions, USB filesystem or developer build is failing. Diagnose without assuming API absence; if inherent limit, consider TV native player app-launch handoff (if actual supported) or approved optional computer conversion, and expose restriction. No always-on Windows computer server without new consent.
+Pass condition: ≥ 30 fps sustained on the target device with correct aspect, no
+tearing or colour inversion, and audio/video sync within a documented tolerance.
+Recorded measurement or BLOCKED. **Compiling is not passing.**
 
-## G3 — TV persistence and real offline artwork
+## G4 — Desktop playback quality (owner hardware)
 
-**Question:** what actually survives relaunch, TV power-off, device restart, **normal app update versus Tizen Studio development reinstall**, and USB disconnect on this TV?
+On the owner's Windows machine: hardware decode for H.264/HEVC/AV1 where the GPU
+supports it, MKV/MP4/M2TS containers, multiple audio tracks, internal and external
+subtitles, 10-bit and HDR signalling, 4K, ultrawide window behaviour, fullscreen and
+DPI changes, device switching mid-playback, and a 30-minute soak without leaks.
 
-**Experiment:** write versioned sample profile/progress and several locally generated poster binary assets to **app-private persistent storage**, not localStorage. Test `wgt-private` filesystem read/write privilege/storage size, quota, atomic-write/rename or safe journal equivalent; optionally benchmark IndexedDB support from M76 if useful. Simulate interrupted save, corrupt manifest, no free space, two profile states and 100/10,000 library records (sized realistically). Close app, unplug network, power-cycle, reopen. Test normal update semantics and **dev-reinstall erasure** as separately tracked scenarios; export a small backup to user-approved accessible location if feasible.
+Until that machine is available: **BLOCKED**. Do not infer it from macOS results.
 
-**Pass:** offline restart restores profiles/progress, actual decoded poster bytes and matches without network; no silent data reset. Document measured storage ceiling and migration/backup path. Samsung documents Web Storage only 5 MB, so a big `localStorage` JSON snapshot is an **automatic fail**.
+## G5 — Samsung Tizen (physical UA50AU8000RXER)
 
-**Fallback:** durable versioned file store in `wgt-private` rather than arbitrary SQLite/IndexedDB assumptions; external user-authorized backup where possible; constrain artwork quantity and display graceful missing-art fallback. A cloud backend cannot silently replace local persistence.
+1. `flutter`-era assumptions are void; verify the Tizen 6.0 web engine actually runs
+   a Lightning 3 bundle: WebGL available, frame pacing, canvas fallback not needed.
+2. Signed `.wgt` installs through the developer profile; certificate material stays
+   outside Git.
+3. USB/removable storage is enumerable and readable through the platform API, with
+   the TV's own permission prompt understood.
+4. AVPlay opens a local file, seeks, reports duration, and handles pause/resume.
+5. D-pad focus is reachable, visible at couch distance, and Back restores the
+   previous focus.
+6. Durable state and artwork bytes survive app restart and a TV power cycle.
+7. Document what a reinstall destroys, and that external backup is required.
 
-## G4 — TV remote, subtitles, lifecycle and performance
+Each numbered item is its own receipt. Guessing at any of them is prohibited.
 
-**Experiment:** deterministic D-pad navigation on deep rows/dialogs/virtualized lists, focus restoration, Back hierarchy, key repeats, on-screen keyboard return, seek/play media keys, remote-only source picker. Test subtitle track selection, local `.smi` and other documented types (do **not** presume arbitrary `.srt` compatibility in AVPlay), Bengali Unicode where possible, subtitle offset. Test app suspend/resume, failed media open/stop and a full evening-like sequence. Observe 10-foot text size/safe margins and input latency; use physical evidence.
+## G6 — Other TV platforms
 
-**Pass:** no mouse needed, no remote trap, durable progress and correct video/aspect, responsive UI within locally measured acceptable bounds; document unsupported tracks/codec cases and recovery options.
+LG webOS: packaged `.ipk`, native player, storage durability. Android TV/Google TV
+belongs to G8. Each additional platform gets its own row in the capability matrix
+and its own device receipt.
 
-## G5 — Offline enrichment provider and artwork retention
+## G7 — iOS
 
-**Question:** can an entirely free personal app legally retain actual third-party movie/TV data and artwork offline in the way the user requires?
+- UniFFI generates Swift bindings that compile in the app target.
+- The app grants access to files/folders and keeps the grant across launches.
+- AVPlayer plays a local file, resumes at the stored position, and honours
+  audio/subtitle selection where the OS supports it.
+- Backgrounding during playback checkpoints progress.
+- PiP (if claimed) uses the real OS PiP, not a fake overlay.
 
-**Experiment:** verify latest TMDB terms/FAQ plus any explicit caching/retention policy. Preserve URL/date and any written clarification obtained; test authorized metadata and actual image download with user-managed read token/credit; validate source attribution, artwork size, offline restart, rate limits, revocation and deletion/refresh mechanisms. If terms do not permit required persistence, explore an alternate legally compatible metadata/artwork source and **local poster/embedded media artwork fallback**. Don't scrape a provider to circumvent retention restrictions.
+## G8 — Android
 
-**Pass:** documented permission for exact selected storage/refresh model, **or** a transparent lawful source/local-artwork fallback that truly works offline; provider outage does not break viewing. Provider quota data is not a blanket promise.
+- UniFFI generates Kotlin bindings that compile with the JNA runtime packaged.
+- SAF tree grants are persisted and canonicalized; the core's root rules hold.
+- Media3 plays a local file; a foreground service keeps playback alive correctly.
+- TV variant: D-pad focus, leanback behaviour, and no touch-only affordance.
+- Scoped-storage edge cases (revoked grant, removed SD card) produce the truthful
+  availability states, not crashes.
 
-## G6 — Network source directory and permitted acquisition
+## G9 — Durability and interruption
 
-**Experiment (advanced, later):** for any user-confirmed lawful endpoint (including exact `https://cdn.dflix.live` if permissions allow), distinguish URL and protocol, connection scope (DOT/other ISP/VPN), page vs actual media response, login and legal automated-use permission. Validate one endpoint at a time by permission, no arbitrary scans/port enumeration or unauthorized torrent scraping. Preserve current network result/last checked timestamp; offer external bookmark if integration is unsupported.
+On each real device: kill the process during playback, cut power, unplug the media
+drive, fill the disk, revoke permission, and corrupt the database copy. Expected:
+the last bounded checkpoint survives, the library remains browsable, nothing is
+deleted, and the recovery path is offered. Proven per platform or BLOCKED.
 
-**Pass:** label each source VERIFIED/LOGIN_REQUIRED/NOT_REACHABLE/NOT_CHECKED, specific capabilities and provenance. Nationwide directory is never falsely asserted without sufficient coverage. This is **not required to deliver the local player**.
+---
 
-## Evidence record template
+## How to record a gate
 
-Each gate result in ignored `.artifacts/gates/Gx/` plus a redacted summary in `docs/DECISIONS_AND_RESEARCH.md`:
+Append to [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md):
 
-- Date + test operator/environment + actual model/OS and installed firmware + tool versions.
-- Exact sample specs (container, streams, profiles, resolution, fps, subtitle, duration, checksum); use generated/rights-cleared clips.
-- Steps/commands, logs (sanitized), screenshots/screen recording only if authorized.
-- Observed results vs expectations, latency/memory/resource numbers, failures and reproductions.
-- Outcome **PASS / FAIL / BLOCKED / CONDITIONAL**, actionable fallback, revisited ADR and next gate.
+```text
+G<number> <capability> — <device, OS/firmware, build hash>
+command or steps
+observed: <exact result, numbers where relevant>
+verdict: PASSED | FAILED | BLOCKED (reason)
+```
 
-**Stop/go rule:** Do not build a large shared UI or promise broad TV/Windows native playback before G1/G2 can at least demonstrate a real reliable vertical slice. Continue independent planning/testing if TV hardware blocked, but leave TV explicitly uncertified and avoid a release claim. G5 must be resolved before promising permanent third-party offline posters.
+Never edit a verdict upward without a new run. Never convert "compiles" into
+"works", "simulator" into "device", or "looks right" into "measured".

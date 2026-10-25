@@ -1,0 +1,71 @@
+# Local development snapshots and archived agent worktrees stay out of history.
+.worktrees/
+.artifacts/
+.lavish/
+.playwright-cli/
+tmp_screenshots/
+
+# Private proprietary Dropout Design System material stays local.
+/src/lib/ds/
+/vendor/dropout-design-system/
+**/design/dropout_tokens.g.dart
+
+# Rust
+/target/
+**/target/
+*.rs.bk
+
+# Node / Lightning TV client (added in a later milestone)
+node_modules/
+**/node_modules/
+.pnpm-store/
+dist/
+*.tsbuildinfo
+
+# OS / editors
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local databases, caches and user media never enter Git.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+/media/
+/user-media/
+/artwork-cache/
+/backups/
+*.mkv
+*.mp4
+*.m4v
+*.avi
+*.mov
+*.webm
+*.m2ts
+*.mp3
+*.flac
+
+# Credentials and signing material are never committed.
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.keystore
+*.jks
+*.pem
+*.key
+*.mobileprovision
+/certificates/
+/credentials/
+/secrets/
+
+# Keep lockfiles for reproducible builds.
+!Cargo.lock
+!**/Cargo.lock
+!package-lock.json
+!**/package-lock.json

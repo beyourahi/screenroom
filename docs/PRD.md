@@ -1,4 +1,4 @@
-> **2026-10-25 Screenroom decision supersedes outdated technology/name claims:** See [`ADR-001_SELECTED_STACK.md`](ADR-001_SELECTED_STACK.md) for the authoritative **Flutter + native platform media + SQLite** stack and `~/Desktop/projects/screenroom` path. Samsung 2021 officially supports Flutter `.tpk` apps; older “`.wgt` only” statements are WRONG and kept below only as historical proposal text. Dropout Design System remains the canonical visual spec, mapped to Flutter; its Svelte components cannot be used directly in Flutter. Windows/Tizen hardware performance and media features are NOT tested.
+> **SUPERSEDED STACK NOTICE (2026-10-26):** [`ADR-002_RUST_FIRST_STACK.md`](ADR-002_RUST_FIRST_STACK.md) is the authoritative architecture: shared Rust core, iced + wgpu + libmpv desktop, SwiftUI/AVPlayer iOS, Jetpack Compose/Media3 Android, LightningJS 3 + Blits TV, SQLite, FFmpeg/FFprobe, MIT first-party code, Flutter only as a recorded fallback. This document's product requirements, entities and evidence rules still apply; any Flutter-only or Svelte/Tauri stack statement inside it is history, not a requirement. No physical-device gate has passed -- see `IMPLEMENTATION_STATUS.md` for what is actually verified.
 
 # Local media application — Product Requirements Document (name TBD)
 
@@ -16,16 +16,16 @@ Version 1.0 planning revision · 2026-10-25 · **Not a completed implementation 
 
 ## 2. Priority audience, devices and operating model
 
-**New confirmed delivery rule (2026-10-25):** target platforms receive a real installable, on-device app: Windows desktop executable/installer; Samsung signed `.wgt` TV application; future Mac installed bundle and platform apps when prioritized. **No website, PWA, ordinary browser-tab application, required hosted service or required localhost web-server runtime.** A locally installed app is not synonymous with a purely native-rendered UI: current Tauri candidate uses OS WebView for Dropout/Svelte interface, and Samsung TV mandates a packaged web-engine UI. Both must use native media playback adapters wherever platform allows. See `NATIVE_APP_STRATEGY.md`.
+**Delivery rule (revised 2026-10-26):** every target platform receives a real installable, on-device app: Windows/Linux/macOS executables, iOS and Android apps, and signed TV packages (`.wgt` for Samsung, `.ipk` for webOS). **No website, PWA, ordinary browser-tab application, required hosted service or required localhost web-server runtime.** The UI stack is per platform (iced, SwiftUI, Compose, LightningJS 3 + Blits) and every UI uses the platform's native media engine, not a browser `<video>` element. Only the TV packages run inside the platform's web engine, which is stated plainly rather than called pure native UI. See [`ADR-002_RUST_FIRST_STACK.md`](ADR-002_RUST_FIRST_STACK.md) and [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 **Confirmed design-system rule (2026-10-25):** all first-party visuals derive from the private Dropout Studio Design System—black-first editorial foundations, canonical semantic tokens, components, iconography, accessibility, and motion rules. Screenroom prototype palette is explicitly superseded. The cinematic library/player layouts are domain compositions built on these foundations, adapted and tested for 10-foot TV and Windows ultrawide. See `DROPOUT_DESIGN_INTEGRATION.md`.
 
-**Naming:** Product name intentionally undecided. Screenroom retained only as backup; no final logo, icon, app ID, repository slug or trademark commitment until chosen (`NAMING.md`).
+**Naming:** finalized as **Screenroom** (2026-10-26). Logo/icon artwork, bundle IDs, app-store identity and trademark clearance remain release-gate work, not name decisions (`NAMING.md`).
 
 - Initially one owner, potentially multiple **local viewer profiles** per device; profiles are not authenticated accounts or parental controls.
 - **Primary**: owner's Windows PC with ultrawide monitor, frequently used for long viewing. Exact OS build/GPU/CPU/display/HDR chain unmeasured.
 - **Primary**: Samsung UA50AU8000RXER (2021 AU8000, 4K panel, Tizen 6.0 model-family baseline; firmware reference 2301.1 historical). Local USB on TV, not assumed to see PC drives. Remote-only operation is essential.
-- **Optional later**: MacBook Air M4, iPhone 15. Future Android/Linux/other TV brands are ambitions, not initial commitments or universal claims.
+- **Equal platform priority (2026-10-26):** Windows desktop, macOS, Linux, iOS, Android/Android TV and TV platforms all receive the same product priority. Availability of hardware or SDKs changes when a gate can be *proven*, never whether the platform is in scope. Owner devices currently available for acceptance: Windows ultrawide PC, Samsung UA50AU8000RXER, MacBook Air M4 (host), iPhone 15; other devices are gated by access, not by ambition.
 - Media remains separately stored on each device or attached disk; no automatic progress sync; no permanent NAS/LAN host assumed.
 
 ## 3. Jobs to be done / user journeys

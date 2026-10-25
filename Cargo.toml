@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = [
+  "apps/desktop",
+  "crates/screenroom-core",
+  "crates/screenroom-player",
+]
+# Historical prototype and archived Flutter worktrees are not part of the build.
+exclude = ["reference", ".worktrees"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Rahi Khan"]
+repository = "https://github.com/beyourahi/screenroom"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+regex = "1"
+rusqlite = { version = "0.41", features = ["bundled"] }
+tempfile = "3"
+
+[profile.release]
+panic = "abort"
+lto = "thin"

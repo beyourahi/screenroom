@@ -1,0 +1,15 @@
+[package]
+name = "screenroom-player"
+description = "Screenroom libmpv runtime boundary and player state machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+libloading = "0.9"
+
+[dev-dependencies]
+tempfile.workspace = true
