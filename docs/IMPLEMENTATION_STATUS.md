@@ -104,6 +104,41 @@ dropped before M3/M6 claims them:
 
 ---
 
+## M2 — Desktop playback slice
+
+**Status: host-verified for everything except on-screen presentation.**
+Everything below ran on this macOS host against libmpv 0.41 / client API 2.5.
+
+| Area | What exists | Verification |
+| --- | --- | --- |
+| Player worker (`screenroom-player/src/worker.rs`) | One thread owns libmpv; commands in, immutable `PlayerSnapshot` out; lifecycle mapped onto `PlayerState` | `tests/worker.rs` — 5 tests |
+| Software render bridge (`src/render.rs`) | mpv `sw` renderer → packed RGBA `Frame`, 64-byte aligned stride, bounded to 1920 px, opaque alpha repair | real frames asserted non-blank with colour; `target_size`/stride unit tests |
+| Seek / pause / resume-at-load | `seek`, `set_paused`, `load_at(path, Some(seconds))` | position moves after seek, holds while paused, resumes after load |
+| Failure states | `file_missing`, `load_failed`, `decode_failed`, `render_failed`, `seek_failed`, `pause_failed` with libmpv's own message | missing file test; end-file error path mapped |
+| Durable resume (`apps/desktop/src/playback.rs`) | Session open → throttled checkpoints → seek generations → close; finished media resumes from the start | `tests/playback.rs` — 5 tests, including one that decodes a real clip, checkpoints, reopens the SQLite library and gets the same position back |
+| Player screen (`apps/desktop/src/app.rs`) | Library list with progress, Back/Play-Pause/scrub/commit, resume label, failure text, Escape and Space keys | `clock` unit tests; open/refuse-to-open tests; iced compile |
+
+Totals after M2: **77 workspace tests, 0 failures**; `clippy --workspace --all-targets
+-- -D warnings` clean; `fmt --all --check` clean.
+
+### What M2 has **not** proven
+
+- **No frame has been seen in a window.** The shader primitive and WGSL shader
+  compile; the decoded frames are real. Upload-and-draw inside a running iced window
+  needs a human run (`cargo run -p screenroom-desktop`).
+- **Audio output** is initialised by libmpv but was not listened to.
+- **4K / hardware decode**: the software bridge is `hwdec=no` by design and capped
+  at 1920 px, so 4K smoothness is neither claimed nor measured.
+- **Windows**: nothing here ran on Windows, including the D3D11 path (unbuilt) and
+  the case-insensitive path folding.
+
+Two libmpv contract bugs were found and fixed while proving the above, and are
+worth remembering: `MPV_RENDER_PARAM_SW_POINTER` takes the pixel buffer address
+itself, and the render context must be freed before the mpv core or libmpv aborts
+the process.
+
+---
+
 ## Blocked gates
 
 | Gate | Status | Reason |
@@ -142,15 +177,14 @@ receipt.
 
 ## Next milestone
 
-**M2 — Desktop playback slice.** Sequence:
+**Finish M2, then M3.** Remaining M2 work:
 
-1. Player worker thread in `screenroom-player` (event loop, state transitions,
-   frame generation, seek/end/error mapping).
-2. Software render bridge wired to `video_surface.rs`; first real presented frame
-   on this host.
-3. Player screen with play/pause/seek/Back and truthful failure states.
-4. Resume: session → checkpoint → relaunch restores position with the network off.
-5. Record the new receipts here, then replace the M2 "next" status with evidence.
+1. Human run of the desktop app on this host: a real file plays with audio and
+   correct aspect in the window, seeks, and resumes after quitting and relaunching
+   with the network off. Record what was seen; a screenshot is optional and never a
+   substitute for the observation.
+2. Only then move the G3 gate from IN PROGRESS to PASSED (or record the failure and
+   fix it).
 
-Entry condition: none — M1 is complete. Everything M2 needs is present on this
-host (Rust toolchain, libmpv 0.41 / API 2.5, FFmpeg for synthetic media).
+Then M3 (desktop core UI and design-system mapping) as written in
+[`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).

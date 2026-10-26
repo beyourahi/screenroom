@@ -16,7 +16,7 @@ Current summary:
 | --- | --- |
 | G1 Rust workspace builds and tests on the dev host | **PASSED** (macOS ARM64) |
 | G2 libmpv client API (load, command, event, property) | **PASSED** (macOS ARM64, libmpv API 2.5) |
-| G3 libmpv frame presented through wgpu in an iced window | **IN PROGRESS** (bridge compiles; no frame presented) |
+| G3 libmpv frame presented through wgpu in an iced window | **IN PROGRESS** (real frames produced, seek/pause/end verified; not yet shown in a window) |
 | G4 Desktop playback quality on owner hardware | **BLOCKED** (no Windows hardware) |
 | G5 Samsung Tizen physical device | **BLOCKED** (device/SDK/signing unavailable) |
 | G6 LG webOS / other TV | **NOT RUN** |
@@ -35,7 +35,8 @@ cargo fmt --all --check
 ```
 
 Pass condition: all tests green, no first-party lint warnings, formatting clean.
-Recorded: 53 tests, 0 failures, 2026-10-26.
+Recorded: **77 tests, 0 failures**, `clippy -D warnings` clean, `fmt --check` clean
+(2026-10-26, after the M2 playback slice).
 
 ## G2 — libmpv client API
 
@@ -57,8 +58,16 @@ acceptable rate with correct colour and aspect?
 
 Steps:
 1. Software bridge: mpv `sw` renderer → RGBA buffer → wgpu texture upload in
-   `Primitive::prepare` → draw. Compile: **done**. Present a decoded frame:
-   **not yet**.
+   `Primitive::prepare` → draw.
+   * decode → correctly packed RGBA frame, with real pixels: **done**
+     (`crates/screenroom-player/tests/worker.rs`).
+   * upload → draw inside a running window: **not yet** — no automated check can
+     see the window, so this needs a human run of `cargo run -p screenroom-desktop`.
+
+   Two contract details found while proving this, both now encoded in the code:
+   `MPV_RENDER_PARAM_SW_POINTER` takes the surface address itself (a
+   pointer-to-pointer corrupts the caller's stack), and the render context must be
+   released *before* the mpv core or libmpv aborts.
 2. Measure on this host at 1080p: CPU time per frame, dropped frames, memory.
 3. macOS: OpenGL render context → IOSurface/readback → wgpu. Evaluate only if the
    software bridge cannot keep up or hardware decoding requires it.

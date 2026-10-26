@@ -17,8 +17,6 @@
 //! The OpenGL (macOS) and D3D11 (Windows) zero-copy paths slot in behind
 //! [`FrameSource`] without touching the widget or the shader.
 
-use std::sync::Arc;
-
 use iced::widget::shader::{self, Primitive, Program};
 use iced::{Rectangle, mouse};
 
@@ -39,25 +37,8 @@ pub fn fit_factors(source_width: u32, source_height: u32, target: Rectangle) -> 
     }
 }
 
-/// One decoded frame in tightly packed RGBA8.
-#[derive(Debug, Clone)]
-pub struct Frame {
-    /// Frame width in pixels.
-    pub width: u32,
-    /// Frame height in pixels.
-    pub height: u32,
-    /// RGBA bytes, `width * height * 4` long.
-    pub rgba: Arc<Vec<u8>>,
-    /// Monotonic frame number, used to skip redundant uploads.
-    pub generation: u64,
-}
-
-impl Frame {
-    /// True when the buffer length matches the declared size.
-    pub fn is_well_formed(&self) -> bool {
-        self.rgba.len() == self.width as usize * self.height as usize * 4
-    }
-}
+/// Frames come from the player crate so both sides share one definition.
+pub use screenroom_player::Frame;
 
 /// A widget that draws the current video frame, or nothing when there is none.
 #[derive(Debug, Clone, Default)]
@@ -78,7 +59,7 @@ pub struct VideoPrimitive {
     bounds: Rectangle,
 }
 
-impl Program<super::Message> for VideoSurface {
+impl Program<crate::app::Message> for VideoSurface {
     type State = ();
     type Primitive = VideoPrimitive;
 
@@ -412,20 +393,15 @@ mod tests {
     }
 
     #[test]
-    fn frame_checks_its_buffer_length() {
-        let good = Frame {
+    fn a_frame_from_the_player_is_accepted_by_the_surface() {
+        let frame = Frame {
             width: 2,
             height: 2,
-            rgba: Arc::new(vec![0; 16]),
-            generation: 1,
+            rgba: std::sync::Arc::new(vec![7; 16]),
+            generation: 3,
         };
-        assert!(good.is_well_formed());
-        let short = Frame {
-            width: 2,
-            height: 2,
-            rgba: Arc::new(vec![0; 15]),
-            generation: 1,
-        };
-        assert!(!short.is_well_formed());
+        assert!(frame.is_well_formed());
+        let surface = VideoSurface::new(Some(frame));
+        assert!(surface.frame.is_some());
     }
 }

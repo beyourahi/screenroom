@@ -18,7 +18,7 @@
 | Filename/NFO matching (F04) | core (filename only) | — | — | — | — | — |
 | Whole-library enrichment (F05) | — | — | — | — | — | — |
 | Offline artwork bytes (F06) | — | — | — | — | — | — |
-| Player (F07) | state machine | bridge compiles | — | — | — | — |
+| Player (F07) | state machine | host (decode, seek, pause, resume; on-screen presentation unverified) | — | — | — | — |
 | Profiles and progress (F08) | core | — | — | — | — | — |
 | Home/Continue Watching (F09) | core query | — | — | — | — | — |
 | Next episode rule (F10) | core | — | — | — | — | — |

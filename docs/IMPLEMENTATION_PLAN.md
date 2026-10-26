@@ -61,9 +61,14 @@ the SQLite layout opens a library written by the previous candidate.
 
 ---
 
-## M2 — Desktop playback slice (next)
+## M2 — Desktop playback slice ⏳ implemented, window run pending
 
 **Goal:** one real file plays in the desktop app and resumes after a restart.
+
+**State 2026-10-26:** contents 1–5 are implemented and host-tested (see
+[`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md#m2--desktop-playback-slice)).
+What is missing is the human observation that a frame reaches the window; until
+that happens this milestone is not done and gate G3 stays IN PROGRESS.
 
 **Depends on** M1.
 

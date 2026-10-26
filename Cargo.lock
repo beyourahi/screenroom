@@ -2621,6 +2621,7 @@ dependencies = [
  "iced",
  "screenroom-core",
  "screenroom-player",
+ "tempfile",
  "wgpu",
 ]
 

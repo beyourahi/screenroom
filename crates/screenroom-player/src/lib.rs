@@ -31,6 +31,13 @@ use std::sync::Arc;
 
 use libloading::Library;
 
+mod frame;
+mod render;
+mod worker;
+
+pub use frame::Frame;
+pub use worker::{Player, PlayerCommand, PlayerFailure, PlayerSnapshot};
+
 /// Default timeout for waiting on a libmpv event, in seconds.
 pub const DEFAULT_EVENT_TIMEOUT: f64 = 5.0;
 
@@ -114,16 +121,32 @@ fn candidates() -> &'static [&'static str] {
     }
 }
 
-type MpvHandle = *mut c_void;
+pub(crate) type MpvHandle = *mut c_void;
 
 /// An `mpv_event` as laid out by `client.h`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct RawEvent {
-    event_id: c_int,
-    error: c_int,
-    reply_userdata: u64,
-    data: *mut c_void,
+pub(crate) struct RawEvent {
+    pub(crate) event_id: c_int,
+    pub(crate) error: c_int,
+    pub(crate) reply_userdata: u64,
+    pub(crate) data: *mut c_void,
+}
+
+/// The libmpv render API (`mpv/render.h`).
+///
+/// Kept optional: a build without the render API can still be detected and
+/// reported instead of crashing at start-up. The parameter arrays are passed
+/// type-erased (`*mut c_void`) because their exact C layout lives in
+/// [`render`], the only module allowed to construct them.
+#[derive(Clone, Copy)]
+pub(crate) struct RenderSymbols {
+    create: unsafe extern "C" fn(*mut *mut c_void, MpvHandle, *mut c_void) -> c_int,
+    free: unsafe extern "C" fn(*mut c_void),
+    render: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int,
+    update: unsafe extern "C" fn(*mut c_void) -> u64,
+    set_update_callback:
+        unsafe extern "C" fn(*mut c_void, Option<unsafe extern "C" fn(*mut c_void)>, *mut c_void),
 }
 
 type FnCreate = unsafe extern "C" fn() -> MpvHandle;
@@ -135,6 +158,7 @@ type FnGetProperty = unsafe extern "C" fn(MpvHandle, *const c_char, c_int, *mut 
 type FnErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
 type FnWaitEvent = unsafe extern "C" fn(MpvHandle, f64) -> *mut RawEvent;
 type FnClientApiVersion = unsafe extern "C" fn() -> u64;
+type FnObserveProperty = unsafe extern "C" fn(MpvHandle, u64, *const c_char, c_int) -> c_int;
 
 struct Symbols {
     create: FnCreate,
@@ -146,6 +170,8 @@ struct Symbols {
     error_string: FnErrorString,
     wait_event: FnWaitEvent,
     client_api_version: FnClientApiVersion,
+    observe_property: FnObserveProperty,
+    render: Option<RenderSymbols>,
 }
 
 /// A loaded libmpv shared library.
@@ -215,6 +241,10 @@ impl LibMpv {
                 client_api_version: *library
                     .get(b"mpv_client_api_version\0")
                     .map_err(|error| missing(path, "mpv_client_api_version", error))?,
+                observe_property: *library
+                    .get(b"mpv_observe_property\0")
+                    .map_err(|error| missing(path, "mpv_observe_property", error))?,
+                render: render_symbols(&library),
             };
             Ok(Self {
                 path: path.display().to_string(),
@@ -235,7 +265,12 @@ impl LibMpv {
         &self.path
     }
 
-    fn message(&self, code: c_int) -> String {
+    /// The render API, when this libmpv exports it.
+    pub(crate) fn render_symbols(&self) -> Option<RenderSymbols> {
+        self.symbols.render
+    }
+
+    pub(crate) fn message(&self, code: c_int) -> String {
         unsafe {
             let pointer = (self.symbols.error_string)(code);
             if pointer.is_null() {
@@ -244,6 +279,21 @@ impl LibMpv {
                 CStr::from_ptr(pointer).to_string_lossy().to_string()
             }
         }
+    }
+}
+
+/// Resolves the render API, which a minimal libmpv build may not export.
+fn render_symbols(library: &Library) -> Option<RenderSymbols> {
+    unsafe {
+        Some(RenderSymbols {
+            create: *library.get(b"mpv_render_context_create\0").ok()?,
+            free: *library.get(b"mpv_render_context_free\0").ok()?,
+            render: *library.get(b"mpv_render_context_render\0").ok()?,
+            update: *library.get(b"mpv_render_context_update\0").ok()?,
+            set_update_callback: *library
+                .get(b"mpv_render_context_set_update_callback\0")
+                .ok()?,
+        })
     }
 }
 
@@ -307,8 +357,19 @@ impl Drop for Mpv {
 }
 
 impl Mpv {
-    /// Creates and initialises one libmpv core.
+    /// Creates and initialises one libmpv core with no options set.
     pub fn new(library: &Arc<LibMpv>) -> Result<Self, PlayerError> {
+        Self::new_with_options(library, &[])
+    }
+
+    /// Creates a core and applies `options` before initialisation.
+    ///
+    /// libmpv only accepts options before `mpv_initialize`, which is why the
+    /// whole set is passed here rather than applied afterwards.
+    pub fn new_with_options(
+        library: &Arc<LibMpv>,
+        options: &[(&str, &str)],
+    ) -> Result<Self, PlayerError> {
         let handle = unsafe { (library.symbols.create)() };
         let handle = NonNull::new(handle)
             .ok_or_else(|| PlayerError::Unavailable("mpv_create returned null".into()))?;
@@ -316,9 +377,74 @@ impl Mpv {
             handle,
             library: Arc::clone(library),
         };
+        for (name, value) in options {
+            core.set_option(name, value)?;
+        }
         let code = unsafe { (library.symbols.initialize)(handle.as_ptr()) };
         core.check(code, "mpv_initialize")?;
         Ok(core)
+    }
+
+    /// The loaded library, for the render context and error strings.
+    pub(crate) fn library(&self) -> &Arc<LibMpv> {
+        &self.library
+    }
+
+    /// The raw `mpv_handle`, for the render API only.
+    pub(crate) fn raw_handle(&self) -> MpvHandle {
+        self.handle.as_ptr()
+    }
+
+    /// Watches a property, delivering changes with `userdata` as `reply_userdata`.
+    pub fn observe(&self, name: &str, format: i32, userdata: u64) -> Result<(), PlayerError> {
+        let name = to_cstring(name)?;
+        let code = unsafe {
+            (self.library.symbols.observe_property)(
+                self.handle.as_ptr(),
+                userdata,
+                name.as_ptr(),
+                format,
+            )
+        };
+        self.check(
+            code,
+            &format!("mpv_observe_property({})", name.to_string_lossy()),
+        )
+    }
+
+    /// Reads an integer property such as `width`.
+    pub fn get_i64(&self, name: &str) -> Result<i64, PlayerError> {
+        let name = to_cstring(name)?;
+        let mut value: i64 = 0;
+        let code = unsafe {
+            (self.library.symbols.get_property)(
+                self.handle.as_ptr(),
+                name.as_ptr(),
+                4, // MPV_FORMAT_INT64
+                (&mut value as *mut i64).cast(),
+            )
+        };
+        self.check(
+            code,
+            &format!("mpv_get_property({})", name.to_string_lossy()),
+        )?;
+        Ok(value)
+    }
+
+    /// Blocks for the next event and returns it, or `None` on timeout.
+    pub(crate) fn wait_event_raw(&self, timeout_seconds: f64) -> Option<RawEvent> {
+        let event =
+            unsafe { (self.library.symbols.wait_event)(self.handle.as_ptr(), timeout_seconds) };
+        if event.is_null() {
+            return None;
+        }
+        // Safety: libmpv owns the event for the duration of the next call, so it
+        // is copied out immediately.
+        let event = unsafe { *event };
+        if event.event_id == event::NONE {
+            return None;
+        }
+        Some(event)
     }
 
     fn check(&self, code: c_int, context: &str) -> Result<(), PlayerError> {
@@ -416,6 +542,8 @@ pub mod event {
     pub const END_FILE: i32 = 7;
     /// The file was opened and its streams are known.
     pub const FILE_LOADED: i32 = 8;
+    /// An observed property changed.
+    pub const PROPERTY_CHANGE: i32 = 22;
 }
 
 /// Playback lifecycle shared by every platform adapter.
