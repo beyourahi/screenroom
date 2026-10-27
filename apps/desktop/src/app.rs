@@ -64,6 +64,10 @@ pub fn run() -> iced::Result {
         .theme(App::theme)
         .subscription(App::subscription)
         .window_size((1280.0, 800.0))
+        // Closing the window is not the same as the process ending: the app has to
+        // be given the chance to store the position it is at and close the viewing
+        // session before it goes away, which `exit_on_close_request` would skip.
+        .exit_on_close_request(false)
         .run()
 }
 
@@ -819,27 +823,15 @@ impl App {
 
     /// Stores progress and closes the session, then returns to the library.
     fn leave_player(&mut self) {
-        let snapshot = self.player.as_ref().map(|player| player.snapshot());
         let origin = self
             .active
             .as_ref()
             .map(|active| active.origin)
             .unwrap_or(Screen::Browse);
-        if let (Some(snapshot), Some(mut active)) = (snapshot, self.active.take()) {
-            // The final position is stored before the session closes, so leaving
-            // during playback never loses more than the checkpoint interval.
-            self.save(&mut active, &snapshot, snapshot.ended);
-            if let Err(error) = active.tracker.close(&self.library) {
-                self.report(&error);
-            }
-        }
-        if let Some(player) = &self.player {
-            player.stop();
-        }
+        // The final position is stored before the session closes, so leaving
+        // during playback never loses more than the checkpoint interval.
+        self.stop_playback();
         self.screen = origin;
-        self.frame = None;
-        self.snapshot = PlayerSnapshot::default();
-        self.scrub = None;
         self.reload();
         self.refresh_detail();
     }
@@ -857,6 +849,18 @@ impl App {
     }
 
     // -------------------------------------------------------------- playback
+
+    /// A player snapshot mid-file, for tests that need one without libmpv.
+    #[cfg(test)]
+    fn playing_snapshot(position: f64, duration: f64) -> PlayerSnapshot {
+        PlayerSnapshot {
+            state: screenroom_player::PlayerState::Playing,
+            position,
+            duration,
+            loaded: true,
+            ..PlayerSnapshot::default()
+        }
+    }
 
     /// Writes one checkpoint, reporting failures instead of hiding them.
     fn save(&mut self, active: &mut Active, snapshot: &PlayerSnapshot, ended: bool) {
@@ -927,6 +931,32 @@ impl App {
         if let (Some(origin), Some(active)) = (origin, self.active.as_mut()) {
             active.origin = origin;
         }
+    }
+
+    /// Ends any viewing in progress: final position saved, session closed.
+    ///
+    /// Used both when the window closes and when the app quits, so the two paths
+    /// cannot disagree about what happens to an open file.
+    fn stop_playback(&mut self) {
+        // The player's own snapshot is the newest truth; the held one is the
+        // fallback, and is what makes this path testable without a player.
+        let snapshot = self
+            .player
+            .as_ref()
+            .map(|player| player.snapshot())
+            .unwrap_or_else(|| self.snapshot.clone());
+        if let Some(mut active) = self.active.take() {
+            self.save(&mut active, &snapshot, snapshot.ended);
+            if let Err(error) = active.tracker.close(&self.library) {
+                self.report(&error);
+            }
+        }
+        if let Some(player) = &self.player {
+            player.stop();
+        }
+        self.frame = None;
+        self.scrub = None;
+        self.snapshot = PlayerSnapshot::default();
     }
 
     /// Saves and closes the current viewing, stops the player, clears its state.
@@ -1645,7 +1675,15 @@ impl App {
             }
             Message::Tick => self.poll(),
             Message::Keyboard(event) => self.handle_key(event),
-            Message::Close => return iced::exit(),
+            Message::Close => {
+                // Quitting while a file is open would otherwise leave the session
+                // row `active`: the last periodic checkpoint is within a second of
+                // the truth, but a session nobody can still write to is a lie the
+                // next launch has to clean up. Stopping the player first also
+                // releases the audio device before the process goes away.
+                self.stop_playback();
+                return iced::exit();
+            }
         }
         Task::none()
     }
@@ -1828,7 +1866,13 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let mut subscriptions = vec![iced::keyboard::listen().map(Message::Keyboard)];
+        let mut subscriptions = vec![
+            iced::keyboard::listen().map(Message::Keyboard),
+            // Routed through the same Close handling as the header button, so the
+            // window's close box and that button cannot disagree about whether the
+            // open file was stored.
+            iced::window::close_requests().map(|_| Message::Close),
+        ];
         let interval = if self.screen == Screen::Player {
             PLAYER_TICK
         } else {
@@ -2603,7 +2647,11 @@ impl App {
                     row![
                         pick_list(choices, chosen, |choice: SourceChoice| {
                             Message::RelinkTargetChosen(choice.id)
-                        }),
+                        })
+                        // Without a placeholder the control is blank until a folder
+                        // is chosen, which reads as a broken control rather than
+                        // as one waiting for a choice.
+                        .placeholder("Choose a folder"),
                         text_input("New location, for example /Volumes/Media", &self.relink_path)
                             .on_input(Message::RelinkPathChanged)
                             .on_submit(Message::RelinkSource)
@@ -2760,42 +2808,60 @@ impl App {
         ]
         .spacing(tokens.spacing.field_x)
         .align_y(Alignment::Center);
-
         let (audio_choices, audio_selected) = self.track_chooser(TrackKind::Audio);
         let (subtitle_choices, subtitle_selected) = self.track_chooser(TrackKind::Subtitle);
-        let track_row: Element<'_, Message> = if audio_choices.is_empty()
-            && subtitle_choices.is_empty()
-        {
+        // A picker with nothing to pick is a dead control, so each kind renders
+        // as a chooser only when the player actually reported tracks of it. The
+        // other kind says so in words instead of showing an inert dropdown.
+        let reported_any = !audio_choices.is_empty() || !subtitle_choices.is_empty();
+        let mut track_row: iced::widget::Row<'_, Message> = row![]
+            .spacing(tokens.spacing.field_x)
+            .align_y(Alignment::Center);
+        for (label, choices, selected, kind) in [
+            ("Audio", audio_choices, audio_selected, TrackKind::Audio),
+            (
+                "Subtitles",
+                subtitle_choices,
+                subtitle_selected,
+                TrackKind::Subtitle,
+            ),
+        ] {
+            track_row = track_row.push(
+                text(label)
+                    .size(tokens.type_scale.micro)
+                    .color(tokens.palette.ink_muted),
+            );
+            track_row = if choices.is_empty() {
+                track_row.push(
+                    text("none in this file")
+                        .size(tokens.type_scale.micro)
+                        .color(tokens.palette.disabled_foreground),
+                )
+            } else {
+                track_row.push(
+                    pick_list(choices, selected, move |choice: TrackChoice| {
+                        Message::SelectTrack(kind, choice.id)
+                    })
+                    .placeholder(label),
+                )
+            };
+        }
+        let track_row: Element<'_, Message> = if !reported_any {
             text("The player reported no selectable audio or subtitle tracks for this file.")
                 .size(tokens.type_scale.micro)
                 .color(tokens.palette.ink_muted)
                 .into()
         } else {
-            row![
-                text("Audio")
-                    .size(tokens.type_scale.micro)
-                    .color(tokens.palette.ink_muted),
-                pick_list(audio_choices, audio_selected, |choice: TrackChoice| {
-                    Message::SelectTrack(TrackKind::Audio, choice.id)
-                }),
-                text("Subtitles")
-                    .size(tokens.type_scale.micro)
-                    .color(tokens.palette.ink_muted),
-                pick_list(
-                    subtitle_choices,
-                    subtitle_selected,
-                    |choice: TrackChoice| { Message::SelectTrack(TrackKind::Subtitle, choice.id) }
-                ),
-            ]
-            .spacing(tokens.spacing.field_x)
-            .align_y(Alignment::Center)
-            .into()
+            track_row.into()
         };
 
         let resume = self
             .active
             .as_ref()
-            .filter(|active| active.resume_from_ms > 0)
+            // The stored position no longer describes anything once the file has
+            // finished, so the line is dropped rather than left claiming a resume
+            // beside an Ended player.
+            .filter(|active| active.resume_from_ms > 0 && !self.snapshot.ended)
             .map(|active| {
                 text(format!(
                     "resumed from {}",
@@ -3389,6 +3455,33 @@ mod tests {
         assert_eq!(selected.map(|choice| choice.id), Some(1));
         assert!(audio[0].label.contains("English 5.1"));
 
+        // A kind the player reported nothing for yields no options, so the view
+        // renders a statement rather than an inert dropdown.
+        app.snapshot
+            .tracks
+            .retain(|track| track.kind != TrackKind::Subtitle);
+        assert!(app.track_chooser(TrackKind::Subtitle).0.is_empty());
+        app.snapshot.tracks = vec![
+            MediaTrack {
+                id: 1,
+                kind: TrackKind::Audio,
+                title: Some("English 5.1".to_string()),
+                language: Some("en".to_string()),
+                codec: Some("aac".to_string()),
+                selected: true,
+                external: false,
+            },
+            MediaTrack {
+                id: 2,
+                kind: TrackKind::Subtitle,
+                title: None,
+                language: Some("fr".to_string()),
+                codec: Some("subrip".to_string()),
+                selected: false,
+                external: false,
+            },
+        ];
+
         let (subtitles, selected) = app.track_chooser(TrackKind::Subtitle);
         assert_eq!(
             subtitles.len(),
@@ -3663,6 +3756,46 @@ mod tests {
         assert!(!app.sources.is_empty());
         app.back();
         assert_eq!(app.screen, Screen::Home);
+    }
+
+    #[test]
+    fn quitting_with_a_file_open_saves_the_final_position() {
+        let (mut app, _directory) = app_with(1);
+        let item = app.browse.items[0].clone();
+        // A session opened exactly as playback opens one, without starting libmpv:
+        // the quit path's job is to close whatever is open and store where it got
+        // to, which is testable on its own.
+        let opened =
+            PlaybackTracker::open(&app.library, &app.profile_id, &item.id).expect("a session");
+        app.active = Some(Active {
+            tracker: opened.tracker,
+            file_id: item.id.clone(),
+            title: item.title.clone(),
+            resume_from_ms: opened.resume_from_ms,
+            origin: Screen::Browse,
+        });
+        app.snapshot = App::playing_snapshot(42.5, 100.0);
+
+        app.stop_playback();
+
+        assert!(app.active.is_none(), "quitting ends the viewing");
+        assert_eq!(
+            app.snapshot.position, 0.0,
+            "and clears the player state it was showing"
+        );
+        let watching = app
+            .library
+            .continue_watching(&app.profile_id, 5)
+            .expect("continue watching");
+        assert_eq!(watching.len(), 1, "the viewing is offered to resume");
+        assert_eq!(
+            watching[0].position_ms, 42_500,
+            "the position at quit is what was stored, to the tenth of a second"
+        );
+        // And a later viewing resumes from there rather than from the start.
+        let reopened =
+            PlaybackTracker::open(&app.library, &app.profile_id, &item.id).expect("a new session");
+        assert_eq!(reopened.resume_from_ms, 42_500);
     }
 
     #[test]

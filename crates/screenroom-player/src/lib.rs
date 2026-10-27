@@ -25,7 +25,7 @@
 //! deliberately does not wrap the render context yet.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
@@ -123,6 +123,36 @@ fn candidates() -> &'static [&'static str] {
     }
 }
 
+/// libmpv inside a packaged application bundle, tried after the system paths.
+///
+/// A `.app` must not assume the user has Homebrew, so the bundle can carry its own
+/// libmpv in `Contents/Frameworks`. `dlopen` does not search there for a bare
+/// name, and setting `DYLD_LIBRARY_PATH` from inside the process is not an option
+/// on a signed application, so the path is built from the running executable's own
+/// location instead. That also means the bundle works wherever the user puts it.
+#[cfg(target_os = "macos")]
+fn packaged_candidates() -> Vec<PathBuf> {
+    let Ok(executable) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    // `Contents/MacOS/Screenroom` -> `Contents`.
+    let Some(contents) = executable.parent().and_then(Path::parent) else {
+        return Vec::new();
+    };
+    let beside = executable.parent().unwrap_or(contents);
+    let names = ["libmpv.2.dylib", "libmpv.dylib"];
+    names
+        .iter()
+        .flat_map(|name| [contents.join("Frameworks").join(name), beside.join(name)])
+        .collect()
+}
+
+/// No bundled-library search on platforms that load it from the system.
+#[cfg(not(target_os = "macos"))]
+fn packaged_candidates() -> Vec<PathBuf> {
+    Vec::new()
+}
+
 pub(crate) type MpvHandle = *mut c_void;
 
 /// An `mpv_event` as laid out by `client.h`.
@@ -206,6 +236,14 @@ impl LibMpv {
             match Self::load_path(candidate) {
                 Ok(library) => return Ok(Arc::new(library)),
                 Err(error) => attempted.push(format!("{candidate} ({error})")),
+            }
+        }
+        // Only reached when nothing on the system path resolved, so a development
+        // machine's libmpv is still preferred over a bundle's older copy.
+        for candidate in packaged_candidates() {
+            match Self::load_path(&candidate) {
+                Ok(library) => return Ok(Arc::new(library)),
+                Err(error) => attempted.push(format!("{} ({error})", candidate.display())),
             }
         }
         Err(PlayerError::Unavailable(format!(
