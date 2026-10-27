@@ -3,7 +3,7 @@
 use std::fs;
 
 use screenroom_core::{
-    Ingest, Library, LibraryQuery, MediaKind, Sort, SourceState, parse_filename,
+    Ingest, Library, LibraryQuery, MediaKind, PathSemantics, Sort, SourceState, parse_filename,
 };
 use tempfile::TempDir;
 
@@ -56,6 +56,139 @@ fn overlapping_roots_are_rejected() {
     fs::create_dir(&nested).unwrap();
     let error = library.add_source(&nested, None).unwrap_err();
     assert_eq!(error.code(), "duplicate_source");
+}
+
+#[test]
+fn a_folder_cannot_be_granted_twice_under_two_spellings() {
+    // On a case-folding volume `/Media/Shows` and `/media/shows` are one folder, so
+    // granting both would import one tree twice under two labels and show every file
+    // twice. This is the Windows behaviour, and it is the default on macOS too —
+    // which is why the case-sensitive branch below is the unusual one, not this.
+    let dir = TempDir::new().expect("temp dir");
+    let parent = dir.path().join("Media");
+    let shows = parent.join("Shows");
+    fs::create_dir_all(&shows).unwrap();
+
+    let library = Library::open_in_memory()
+        .expect("library")
+        .with_path_semantics(PathSemantics::CaseInsensitive);
+    library.add_source(&shows, None).expect("first grant");
+
+    // The same folder, spelled differently. `canonicalize` does not fold case, so a
+    // case-sensitive comparison would accept this as a new source.
+    let respelled = parent.join("shows");
+    if respelled.exists() {
+        let error = library.add_source(&respelled, None).unwrap_err();
+        assert_eq!(error.code(), "duplicate_source");
+    }
+
+    // And a genuinely nested folder is still refused: folding must not break the
+    // existing containment check.
+    let nested = shows.join("Season 1");
+    fs::create_dir_all(&nested).unwrap();
+    assert_eq!(
+        library.add_source(&nested, None).unwrap_err().code(),
+        "duplicate_source"
+    );
+    assert_eq!(library.sources().unwrap().len(), 1);
+}
+
+#[test]
+fn a_case_sensitive_volume_treats_two_spellings_as_two_folders() {
+    // The other half of the same decision, and the half that could not previously be
+    // run at all on a Mac: the case-sensitive branch is chosen by volume, not by
+    // operating system, so the semantics are injectable and both branches are tested
+    // from one host.
+    let dir = TempDir::new().expect("temp dir");
+    let media = dir.path().join("Media");
+    let shows = media.join("Shows");
+    fs::create_dir_all(&shows).unwrap();
+
+    let library = Library::open_in_memory()
+        .expect("library")
+        .with_path_semantics(PathSemantics::CaseSensitive);
+    library.add_source(&shows, None).expect("first grant");
+
+    // Whether two differently-cased folders can be granted at all is decided by the
+    // volume, not by this library's semantics: on a case-folding volume `SHOWS`
+    // resolves to `Shows` and the second grant is the same folder. Asking the file
+    // system which volume this is keeps the test truthful instead of asserting
+    // behaviour that only a case-sensitive volume can show.
+    let other = media.join("SHOWS");
+    let volume_folds_case =
+        other.exists() && std::fs::canonicalize(&other).ok() == std::fs::canonicalize(&shows).ok();
+
+    if volume_folds_case {
+        // This volume folds case, so the case-sensitive branch cannot be reached
+        // through the file system here, and the test says so rather than asserting
+        // behaviour only a case-sensitive volume can show. What *is* checked is the
+        // part that does not need one: `add_source` canonicalises before keying, and
+        // on a folding volume both spellings canonicalise to the same real name, so
+        // the grant is refused by containment rather than by case.
+        let resolved = std::fs::canonicalize(&other).expect("the volume resolves both spellings");
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&shows).expect("canonical"),
+            "a folding volume must resolve two spellings to one directory"
+        );
+        assert_eq!(
+            library.path_key(&resolved),
+            library.path_key(&std::fs::canonicalize(&shows).expect("canonical")),
+            "one directory must produce one key"
+        );
+    } else {
+        assert!(
+            library.add_source(&other, None).is_ok(),
+            "a case-sensitive volume must allow two differently-cased folders"
+        );
+        assert_eq!(library.sources().unwrap().len(), 2);
+    }
+
+    // Containment is still refused, because that comparison does not depend on case.
+    let nested = shows.join("Season 1");
+    fs::create_dir_all(&nested).unwrap();
+    assert_eq!(
+        library.add_source(&nested, None).unwrap_err().code(),
+        "duplicate_source"
+    );
+}
+
+#[test]
+fn the_default_semantics_follow_the_volume_this_library_is_on() {
+    // A guess, but a checked one: the default must agree with what the platform's
+    // usual file system does, and the two branches must be the only two options.
+    let expected = if cfg!(any(windows, target_vendor = "apple")) {
+        PathSemantics::CaseInsensitive
+    } else {
+        PathSemantics::CaseSensitive
+    };
+    assert_eq!(PathSemantics::host(), expected);
+
+    let default = Library::open_in_memory().unwrap();
+    let explicit = Library::open_in_memory()
+        .unwrap()
+        .with_path_semantics(expected);
+    assert_eq!(
+        default.path_key(std::path::Path::new("/Media/Shows")),
+        explicit.path_key(std::path::Path::new("/Media/Shows")),
+    );
+}
+
+#[test]
+fn path_keys_fold_only_when_they_are_supposed_to() {
+    let path = std::path::Path::new("/Media/Shows");
+    let folding = Library::open_in_memory()
+        .unwrap()
+        .with_path_semantics(PathSemantics::CaseInsensitive)
+        .path_key(path);
+    let exact = Library::open_in_memory()
+        .unwrap()
+        .with_path_semantics(PathSemantics::CaseSensitive)
+        .path_key(path);
+
+    assert_eq!(folding, "/media/shows");
+    assert_eq!(exact, "/Media/Shows");
+    assert_ne!(folding, exact);
 }
 
 #[test]

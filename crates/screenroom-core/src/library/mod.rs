@@ -106,10 +106,41 @@ impl LibraryQuery {
 }
 
 /// A single SQLite library.
+/// How the folder holding the library compares the case of a path.
+///
+/// This decides one thing only: whether two roots that differ just in case are the
+/// same folder. It is a property of the file system, not of the operating system,
+/// which is why it is a value rather than a `cfg!` — a case-sensitive APFS or NTFS
+/// volume exists, and so does a case-insensitive one on Linux.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathSemantics {
+    /// `Shows` and `shows` are the same folder. Windows and the default macOS and
+    /// iOS volumes behave this way.
+    CaseInsensitive,
+    /// `Shows` and `shows` are different folders, as on a case-sensitive volume and
+    /// on Linux generally.
+    CaseSensitive,
+}
+
+impl PathSemantics {
+    /// What this machine's volumes do by default.
+    ///
+    /// A guess, and named as one: it follows the platform's usual file system. A
+    /// library on an unusual volume can override it with
+    /// [`Library::with_path_semantics`].
+    pub fn host() -> Self {
+        if cfg!(any(windows, target_vendor = "apple")) {
+            Self::CaseInsensitive
+        } else {
+            Self::CaseSensitive
+        }
+    }
+}
+
 pub struct Library {
     connection: Mutex<Connection>,
     active_scans: Mutex<HashSet<String>>,
-    case_insensitive_paths: bool,
+    path_semantics: PathSemantics,
     /// Where the database lives, or `None` for an in-memory library.
     ///
     /// Kept so backup and restore can tell the live file from a copy of it, and
@@ -132,15 +163,37 @@ impl Library {
         {
             std::fs::create_dir_all(parent)?;
         }
-        Self::from_connection(Connection::open(path)?, Some(path.to_path_buf()))
+        Self::from_connection(
+            Connection::open(path)?,
+            Some(path.to_path_buf()),
+            PathSemantics::host(),
+        )
     }
 
     /// Opens a throwaway in-memory library, used by tests and previews.
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?, None)
+        Self::from_connection(Connection::open_in_memory()?, None, PathSemantics::host())
     }
 
-    fn from_connection(mut connection: Connection, path: Option<PathBuf>) -> Result<Self> {
+    /// Chooses how this library compares paths.
+    ///
+    /// The default is
+    /// [`PathSemantics::host`], which is a guess about the volumes this machine
+    /// mounts: most macOS and Windows volumes fold case, but a case-sensitive APFS
+    /// or NTFS volume does not, and on that volume the default would treat two
+    /// spellings of one folder as two folders. Naming the semantics explicitly is
+    /// the way to be certain, and it is also what makes the other platform's
+    /// behaviour testable from this one.
+    pub fn with_path_semantics(mut self, semantics: PathSemantics) -> Self {
+        self.path_semantics = semantics;
+        self
+    }
+
+    fn from_connection(
+        mut connection: Connection,
+        path: Option<PathBuf>,
+        path_semantics: PathSemantics,
+    ) -> Result<Self> {
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")?;
         let version: i64 =
             connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
@@ -196,8 +249,7 @@ impl Library {
         Ok(Self {
             connection: Mutex::new(connection),
             active_scans: Mutex::new(HashSet::new()),
-            // Windows, macOS and iOS default volumes are case-insensitive.
-            case_insensitive_paths: cfg!(any(windows, target_vendor = "apple")),
+            path_semantics,
             path,
         })
     }
@@ -270,14 +322,20 @@ impl Library {
 
     /// Normalises a path for overlap comparison.
     ///
-    /// Windows paths are case-insensitive, so the comparison key is folded there
-    /// and left untouched elsewhere.
-    pub(crate) fn path_key(&self, path: &Path) -> String {
+    /// Folded when the volume folds case, untouched when it does not. Note that
+    /// folding is **not** a substitute for resolving a path: this compares two
+    /// already-canonical roots, so it is only deciding whether the same folder was
+    /// named twice.
+    ///
+    /// Public because the decision above is one a caller may need to see: a bug
+    /// report about a folder being refused as a duplicate is answered by this
+    /// value, and it is the one part of the library's behaviour that depends on the
+    /// volume rather than on the data.
+    pub fn path_key(&self, path: &Path) -> String {
         let raw = path.to_string_lossy().to_string();
-        if self.case_insensitive_paths {
-            raw.to_lowercase()
-        } else {
-            raw
+        match self.path_semantics {
+            PathSemantics::CaseInsensitive => raw.to_lowercase(),
+            PathSemantics::CaseSensitive => raw,
         }
     }
 

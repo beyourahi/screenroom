@@ -523,12 +523,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-**164 tests, 0 failures**, clippy clean, formatting clean:
+**168 tests, 0 failures**, clippy clean, formatting clean:
 
 | Suite | Tests |
 | --- | --- |
 | `screenroom-core` unit (filename, fingerprint) | 13 |
-| `core/tests/library.rs` (incl. per-viewer isolation) | 22 |
+| `core/tests/library.rs` (incl. per-viewer isolation, path semantics) | 26 |
 | `core/tests/storage.rs` (preferences, subtitle style, backup) | 19 |
 | `core/tests/scanner.rs` (incl. an unplugged drive) | 9 |
 | `core/tests/recovery.rs` | 7 |
@@ -580,8 +580,24 @@ receipt.
 4. **Private design system boundary.** Mapping is implemented with the token export
    kept out of Git; a fully public build (no private pin at all) still has to be
    built once and proven to compile and run.
-5. **Windows path semantics.** Case-insensitive overlap checks are implemented via
-   `cfg!(windows)` folding but never executed on Windows.
+5. **Windows path semantics — partly closed, partly not.** The folding rule was a
+   `cfg!` and is now a value (`PathSemantics`, chosen by
+   [`Library::with_path_semantics`]), which is the right shape for it: case-folding
+   is a property of the *volume*, not of the operating system, and a case-sensitive
+   APFS or NTFS volume exists. Both branches are now tested from this Mac, and the
+   key rule is asserted directly (`/Media/Shows` folds to `/media/shows` under
+   `CaseInsensitive` and is left alone under `CaseSensitive`).
+
+   **Still open:** the file-system half of it. On this host's case-folding volume,
+   `Media/SHOWS` resolves to `Media/Shows`, so the case-sensitive *grant* path
+   cannot be reached through the file system here; the test detects that and asserts
+   the reachable half instead of claiming the other. And **no Windows target
+   compiles from this Mac at all**: `cargo check --target x86_64-pc-windows-msvc`
+   fails inside `libsqlite3-sys`, whose bundled SQLite needs the MSVC SDK's headers
+   (`fatal error: 'stdlib.h' file not found`). That is a toolchain gap, not a code
+   failure, and it means every `cfg!(windows)` branch in the tree — the libmpv
+   candidate names, the D3D11 bridge choice — is still unbuilt and unrun. Windows
+   remains a blocked gate.
 6. **Packaged binary vs development tree.** The `.app` bundles libmpv but not its
    transitive Homebrew dependencies, and it is unsigned. That is deliberate for a
    personal install; making it portable is a separate licensing and signing task.

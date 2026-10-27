@@ -19,7 +19,17 @@ they are consolidated rather than quietly skipped):
   `render_bench`, but iced's own frame cost and event-to-redraw latency cannot be
   measured without a window;
 - re-running `scripts/verify-quit.sh`, whose evidence predates the background-first
-  policy.
+  policy;
+- the case-sensitive-volume half of the path-semantics tests, which needs a
+  case-sensitive APFS volume rather than this host's folding one.
+
+**Windows cannot be compiled from this Mac at all.** `cargo check --target
+x86_64-pc-windows-msvc` fails inside `libsqlite3-sys`, whose bundled SQLite needs
+the MSVC SDK headers (`fatal error: 'stdlib.h' file not found`). So every
+`cfg!(windows)` branch — the libmpv candidate names, the D3D11 bridge choice, the
+Windows path rules — is unbuilt as well as unrun. That is a toolchain gap rather
+than a code failure, and it is why Windows stays a blocked gate rather than a work
+item that is merely untested.
 
 Nothing in this document has been run against Windows or a TV.
 
@@ -58,14 +68,14 @@ and render path with no window, but **not** an on-screen frame rate. iced, the w
 upload and the compositor add cost it cannot see, so its numbers are a ceiling on
 what the display can reach, not a substitute for measuring the display.
 
-What runs today (`cargo test --workspace`, **159 tests, 0 failures** on macOS ARM64):
+What runs today (`cargo test --workspace`, **168 tests, 0 failures** on macOS ARM64):
 
 | Suite | Proves |
 | --- | --- |
 | `screenroom-core` unit | filename interpretation, fingerprints |
-| `core/tests/library.rs` | sources, scanning, ingestion, paging, playback invariants, lists |
+| `core/tests/library.rs` | sources, scanning, ingestion, paging, playback invariants, lists, per-viewer isolation, path case semantics on both branches |
 | `core/tests/storage.rs` | typed preferences including subtitle size/position (refused outside range on write, clamped on read), backup round-trip, restore validation and its refusals |
-| `core/tests/scanner.rs` | bounded scan, cancellation, symlinks, settle window |
+| `core/tests/scanner.rs` | bounded scan, cancellation, symlinks, settle window, an unplugged drive, a root replaced by a symlink |
 | `core/tests/recovery.rs` | crash-state normalisation, damaged and future databases, progress across recovery |
 | `core/tests/scale.rs` | 10,000-item paging, search and count inside a budget |
 | `screenroom-player` unit | state machine, options, property mapping |
