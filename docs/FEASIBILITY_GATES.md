@@ -37,10 +37,17 @@ cargo fmt --all --check
 ```
 
 Pass condition: all tests green, no first-party lint warnings, formatting clean.
-Recorded: **149 tests, 0 failures**, `clippy -D warnings` clean, `fmt --check` clean
-(2026-10-28, after the tracks/audio, settings/backup, recovery, scale and packaging
-work). The suite includes real libmpv decode, audio and track switching, a 10,000-item
-query budget, and SQLite crash/damage recovery.
+Recorded: **168 tests, 0 failures**, `clippy -D warnings` clean, `fmt --check` clean
+(2026-10-28, after the tracks/audio, settings/backup, subtitle styling, recovery,
+scale, path-semantics and packaging work). The suite includes real libmpv decode,
+audio and track switching, subtitle style read-back, a 10,000-item query budget,
+per-viewer isolation, an unplugged drive, and SQLite crash/damage recovery.
+
+Supporting checks in the same tier, all windowless and all runnable on demand:
+`scripts/check-quit-routing.sh`, `scripts/verify-bundle.sh`,
+`cargo run --example library_bench` and `cargo run --example render_bench`. The
+offscreen frame budget they produce is a **ceiling**, not an on-screen frame rate;
+gate G2's on-screen half remains open.
 
 ### Local installation (supporting check, not a gate)
 

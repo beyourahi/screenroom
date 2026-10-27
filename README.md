@@ -67,10 +67,22 @@ Full detail, receipts and blockers:
 ## Run it
 
 ```bash
-cargo test --workspace          # 149 tests, 0 failures on the dev host
+cargo test --workspace          # 168 tests, 0 failures on the dev host
 cargo clippy --workspace --all-targets
+cargo fmt --all --check
 cargo run -p screenroom-desktop                    # the application
-cargo run -p screenroom-player --example capability # libmpv on this device
+```
+
+Measurements and checks that need **no window** — prefer these, they never take
+over the desktop (see "Testing without taking over the desktop" in
+[`AGENTS.md`](AGENTS.md)):
+
+```bash
+cargo run -p screenroom-player --example capability            # libmpv on this device
+cargo run --release -p screenroom-core   --example library_bench  # paging budget
+cargo run --release -p screenroom-player --example render_bench   # offscreen frame budget
+scripts/check-quit-routing.sh                                  # menu-bar Quit routing
+scripts/verify-bundle.sh                                       # the packaged bundle
 ```
 
 To install it as a real macOS application:
@@ -81,9 +93,11 @@ scripts/package-macos.sh /Applications    # install a copy too
 open dist/Screenroom.app
 ```
 
-The bundle carries its own libmpv but still resolves its Homebrew dependencies by
-absolute path, and it is unsigned — correct for a personal install, not for
-distribution. The script prints what it found rather than assuming.
+The bundle carries its own libmpv (verified to load from inside the bundle, not
+just from Homebrew) but still resolves 20 Homebrew dependencies by absolute path,
+and it is unsigned — correct for a personal install, not for distribution.
+`scripts/verify-bundle.sh` checks the structure, the plist and every dependency,
+and fails loudly when any of them is wrong.
 
 The application opens the durable library at
 `~/Library/Application Support/Screenroom/library.db`. Point it elsewhere with

@@ -25,7 +25,7 @@
 | Next episode rule (F10) | core (`next_episode`) | host (autoplay chain; a gap stops it, an unreadable episode is refused with its reason) | — |
 | Search/filter/sort (F11) | core | host (search field, kind/genre/list filters, 4 sorts, paging) | — |
 | Favourites/watchlist (F12) | core | host (toggle keys and filters) | — |
-| Tracks and subtitles (F13) | track choice stored as a preference | host (audio and subtitle pickers from libmpv's own list, explicit “Off”; styling open) | — |
+| Tracks and subtitles (F13) | track choice and subtitle size/position stored as preferences | host (audio and subtitle pickers from libmpv's own list, explicit “Off”; subtitle size 50–300% and position 0–100% via `sub-scale`/`sub-pos`, read back from libmpv) | — |
 | Skip intro/credits (F14) | domain type only | — | — |
 | Subtitle provider (F15) | — | — | — |
 | Local recommendations (F16) | domain type only | — | — |
@@ -47,7 +47,7 @@ operate today, and only on macOS.
 
 | Target | Source in repo | Build | Device |
 | --- | --- | --- | --- |
-| MacBook Air M4 (macOS ARM64) | `apps/desktop` | builds and runs; `cargo test --workspace` green (149 tests); `scripts/package-macos.sh` produces a runnable `dist/Screenroom.app` | **running application verified**: playback at 30 fps, resume, tracks, library and Settings UI, bundle launched outside cargo (see `IMPLEMENTATION_STATUS.md`) |
+| MacBook Air M4 (macOS ARM64) | `apps/desktop` | builds and runs; `cargo test --workspace` green (168 tests); `scripts/package-macos.sh` produces a runnable `dist/Screenroom.app`, and `scripts/verify-bundle.sh` checks it plus the bundle's own libmpv and all 20 of its dependencies | **running application verified**: playback at 30 fps, resume, tracks, subtitle size/position, library and Settings UI, bundle launched outside cargo (see `IMPLEMENTATION_STATUS.md`) |
 | Windows desktop, Intel Arc B580 | `apps/desktop` (same crate) | not compiled on Windows; no D3D11/shared-texture bridge yet | **BLOCKED** — no access to the machine from this session |
 | Samsung UA50AU8000RXER (Tizen 6.0) | `apps/tv` (not started) | not started; Tizen Studio CLI present | **BLOCKED** — no device access and no local signing profile |
 | Linux, LG webOS, Android TV, iOS, Android | — | **retired** by ADR-003/ADR-004 | not applicable |
