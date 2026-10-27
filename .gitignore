@@ -9,6 +9,12 @@ tmp_screenshots/
 /src/lib/ds/
 /vendor/dropout-design-system/
 **/design/dropout_tokens.g.dart
+# Private token values generated from the pinned design system are never committed.
+/apps/desktop/src/design/ds_pinned.rs
+
+# Local Freebuff/agent session exports are working notes, not project source.
+freebuff-chat-*.md
+session_export*
 
 # Rust
 /target/
@@ -21,6 +27,9 @@ node_modules/
 .pnpm-store/
 dist/
 *.tsbuildinfo
+
+# Agent tooling state (LSP caches, per-machine project config), not project source.
+.serena/
 
 # OS / editors
 .idea/
