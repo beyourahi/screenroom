@@ -49,7 +49,7 @@ operate today, and only on macOS.
 | --- | --- | --- | --- |
 | MacBook Air M4 (macOS ARM64) | `apps/desktop` | builds and runs; `cargo test --workspace` green (189 tests); `scripts/package-macos.sh` produces a runnable `dist/Screenroom.app`, and `scripts/verify-bundle.sh` checks it plus the bundle's own libmpv and all 20 of its dependencies | **running application verified**: playback at 30 fps, resume, tracks, subtitle size/position, library and Settings UI, bundle launched outside cargo (see `IMPLEMENTATION_STATUS.md`) |
 | Windows desktop, Intel Arc B580 | `apps/desktop` (same crate) | not compiled on Windows; no D3D11/shared-texture bridge yet. Three Windows-only defects were found by reasoning and fixed from macOS on 2026-10-28 — verbatim-prefix path identity, the libmpv search consulting the working directory, and four fixed grid columns at 3440×1440 — each asserted with Windows-shaped inputs, none observed on Windows | **BLOCKED** — no access to the machine from this session. `WINDOWS_VALIDATION.md` is the exact handoff: prerequisites, commands, per-area acceptance checks, and the check that would falsify each fix |
-| Samsung UA50AU8000RXER (Tizen 6.0) | `apps/tv` (not started) | not started; Tizen Studio CLI present | **BLOCKED** — no device access and no local signing profile |
+| Samsung UA50AU8000RXER (Tizen 6.0) | `apps/tv` (not started) | not started. `tizen` CLI 2.5.25 and `sdb` 4.2.36 are on `PATH`; `tz` is not | **BLOCKED** — no device: `sdb devices` lists nothing attached (checked 2026-10-28), and no signing profile was inspected |
 | Linux, LG webOS, Android TV, iOS, Android | — | **retired** by ADR-003/ADR-004 | not applicable |
 
 ## Per-device capabilities that must never be assumed

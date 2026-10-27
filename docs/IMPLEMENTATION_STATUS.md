@@ -561,8 +561,8 @@ Headless scripts, which are not part of `cargo test`:
 | --- | --- | --- |
 | Desktop frame presentation on real Windows GPU | BLOCKED | no Windows hardware/Visual Studio on this host; every `cfg!(windows)` branch is unbuilt as well as unrun. The exact handoff — commands, expectations, acceptance checks and named falsifications — is `WINDOWS_VALIDATION.md` |
 | Windows 4K/HDR/hardware decode | BLOCKED | same |
-| Physical Samsung UA50AU8000RXER (install, USB, AVPlay, durability) | BLOCKED | device and Tizen signing profile not available |
-| Lightning 3 on the Tizen 6.0 engine | NOT YET RUN | needs the TV client and the device |
+| Physical Samsung UA50AU8000RXER (install, USB, AVPlay, durability) | BLOCKED | no device. Checked on 2026-10-28 rather than assumed: `tizen` CLI 2.5.25 and `sdb` 4.2.36 are on `PATH`, and `sdb devices` reports `List of devices attached` with nothing under it. `tz` is not on `PATH`. A signing profile was not inspected, to avoid printing certificate or DUID material into a log |
+| Lightning 3 on the Tizen 6.0 engine | NOT YET RUN | needs the TV client and the device; `apps/tv` does not exist yet |
 | Audible output heard by a person | NOT YET VERIFIED | the audio clock and `avsync` are measured; nobody has listened |
 | macOS bundle signing and notarization for distribution | BLOCKED | Command Line Tools only, no full Xcode; not required for a personal install |
 
