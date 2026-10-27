@@ -7,9 +7,11 @@
 //! Availability never deletes: marking a source missing or a file unavailable
 //! keeps works, editions, progress and lists intact.
 
+mod backup;
 mod catalog;
 mod lists;
 mod playback;
+mod settings;
 mod sources;
 
 use std::collections::HashSet;
@@ -23,8 +25,10 @@ use crate::domain::Profile;
 use crate::error::{CoreError, Result};
 use crate::{SCHEMA_VERSION, schema};
 
+pub use backup::{BackupInfo, BackupReport, RestoreReport};
 pub use catalog::Ingest;
 pub use playback::Checkpoint;
+pub use settings::Preferences;
 
 /// Ordering choices for a library page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -106,6 +110,11 @@ pub struct Library {
     connection: Mutex<Connection>,
     active_scans: Mutex<HashSet<String>>,
     case_insensitive_paths: bool,
+    /// Where the database lives, or `None` for an in-memory library.
+    ///
+    /// Kept so backup and restore can tell the live file from a copy of it, and
+    /// so a safety copy has somewhere to go.
+    path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Library {
@@ -123,15 +132,15 @@ impl Library {
         {
             std::fs::create_dir_all(parent)?;
         }
-        Self::from_connection(Connection::open(path)?)
+        Self::from_connection(Connection::open(path)?, Some(path.to_path_buf()))
     }
 
     /// Opens a throwaway in-memory library, used by tests and previews.
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::from_connection(Connection::open_in_memory()?, None)
     }
 
-    fn from_connection(mut connection: Connection) -> Result<Self> {
+    fn from_connection(mut connection: Connection, path: Option<PathBuf>) -> Result<Self> {
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")?;
         let version: i64 =
             connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
@@ -189,6 +198,7 @@ impl Library {
             active_scans: Mutex::new(HashSet::new()),
             // Windows, macOS and iOS default volumes are case-insensitive.
             case_insensitive_paths: cfg!(any(windows, target_vendor = "apple")),
+            path,
         })
     }
 

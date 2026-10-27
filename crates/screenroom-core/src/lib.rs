@@ -34,7 +34,10 @@ pub use domain::{
 pub use error::{CoreError, Result};
 pub use filename::{ParsedName, parse_filename};
 pub use fingerprint::media_fingerprint;
-pub use library::{Checkpoint, Ingest, Library, LibraryQuery, Sort};
+pub use library::{
+    BackupInfo, BackupReport, Checkpoint, Ingest, Library, LibraryQuery, Preferences,
+    RestoreReport, Sort,
+};
 pub use scanner::{
     LibraryScanner, MEDIA_EXTENSIONS, ScanIssue, ScanSummary, ScanToken, ScanUpdate,
 };
