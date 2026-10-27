@@ -1,30 +1,43 @@
 # Screenroom — agent instructions
 
-**CURRENT, SUPERSEDING GOVERNANCE (2026-10-26):** Screenroom is the approved
-product name, the only project root is `~/Desktop/projects/screenroom`, and
+**CURRENT, SUPERSEDING GOVERNANCE (2026-10-27):** Screenroom is the approved
+product name, the only project root is `~/Desktop/projects/screenroom`, and the
+product is **Screenroom Personal Edition**: one person's own media on that
+person's own three devices.
 [`docs/ADR-002_RUST_FIRST_STACK.md`](docs/ADR-002_RUST_FIRST_STACK.md) is the
-authoritative stack decision. Rust-first: shared Rust core, iced + wgpu + libmpv
-on desktop, SwiftUI + AVPlayer on iOS, Jetpack Compose + Media3 on Android,
-LightningJS 3 + Blits + TypeScript with platform-native playback on TVs, SQLite
-where supported, FFmpeg/FFprobe for media work, Dropout Design System for
-visuals, MIT for original first-party code, Flutter + Dart only as a recorded
-fallback.
+authoritative stack decision, amended by
+[`docs/ADR-003_DESKTOP_AND_TV_SCOPE.md`](docs/ADR-003_DESKTOP_AND_TV_SCOPE.md)
+and then by [`docs/ADR-004_PERSONAL_EDITION_SCOPE.md`](docs/ADR-004_PERSONAL_EDITION_SCOPE.md),
+which is the current word on **which platforms exist**.
+
+**Scope: exactly three targets.** (1) the owner's MacBook Air M4 on macOS,
+(2) the owner's Windows ultrawide desktop with an Intel Arc B580, (3) the owner's
+Samsung UA50AU8000RXER television. Linux, LG webOS, Android TV, phones and
+tablets, Apple TV, Roku, UNiFFI, the Flutter fallback, public distribution and
+commercial infrastructure are out of scope (ADR-004).
+
+Rust-first: shared Rust core, iced + wgpu + libmpv on desktop, LightningJS 3 +
+Blits + TypeScript with Tizen AVPlay playback on the TV (WebGL/Canvas rendering),
+SQLite where supported, FFmpeg/FFprobe for media work, Dropout Design System for
+visuals, Cargo + pnpm + the Tizen Studio CLI for builds, MIT for original
+first-party code.
 
 Older statements are **SUPERSEDED** and are history, not requirements:
 “Flutter is the selected stack” (ADR-001), “Svelte/Tauri is the baseline”,
 “Screenroom is a backup name”, “Samsung TV cannot run `.tpk`”, “the UI must be a
-WebView”. Do not act on them. Do not delete them: the archive is the audit trail.
+WebView”, every iOS/Android phone or tablet requirement (ADR-003), and the
+ADR-003 platform list that included Linux, LG webOS and Android TV (ADR-004). Do not act on them. Do not delete them: the archive is the audit trail.
 
 Keep one monorepo, offline-first/zero-paid constraints and every hardware gate.
 Never claim a test, a device result or a rendering receipt that did not happen.
 
 ## Operating boundaries
 
-**Installed application contract.** Every released target is an installed local
-app: a desktop executable, an iOS/Android app, or a signed TV package
-(`.wgt` for Samsung Tizen, `.ipk` for LG webOS). Never a hosted website, PWA or
-browser tab. The user must not need a browser, internet, an always-on server or a
-localhost HTTP server for normal playback, browsing, resume or lists.
+**Installed application contract.** Every target is an installed local app: the
+desktop executable (`apps/desktop`) or a locally signed Tizen `.wgt`. Never a
+hosted website, PWA or browser tab. The owner must not need a browser, internet,
+an always-on server or a localhost HTTP server for normal playback, browsing,
+resume or lists.
 
 **Design authority.** Follow the owner's private **Dropout Studio Design System**
 as the canonical visual/component source. Before any UI work, inspect its actual
@@ -37,6 +50,20 @@ packages or screenshots. Each platform adapts the same semantic tokens and
 documented control behaviour; no platform may silently fork the design language.
 The original pale-green prototype palette is superseded.
 
+The desktop integration is already built and works like this:
+
+- `apps/desktop/examples/export_ds_tokens.rs` reads the private DS at its pinned
+  commit and writes a flat Rust pin to `apps/desktop/src/design/ds_pinned.rs`.
+- That generated file is **Git-ignored**; only the exporter and the neutral
+  fallback in `apps/desktop/src/design/mod.rs` are committed.
+- `apps/desktop/build.rs` puts the file on the include path when it is present
+  and otherwise exposes the fallback, so a clean checkout builds without the DS
+  and a machine with the DS gets the real tokens.
+- The active theme string (`dropout-design-system@<commit> semantic.dark`) is
+  visible in the running application, so a screenshot shows which pin was used.
+
+See [`docs/DROPOUT_DESIGN_INTEGRATION.md`](docs/DROPOUT_DESIGN_INTEGRATION.md).
+
 **Name.** Screenroom is finalized. Historical reference material keeps the old
 labels; active code and docs use Screenroom.
 
@@ -48,8 +75,9 @@ labels; active code and docs use Screenroom.
   machine. libmpv is loaded at runtime, never linked into Git.
 - `apps/desktop` — iced + wgpu desktop client (Windows/Linux/macOS), including the
   libmpv → wgpu presentation bridge.
-- `apps/ios`, `apps/android`, `apps/tv` — per-platform clients. TV clients do not
-  run the Rust core; they follow the documented core contract.
+- `apps/tv` — the LightningJS 3 + Blits client for the owner's Samsung Tizen TV
+  only (not started; webOS and Android TV were retired by ADR-004). TV clients do
+  not run the Rust core; they follow the documented core contract.
 - `docs/` — ADRs, architecture, roadmap, progress ledger, gates, licensing.
 - `reference/` — preserved historical prototype and handoff. Read-only source of
   ideas; never the active build.
@@ -73,12 +101,12 @@ are external and are not part of Git.
   bypass or distribution of protected works without a rights check. A user-listed
   source is a bookmark and a capability question, never an assumed permission.
 - **Source state ≠ user approval ≠ hardware certification.** No invented Samsung,
-  Windows, iOS, Android, Tizen or webOS receipts. A mock or a browser-only test is
+  Windows, macOS, Linux, Tizen, webOS or Android TV receipts. A mock or a browser-only test is
   not a device test.
 - Verify version-sensitive work against current official docs for the *actual*
   selected release, and respect the lockfiles. Current provisional pins: iced
-  0.14 / wgpu 27 (must match iced), UniFFI 0.32, Lighting 3 / Blits 2.x, Rust
-  edition 2024.
+  0.14 / wgpu 27 (must match iced), Lightning 3 / Blits 2.x, Rust edition
+  2024.
 - Security: parameterized arguments (no shell interpolation of filenames),
   validated IPC/bindings, strict media-root authorization and canonicalization,
   bounded parser and file inputs, safe URL allowlists, no credentials in
@@ -98,11 +126,14 @@ capability and per device, never per framework:
    subtitle switching measured on the owner's GPU.
 3. **Samsung Tizen (physical UA50AU8000RXER)** — signed `.wgt` install, Lightning 3
    bundle running on the Tizen 6.0 engine, USB enumeration, AVPlay local playback,
-   lifecycle/focus and durable storage/artwork.
-4. **iOS / Android** — UniFFI bindings built into the app, AVPlayer/Media3 local
-   playback, scoped storage / file access, and background/rotation lifecycle.
-5. **Concurrency and durability** — interruption, power loss, low storage and
+   lifecycle/focus and durable storage/artwork. The certificate profile is created
+   locally with the owner's own Samsung account; no package or key material is
+   committed.
+4. **Concurrency and durability** — interruption, power loss, low storage and
    stale player callbacks on the real device.
+
+Retired gates: LG webOS, Android TV (ADR-004) and iOS (ADR-003). Do not reopen one
+without a new ADR.
 
 If a device is inaccessible, mark its gate **BLOCKED** and keep working on what is
 independently verifiable. Never greenwash a missing gate.
@@ -144,6 +175,20 @@ cargo fmt --all --check
 cargo run -p screenroom-player --example capability   # libmpv on this device
 cargo run -p screenroom-desktop                       # desktop shell
 ```
+
+Evidence helpers (`scripts/`, all local, nothing published):
+
+```bash
+scripts/capture-window.sh OUT.png            # Screenshot of Screenroom's own window
+scripts/drive-app.sh library|enter|space|left|right|capture NAME
+scripts/capture-window.swift                  # Window-number resolver behind the above
+cargo run -p screenroom-core --example prepare_library -- LIB.DB MEDIA_ROOT
+```
+
+Capture the **window number**, never a screen rectangle: a rectangle records
+whatever is on top of it, so on a multi-display desktop it can silently contain a
+different application — including the owner's own viewing. If a capture is not
+Screenroom's UI, delete it; never keep it as evidence.
 
 <!-- trail:start -->
 ## Trail — repo context graph

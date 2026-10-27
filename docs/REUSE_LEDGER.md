@@ -47,7 +47,7 @@ here because it is a deliberate divergence.
 
 | Artifact | Verdict | Why |
 | --- | --- | --- |
-| `lib/ui/*`, `lib/player/*` widget code | **discarded** | iced/SwiftUI/Compose replace it; the screens are a design reference only |
+| `lib/ui/*`, `lib/player/*` widget code | **discarded** | iced (desktop) and Blits (TV) replace it; the screens are a design reference only |
 | `lib/design/dropout_tokens.g.dart` | **discarded** | generated private values, never committed; the new mapping is per-platform and stays out of Git |
 | `lib/platform/native_playback.dart` (media_kit wiring) | **discarded** as code | `screenroom-player` replaces it; the state-machine lessons (session ids, generation tokens) were carried over |
 | `lib/platform/tizen_storage.dart`, `main_tizen.dart`, `tizen/` runner | **discarded** as code, **reused** as knowledge | the Tizen privilege/manifest requirements and storage-path lore inform the M5 TV client |

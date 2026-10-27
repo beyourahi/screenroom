@@ -45,9 +45,8 @@ Obligations that follow: preserve MIT/BSD/ISC copyright notices, carry the Apach
 apply to two compiled-in components. Apache-2.0 is compatible with an MIT-licensed
 product as long as notices are retained; it does not relicense first-party code.
 
-At M4, `uniffi` (currently 0.32.2) joins the graph under **MPL-2.0**, a file-level
-copyleft: keep its notices, and if any MPL-covered file is modified, publish that
-file's source. It does not reach into Screenroom's separate original code.
+`uniffi` (MPL-2.0) is no longer planned: its only consumers were the iOS/Android
+apps removed by [ADR-003](ADR-003_DESKTOP_AND_TV_SCOPE.md).
 
 ## Native media components: source license is not binary clearance
 

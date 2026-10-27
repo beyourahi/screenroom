@@ -1,8 +1,10 @@
 # Implementation plan and roadmap
 
-> **2026-10-26:** rewritten for the Rust-first architecture
-> ([ADR-002](ADR-002_RUST_FIRST_STACK.md)). The previous Flutter milestone plan is
-> history; its acceptance ideas are reused where they still apply.
+> **2026-10-27:** rewritten for the Rust-first architecture
+> ([ADR-002](ADR-002_RUST_FIRST_STACK.md)), scoped to the owner's three devices by
+> [ADR-004](ADR-004_PERSONAL_EDITION_SCOPE.md) (which amends
+> [ADR-003](ADR-003_DESKTOP_AND_TV_SCOPE.md)). The previous Flutter milestone plan
+> is history; its acceptance ideas are reused where they still apply.
 
 Every milestone below is **independently testable and resumable**: it has an
 explicit entry condition, a definition of done, the evidence that proves it, and a
@@ -61,14 +63,27 @@ the SQLite layout opens a library written by the previous candidate.
 
 ---
 
-## M2 — Desktop playback slice ⏳ implemented, window run pending
+## M2 — Desktop playback slice ✅ host-verified on macOS
 
 **Goal:** one real file plays in the desktop app and resumes after a restart.
 
-**State 2026-10-26:** contents 1–5 are implemented and host-tested (see
-[`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md#m2--desktop-playback-slice)).
-What is missing is the human observation that a frame reaches the window; until
-that happens this milestone is not done and gate G3 stays IN PROGRESS.
+**State 2026-10-27:** contents 1–5 are implemented, and a frame has been observed
+in the running window: correct pillarbox/letterbox aspect, moving frames, play,
+pause, seek (±10 s), resume across a quit and relaunch, and durable checkpoints.
+Measured at 1080p: **30.0 fps published with zero drops** (the media's own rate)
+at a 3440×1440 window. See
+[`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md#m2--desktop-playback-slice).
+
+**Outstanding, named rather than implied:**
+
+- Audible output has not been confirmed *by ear*. The player opens a CoreAudio
+  client (`audio-client-name`, `video-sync=audio`) and the process holds the
+  CoreAudio/AudioDSP components; that is configuration evidence, not hearing.
+- Audio/video sync has no measured tolerance yet (gate G3b).
+- The offline run was proven by holding zero network sockets rather than by
+  disabling the machine's networking; an airplane-mode run is still owed.
+- CPU and memory figures are from the debug build. A release measurement is
+  pending; the release configuration is what will ship.
 
 **Depends on** M1.
 
@@ -88,22 +103,31 @@ that happens this milestone is not done and gate G3 stays IN PROGRESS.
 
 **Done when** on this development host a real local file plays with audio and
 correct aspect, seeks, and resumes at the stored position after quitting and
-relaunching with the network disabled.
+relaunching with the network disabled. **Met except for the three named items
+above.**
 
-**Evidence** command transcript plus a recorded duration/position pair; a
-screenshot is optional and never a substitute. Windows and 4K/HDR remain BLOCKED
-until that hardware exists.
+**Evidence** command transcript, database rows, window screenshots carrying the
+fixture's burnt-in timecode, and the automated frame-rate and resume tests.
+Windows and 4K/HDR remain BLOCKED until that hardware exists.
 
 **Not in M2:** subtitles/track selection, full library UI, design-system styling
 of the player, previews, PiP.
 
 ---
 
-## M3 — Desktop core UI and design-system mapping
+## M3 — Desktop core UI and design-system mapping ⏳ foundations delivered
 
 **Goal:** the desktop app is usable as a real library, not a test harness.
 
-**Depends on** M2.
+**State 2026-10-27:** the first five bullets are delivered on macOS — Home with
+Continue Watching and folder granting, a paged library grid with search, kind and
+list filters, sorts and paging, the detail page with resume/restart and the flag
+actions, keyboard (arrows, Enter, Esc, ⌘1/⌘2, f/w/m) and mouse navigation, the
+empty/loading/error surfaces, and the private Dropout Design System adapter with
+its Git-ignored pin. Still open: next-episode advance, tracks and subtitles,
+profiles UI, settings, backup/restore, and the 10,000-item budget run.
+
+**Depends on** M2 (satisfied).
 
 **Contents**
 - Dropout Design System mapping for iced: semantic colour roles, type scale,
@@ -134,40 +158,23 @@ document.
 
 ---
 
-## M4 — iOS and Android
+## M4 — Removed (mobile apps out of scope)
 
-**Goal:** the same library and progress on both phones, with native playback.
-
-**Depends on** M1 (core API is stable) and can proceed in parallel with M2/M3.
-
-**Contents**
-1. `crates/screenroom-ffi`: UniFFI 0.32 interface over `screenroom-core`
-   (sources, scan control, paged queries, sessions/checkpoints, lists), generated
-   Swift and Kotlin bindings, committed generation script (bindings are generated,
-   not hand-edited).
-2. `apps/ios`: SwiftUI browse/detail/player, AVPlayer + AVPlayerLayer, PiP where
-   the OS supports it, file import/bookmark scoped access, background audio/state
-   restoration.
-3. `apps/android`: Compose browse/detail/player, Media3 `ExoPlayer`/`PlayerView`,
-   Storage Access Framework tree grants, foreground playback service, TV variant
-   with D-pad focus.
-4. Contract tests: the same scenario suite run against the Rust core directly and
-   through the bindings, asserting identical observable behaviour.
-
-**Done when** each app scans an authorized folder, plays a local file with native
-controls, and restores progress after a cold start with the network disabled.
-
-**Evidence** on-device logs for iOS and Android plus binding generation output.
-Simulator/emulator results are labelled as such.
+The former M4 (iOS and Android phone/tablet apps with UniFFI bindings) was removed
+on 2026-10-26 by [ADR-003](ADR-003_DESKTOP_AND_TV_SCOPE.md). Nothing had been
+built. Android TV moved into M5. The number is kept so existing references stay
+stable.
 
 ---
 
-## M5 — TV platforms
+## M5 — Samsung Tizen TV (the only TV target)
 
-**Goal:** a signed Samsung package that plays local USB media; then webOS and
-other platforms.
+**Goal:** a LightningJS 3 + Blits client that plays the owner's local media on the
+Samsung UA50AU8000RXER (Tizen 6.0). LG webOS and Android TV were retired by
+[ADR-004](ADR-004_PERSONAL_EDITION_SCOPE.md); Apple TV and Roku were never in
+scope.
 
-**Depends on** M1 (contract frozen) and an available device for each acceptance.
+**Depends on** M1 (contract frozen) and access to the television.
 
 **Contents**
 1. TV contract harness: a TS package that encodes the core invariants (identity,
@@ -177,19 +184,19 @@ other platforms.
    - storage adapter (SQLite where the platform allows it, documented fallback
      otherwise), schema parity with `screenroom-core`,
    - D-pad focus graph, Back hierarchy, focus restoration,
-   - AVPlay-backed player for Tizen; platform player for webOS,
+   - AVPlay-backed player,
    - presentation adapter mapping Dropout semantics onto Blits,
-   - build targets: legacy-compatible bundle (Chrome 38+/WPEWebKit floor).
-3. Packaging: signed `.wgt` for Samsung, `.ipk` for webOS; certificates stay out
-   of Git; documented install/remove/update procedure including data-loss warning.
-4. Physical TV gates: install, USB enumeration, playback, seek, lifecycle, durable
-   state/artwork after power cycle.
+   - build target: a bundle the Tizen 6.0 engine runs.
+3. Packaging: a locally signed `.wgt`; certificate material stays out of Git;
+   documented install/remove/update procedure including the data-loss warning.
+4. Physical gate: install, USB enumeration, playback, seek, lifecycle, durable
+   state/artwork after a power cycle.
 
-**Done when** the physical gates in
-[`FEASIBILITY_GATES.md`](FEASIBILITY_GATES.md) pass on the UA50AU8000RXER, or are
-explicitly recorded as BLOCKED with the reason.
+**Done when** gate G5 passes on the UA50AU8000RXER, or is explicitly recorded as
+BLOCKED with the reason (today: device access and a signing certificate, both
+requiring the owner).
 
-**Evidence** device receipts with model, firmware, package hash and observed
+**Evidence** a device receipt with model, firmware, package hash and observed
 behaviour.
 
 ---
@@ -199,13 +206,14 @@ behaviour.
 **Depends on** the platform that hosts each capability.
 
 | Feature | Primary platform | Content |
+| --- | --- | --- |
 | F06 artwork | all | permitted local image bytes, provenance, dimensions, hash, eviction; remote retention only with rights |
-| F05 enrichment | desktop/mobile | whole-library durable jobs, visible-first priority, retry/quota/offline queue, manual binding that nothing overwrites |
-| F15 subtitle provider | desktop/mobile | optional provider search/download with quota display and manual fallback |
+| F05 enrichment | desktop/TV | whole-library durable jobs, visible-first priority, retry/quota/offline queue, manual binding that nothing overwrites |
+| F15 subtitle provider | desktop/TV | optional provider search/download with quota display and manual fallback |
 | F14 markers | all | manual intro/credits intervals validated against edition duration; skip only inside a verified interval |
-| F16 recommendations | desktop/mobile | explainable local ranking over owned, available media; no hosted AI |
+| F16 recommendations | desktop/TV | explainable local ranking over owned, available media; no hosted AI |
 | F17 previews | desktop | single muted decoder, delay, resource cap, reduced-motion off switch |
-| F18 PiP | desktop/mobile/TV | true OS PiP where supported, otherwise a clearly labelled mini-player |
+| F18 PiP | desktop/TV | true OS PiP where supported, otherwise a clearly labelled mini-player |
 | F19 casting | desktop | opt-in, session-scoped DLNA; no always-on endpoint |
 | F23 directory | all | user-entered bookmarks with provenance, rights and last-checked status |
 | F24 acquisition | desktop | lawful external handoff; no scraping or embedded torrent client |
@@ -235,19 +243,19 @@ a truthful reason and a recovery path.
 
 | PRD | Feature | Primary milestone | Status |
 | --- | --- | --- | --- |
-| F01 | Sources and grants | M1 (core) + M3/M4/M5 (UI per platform) | core done |
+| F01 | Sources and grants | M1 (core) + M3/M5 (UI per platform) | core + desktop grant/scan UI |
 | F02 | Discovery/scanning | M1 | core done |
 | F03 | Structured library | M1 | core done |
 | F04 | Identity matching | M1 (conservative), M6 (enrichment) | core done, no provider |
 | F05 | Whole-library enrichment | M6 | not started |
 | F06 | Offline artwork | M6 | not started |
-| F07 | Player | M2 (desktop), M4, M5 | boundary + bridge compile |
-| F08 | Profiles and progress | M1 (store), M3 (UI) | store done |
-| F09 | Home and resume | M1 (query), M3 (UI) | query done |
-| F10 | Next episode | M1 (rule), M3 (countdown UI) | rule done |
-| F11 | Search/filter/sort | M1 (query), M3 (UI) | query done |
-| F12 | Watchlists/favourites | M1 (store), M3/M4/M5 (UI) | store done |
-| F13 | Tracks and subtitles | M3 (desktop), M4, M5 | not started |
+| F07 | Player | M2 (desktop), M5 (TV) | **desktop verified on macOS** (30 fps, aspect, transport, resume); no audio-by-ear or a/v-sync figure yet |
+| F08 | Profiles and progress | M1 (store), M3 (UI) | store + desktop UI: durable progress, resume, watched |
+| F09 | Home and resume | M1 (query), M3 (UI) | delivered on desktop |
+| F10 | Next episode | M1 (rule), M3 (countdown UI) | rule done, not exposed in the UI |
+| F11 | Search/filter/sort | M1 (query), M3 (UI) | delivered on desktop |
+| F12 | Watchlists/favourites | M1 (store), M3/M5 (UI) | delivered on desktop |
+| F13 | Tracks and subtitles | M3 (desktop), M5 (TV) | not started |
 | F14 | Skip intro/credits | M6 | not started |
 | F15 | Subtitle search | M6 | not started |
 | F16 | Local recommendations | M6 | not started |
@@ -256,17 +264,18 @@ a truthful reason and a recovery path.
 | F19 | Casting | M6 | not started |
 | F20 | Backup and recovery | M3 (port of validated format) | not started in Rust |
 | F21 | Settings and secrets | M3 | not started |
-| F22 | Failure states | M2/M3 (desktop), M4/M5 | core codes done |
+| F22 | Failure states | M2/M3 (desktop), M5 (TV) | core codes done |
 | F23 | Source directory | M6 | not started |
 | F24 | Acquisition handoff | M6 | not started |
 | F25 | Local conversion | M6 | not started |
 
 ## Why this order
 
-Playback is the product's core promise and its riskiest integration, so M2 follows
-the core immediately: it is the only milestone that can invalidate the desktop
-stack. Mobile (M4) and TV (M5) come after the core API is exercised by a real
-client, so their bindings and contract harness are written against behaviour that
-is already proven. Advanced features (M6) depend on durable artwork, enrichment and
+Playback is the product's core promise and its riskiest integration, so M2 followed
+the core immediately: it was the only milestone that could invalidate the desktop
+stack, and it has now been verified on macOS. The Samsung TV (M5) is equally
+mandatory for the owner, but it is **BLOCKED on access**, so its contract harness
+is written once the core API is exercised by a real client — it mirrors behaviour
+that is already proven rather than inventing it. Advanced features (M6) depend on
 playback working on at least one platform; building them earlier would prove
 nothing.

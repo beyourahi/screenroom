@@ -1,74 +1,125 @@
 # Screenroom
 
-A cinematic, offline-first local media application: your own movies and series,
-organized like a streaming catalog — continue watching, next episode, profiles,
-search, subtitles — running entirely on the device that holds the files.
+**Screenroom Personal Edition** — a cinematic, offline-first local media
+application for one person's own library: continue watching, next episode,
+profiles, search, subtitles, playing entirely on the device that holds the files.
 
-**Stack (final, 2026-10-26):** Rust-first.
-[`docs/ADR-002_RUST_FIRST_STACK.md`](docs/ADR-002_RUST_FIRST_STACK.md) is
-authoritative. The earlier Flutter-first decision
-([ADR-001](docs/ADR-001_SELECTED_STACK.md)) is superseded and kept as history.
+**Scope (final, 2026-10-27):** exactly three devices.
+[`docs/ADR-004_PERSONAL_EDITION_SCOPE.md`](docs/ADR-004_PERSONAL_EDITION_SCOPE.md)
+is the current word on platforms; it amends
+[ADR-002](docs/ADR-002_RUST_FIRST_STACK.md) (Rust-first stack, still authoritative)
+and [ADR-003](docs/ADR-003_DESKTOP_AND_TV_SCOPE.md) (desktop + TV split). The
+earlier Flutter decision ([ADR-001](docs/ADR-001_SELECTED_STACK.md)) is history.
 
-| Platform | UI | Playback |
+| Target | UI | Playback |
 | --- | --- | --- |
-| Windows / Linux / macOS | Rust + iced + wgpu | libmpv |
-| iOS | SwiftUI | AVPlayer |
-| Android / Android TV | Jetpack Compose | Media3 |
-| Samsung Tizen / LG webOS | LightningJS 3 + Blits + TypeScript | platform-native (AVPlay etc.) |
-| Fallback only | Flutter + Dart | per-device native |
+| MacBook Air M4 (macOS) | Rust + iced + wgpu | libmpv → wgpu (software bridge) |
+| Windows desktop, Intel Arc B580 | Rust + iced + wgpu (same crate) | libmpv; Arc decode is the goal |
+| Samsung UA50AU8000RXER (Tizen 6.0) | LightningJS 3 + Blits + TypeScript | Tizen AVPlay |
 
-Shared domain: Rust. Database: SQLite where supported. Media work: FFmpeg/FFprobe.
-Design: private Dropout Design System, adapted per platform. License: MIT for
-first-party code.
+Linux, LG webOS, Android TV, phones/tablets, Apple TV and Roku are out of scope, as
+is public distribution or any paid service. Shared domain: Rust. Database: SQLite.
+Media work: FFmpeg/FFprobe. Design: private Dropout Design System, adapted per
+platform. License: MIT for first-party code.
 
 ## Status
 
-- **Implemented and host-verified:** the shared Rust core (sources, bounded
-  scanning, ingestion, paged library queries, playback sessions/progress, lists,
-  shared SQLite schema) and the libmpv runtime boundary, including a real
-  load-and-decode smoke test.
-- **Compiles, not yet proven:** the iced + wgpu desktop shell and the libmpv → wgpu
-  video bridge (no frame presented on hardware yet).
-- **Blocked:** every physical-device gate (Windows, Samsung Tizen, iOS, Android).
-  None has been claimed.
+**Verified on the macOS host** (MacBook Air M4, macOS, Apple Silicon):
 
-Live detail, receipts and blockers:
+- The shared Rust core — sources, bounded cancellable scanning, ingestion, paged
+  library queries, playback sessions and progress, lists, SQLite schema.
+- libmpv through the app: a real fixture decodes **and reaches the window** with
+  correct pillarbox aspect and moving frames; play, pause, seek (±10 s) and resume
+  all behave; progress is durable across a quit and relaunch; a finished file
+  restarts from the beginning and says so in the UI.
+- The desktop application's screens: Home with Continue Watching, library browse
+  with paging, search, filters, sorting, a detail page and the player, driven by
+  keyboard and mouse, with empty/loading/error states.
+- **Measured:** the software bridge sustains **30.0 fps at 1080p with the playhead
+  at 1.00×**, in both debug and the release build that ships. Release cost at
+  1080p: ~66–76 % of one core and a flat ~255 MB RSS during playback, falling to
+  ~3 % CPU and 108 MB once it ends. The process holds no network sockets.
+
+**Not yet verified:**
+
+- Audible output has not been confirmed by ear (the player opens a CoreAudio
+  client and is configured for it; that is not the same as hearing it), and no
+  audio/video sync tolerance has been measured (gate G3b).
+- The offline run was proven by holding zero network sockets, not by disabling
+  this machine's networking.
+- 4K and hardware decode are neither claimed nor measured: the software bridge is
+  `hwdec=no` by design and bounded to 1920 px.
+- Everything Windows and everything Samsung TV. Both are **BLOCKED** on hardware
+  access and (for Tizen) a local signing certificate. No device receipt exists.
+
+Full detail, receipts and blockers:
 [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md).
 
 ## Run it
 
 ```bash
-cargo test --workspace                                  # 53 tests today
-cargo run -p screenroom-player --example capability      # libmpv on this device
-cargo run -p screenroom-desktop                          # desktop shell (M1 skeleton)
+cargo test --workspace          # 106 tests, 0 failures on the dev host
+cargo clippy --workspace --all-targets
+cargo run -p screenroom-desktop                    # the application
+cargo run -p screenroom-player --example capability # libmpv on this device
 ```
 
-`SCREENROOM_LIBRARY=/path/to/library.db` points the desktop shell at a real
-library; without it the shell uses a throwaway in-memory library.
+The application opens the durable library at
+`~/Library/Application Support/Screenroom/library.db`. Point it elsewhere with
+`SCREENROOM_LIBRARY=/path/to/library.db`.
+
+To grant a folder and scan it (no click-through needed yet for a scripted run):
+
+```bash
+cargo run -p screenroom-core --example prepare_library -- \
+  "$HOME/Library/Application Support/Screenroom/library.db" "$PWD/.artifacts/media"
+```
+
+`ffmpeg` can generate rights-clear test media:
+
+```bash
+ffmpeg -y -f lavfi -i "testsrc2=size=1920x1080:rate=30:duration=60" \
+       -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=60" -ac 2 \
+       -c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 28 -g 30 \
+       -c:a aac -b:a 128k -shortest -movflags +faststart .artifacts/media/Test.mp4
+```
+
+`testsrc2` burns a timecode and frame counter into the picture, which is what makes
+a screenshot usable as playback evidence.
+
+## Design system integration
+
+Private tokens are never committed. `apps/desktop/examples/export_ds_tokens.rs`
+reads the pinned Dropout Design System and writes the Git-ignored
+`apps/desktop/src/design/ds_pinned.rs`; `apps/desktop/build.rs` includes it when it
+is present and otherwise uses the committed neutral fallback, so a clean checkout
+still builds. The running app shows which pin produced its theme. See
+[`docs/DROPOUT_DESIGN_INTEGRATION.md`](docs/DROPOUT_DESIGN_INTEGRATION.md).
 
 ## Read before coding
 
 1. [`AGENTS.md`](AGENTS.md) — engineering rules and evidence standards.
-2. [`docs/PRD.md`](docs/PRD.md) — product requirements F01–F25 (unchanged by the
-   stack switch).
-3. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the pieces fit.
-4. [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — milestones M0–M7.
-5. [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) — what is done,
-   verified, blocked.
-6. [`docs/FEASIBILITY_GATES.md`](docs/FEASIBILITY_GATES.md) — device gates.
-7. [`docs/REUSE_LEDGER.md`](docs/REUSE_LEDGER.md) — what was ported, kept or dropped.
-8. [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md),
-   [`docs/DESIGN.md`](docs/DESIGN.md),
-   [`docs/DROPOUT_DESIGN_INTEGRATION.md`](docs/DROPOUT_DESIGN_INTEGRATION.md),
-   [`docs/LICENSING.md`](docs/LICENSING.md).
+2. [`docs/ADR-004_PERSONAL_EDITION_SCOPE.md`](docs/ADR-004_PERSONAL_EDITION_SCOPE.md)
+   — the three targets, and what is out of scope.
+3. [`docs/PRD.md`](docs/PRD.md) — product requirements F01–F25.
+4. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the pieces fit.
+5. [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — milestones.
+6. [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) — what is
+   done, verified, blocked.
+7. [`docs/FEASIBILITY_GATES.md`](docs/FEASIBILITY_GATES.md) — device gates.
+8. [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) — what each test layer proves.
+9. [`docs/REUSE_LEDGER.md`](docs/REUSE_LEDGER.md), [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md),
+   [`docs/DESIGN.md`](docs/DESIGN.md), [`docs/LICENSING.md`](docs/LICENSING.md).
 
 ## Repository layout
 
 ```text
 Cargo.toml                  # Rust workspace
-crates/screenroom-core/     # domain, SQLite library, scanner, fingerprint
+crates/screenroom-core/     # domain, SQLite library, scanner, fingerprints
 crates/screenroom-player/   # libmpv runtime boundary, player state machine
-apps/desktop/               # iced + wgpu client, video_surface.rs bridge
+apps/desktop/               # iced + wgpu client, libmpv -> wgpu bridge
+apps/tv/                    # Samsung Tizen client (not started)
+scripts/                    # local evidence helpers (capture, drive)
 docs/                       # ADRs, architecture, roadmap, ledger, gates
 reference/                  # historical Svelte/Tauri prototype and handoff
 .worktrees/                 # archived agent worktrees (Git-ignored, recoverable)

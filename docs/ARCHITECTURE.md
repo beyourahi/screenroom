@@ -1,13 +1,19 @@
 # Architecture and monorepo specification
 
-> **2026-10-26:** this document describes the Rust-first architecture selected by
-> [`ADR-002_RUST_FIRST_STACK.md`](ADR-002_RUST_FIRST_STACK.md). Statements in older
-> documents that assert a Flutter-only or Svelte/Tauri stack are superseded and
-> kept as history.
+> **2026-10-27:** this document describes the Rust-first architecture selected by
+> [`ADR-002_RUST_FIRST_STACK.md`](ADR-002_RUST_FIRST_STACK.md), scoped to
+> desktop + TV by [`ADR-003_DESKTOP_AND_TV_SCOPE.md`](ADR-003_DESKTOP_AND_TV_SCOPE.md)
+> and then to the owner's three Personal Edition devices by
+> [`ADR-004_PERSONAL_EDITION_SCOPE.md`](ADR-004_PERSONAL_EDITION_SCOPE.md).
+> Statements in older documents that assert a Flutter-only or Svelte/Tauri stack,
+> or that list Linux, webOS or Android TV as targets, are superseded and kept as
+> history.
 
-**Status:** implementation in progress. Milestone M1 (shared core) is implemented
-and host-verified; no physical-device gate has been satisfied yet. See
-[`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) for the live ledger.
+**Status:** the shared core, the libmpv boundary and the desktop application are
+implemented and verified on the macOS host, including real frame presentation
+(see the playback section). No physical-device gate for Windows or the Samsung TV
+has been satisfied. See [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) for
+the live ledger.
 
 ## Architecture goals
 
@@ -15,10 +21,10 @@ and host-verified; no physical-device gate has been satisfied yet. See
    script and decision document. Dependencies come from normal registries/SDKs;
    no submodules or sibling repos.
 2. **One shared core** in Rust owns identity, the SQLite library, scanning,
-   progress rules and lists. Every client consumes it (natively on desktop,
-   iOS/Android through UniFFI; TV clients mirror the contract).
-3. **Native playback per device.** libmpv on desktop, AVPlayer on iOS, Media3 on
-   Android, AVPlay/webOS on TVs. No shared "player abstraction" is allowed to
+   progress rules and lists. The desktop app links it natively; TV clients mirror
+   its contract.
+3. **Native playback per device.** libmpv on desktop; AVPlay on Tizen, the webOS
+   media pipeline on webOS, Media3 on Android TV. No shared "player abstraction" is allowed to
    pretend these behave identically.
 4. **Offline-first by construction.** UI, fonts, assets and user data are local.
    Network providers (metadata, subtitles) are optional enrichment behind an
@@ -41,9 +47,7 @@ screenroom/
     screenroom-player/           # libmpv runtime boundary + player state machine
   apps/
     desktop/                     # iced + wgpu client, video_surface.rs bridge
-    ios/                         # (M4) SwiftUI + AVPlayer + UniFFI bindings
-    android/                     # (M4) Compose + Media3 + UniFFI bindings
-    tv/                          # (M5) LightningJS 3 + Blits (Tizen/webOS/other)
+    tv/                          # (M5) LightningJS 3 + Blits (Samsung Tizen only)
   docs/  reference/  .worktrees/ #  .worktrees is Git-ignored, archive branches
 ```
 
@@ -58,11 +62,11 @@ Svelte/Tauri prototype.
         ┌──────────────────────────── screenroom-core (Rust) ───────────────────────────┐
         │ domain · SQLite schema/migrations · scanner · filename · fingerprints ·      │
         │ progress invariants · lists · availability                                   │
-        └───────────▲───────────────────▲──────────────────────▲────────────────────────┘
-                    │                   │                      │
-        apps/desktop (iced+wgpu)   UniFFI (Swift/Kotlin)   TV contract harness
-                    │                   │                      │
-        screenroom-player (libmpv)  AVPlayer / Media3     AVPlay / webOS player
+        └───────────▲──────────────────────────────────────────▲────────────────────────┘
+                    │                                          │
+        apps/desktop (iced+wgpu)                     TV contract harness
+                    │                                          │
+        screenroom-player (libmpv)                       Tizen AVPlay
 ```
 
 `screenroom-core` never depends on a UI, a player or a network client. That is
@@ -132,34 +136,47 @@ so a device without libmpv reports `available: false` with a reason instead of
 crashing at start-up. It wraps the client API only: core creation, options,
 command arrays, property reads and event waits.
 
-**The rendering bridge is the main desktop risk.** libmpv's render API supports
-OpenGL, Direct3D 11 and software only; iced draws through wgpu/Metal/Vulkan/DX12.
-There is no zero-copy handshake. `apps/desktop/src/video_surface.rs` implements the
-portable **software bridge**: mpv's RGBA frame is uploaded into a wgpu texture in
-`Primitive::prepare` and drawn letterboxed by a WGSL shader. It compiles against
-iced 0.14 + wgpu 27 and is unit-tested for aspect fit; it has **not** yet presented
-a decoded frame on real hardware. The OpenGL (macOS) and D3D11 (Windows)
-zero-copy paths are planned behind the same `Frame`/`VideoSurface` seam.
+**The rendering bridge.** libmpv's render API supports OpenGL, Direct3D 11 and
+software only; iced draws through wgpu/Metal/Vulkan/DX12, and there is no
+zero-copy handshake. `apps/desktop/src/video_surface.rs` implements the portable
+**software bridge**: mpv's RGBA frame is uploaded into a wgpu texture in
+`Primitive::prepare` and drawn letterboxed by a WGSL shader. It presents real
+frames on the macOS host (verified 2026-10-27); the OpenGL (macOS) and D3D11
+(Windows/Arc) zero-copy paths are planned behind the same `Frame`/`VideoSurface`
+seam.
+
+The frame path, in the order a frame travels:
+
+1. libmpv renders into a 64-byte-aligned, stride-padded buffer (`render.rs`).
+2. `SoftwareRenderer::pack` **tightens each row with one `copy_from_slice`**. It
+   previously rewrote all four bytes per pixel; that cost ~40 ms for a single
+   1080p frame in an unoptimized build and capped presentation at ~11 fps. Row
+   copies took the measured rate to 30.0 fps on the same media (see the gates).
+3. `Frame { rgba: Arc<Vec<u8>>, generation }` is published to the shared
+   snapshot. Red, green and blue are the picture; **the alpha byte is undefined**
+   (libmpv documents `rgb0` that way), so the presenter forces opaque output and
+   no host code inspects it.
+4. The desktop primitive uploads the frame only when `generation` changes, then
+   draws. `PLAYER_TICK` (16 ms) is shorter than a frame at 60 fps, so the window
+   is fed at the media's own rate.
 
 Because the render context and the wgpu device must not be mixed across threads,
 the player owns its own thread and hands frames over as `Arc<Vec<u8>>` with a
 monotonic generation number; the UI never blocks on decode.
 
 Player state machine: `Idle → Resolving → Preparing → Playing ↔ Paused →
-Ended | Failed`, where `Ended` and `Failed` are terminal. Progress is only
-meaningful in `Playing`, `Paused` or `Ended`.
+Ended | Failed`, where `Ended` and `Failed` are terminal. `Ended` being terminal
+is why the app's transport control *reopens* a finished file instead of clearing
+the pause flag — clearing it would do nothing at all. Progress is only meaningful
+in `Playing`, `Paused` or `Ended`.
 
 ## Platform adapters
 
-| Platform | Chain |
+| Target | Chain |
 | --- | --- |
-| Windows | iced window + wgpu (DX12) + libmpv (D3D11 bridge target) + SQLite |
-| macOS | iced window + wgpu (Metal) + libmpv (OpenGL bridge target) + SQLite |
-| Linux | iced window + wgpu (Vulkan/GL) + libmpv (GL bridge target) + SQLite |
-| iOS | SwiftUI + AVPlayerLayer + `screenroom-core` via UniFFI + SQLite |
-| Android | Compose + Media3 `PlayerView` + UniFFI + SQLite |
-| Samsung Tizen | Lightning 3 + Blits bundle (`.wgt`) + AVPlay + local storage adapter |
-| LG webOS | Lightning 3 + Blits bundle (`.ipk`) + webOS player + local storage adapter |
+| MacBook Air M4 (macOS ARM64) | iced window + wgpu (Metal) + libmpv software bridge + SQLite — **running** |
+| Windows desktop (x86_64, Intel Arc B580) | iced window + wgpu (DX12) + libmpv (D3D11 bridge target) + SQLite — same crate, not built on Windows |
+| Samsung UA50AU8000RXER (Tizen 6.0) | Lightning 3 + Blits bundle (`.wgt`) + AVPlay + local storage adapter — not started |
 
 A platform label is not a capability. Each capability is recorded per device in
 [`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md) with the state of its evidence.
@@ -189,11 +206,12 @@ enter Git. No store submission is automated.
 
 Measured failure, not preference, reopens a decision:
 
-- If no bridge keeps desktop presentation above ~30 fps at target resolution on
-  real Windows hardware, reconsider the desktop shell (not the shared core).
+- If no bridge keeps desktop presentation at target resolution on the Windows
+  machine, reconsider the desktop shell (not the shared core). On macOS the
+  software bridge already sustains the media's full rate; the Windows question is
+  whether Arc hardware decode and a D3D11 zero-copy path are needed for 4K/HDR.
 - If Lightning 3 cannot hold its frame budget on the Tizen 6.0 engine, evaluate a
-  lighter Blits-only build or a platform-native TV app for that model.
-- If UniFFI cannot expose the needed API to Swift/Kotlin on supported OS versions,
-  record a hand-written bridge ADR with the same contracts.
-- Flutter + Dart is only reintroduced for a platform that cannot be served
-  acceptably, with a written reason and a single-codebase migration path.
+  lighter Blits-only build for that model.
+- Any new platform family needs its own ADR. Retired targets (Linux, webOS,
+  Android TV, iOS/Android) are listed in ADR-004 and are not revisited by
+  preference.

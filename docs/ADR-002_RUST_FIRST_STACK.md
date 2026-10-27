@@ -1,6 +1,11 @@
 # ADR-002 — Rust-first multi-platform stack (supersedes ADR-001)
 
-- **Status:** Accepted
+> **Amended 2026-10-26 by [ADR-003](ADR-003_DESKTOP_AND_TV_SCOPE.md):** Screenroom
+> targets desktop/laptop and smart TVs only. The iOS, Android phone/tablet and
+> Flutter fallback rows below, and every UniFFI statement, are history. Android TV
+> now uses the LightningJS 3 + Blits TV client with Media3 playback.
+
+- **Status:** Accepted (platform scope amended by ADR-003)
 - **Date:** 2026-10-26
 - **Supersedes:** [ADR-001](ADR-001_SELECTED_STACK.md) (Flutter-first), and every
   earlier Svelte/Tauri or Flutter-only statement.
