@@ -27,9 +27,17 @@ they are consolidated rather than quietly skipped):
 x86_64-pc-windows-msvc` fails inside `libsqlite3-sys`, whose bundled SQLite needs
 the MSVC SDK headers (`fatal error: 'stdlib.h' file not found`). So every
 `cfg!(windows)` branch — the libmpv candidate names, the D3D11 bridge choice, the
-Windows path rules — is unbuilt as well as unrun. That is a toolchain gap rather
-than a code failure, and it is why Windows stays a blocked gate rather than a work
-item that is merely untested.
+Windows path rules, the `WindowsPortable` folder logic — is unbuilt as well as
+unrun. That is a toolchain gap rather than a code failure, and it is why Windows
+stays a blocked gate rather than a work item that is merely untested.
+
+Three Windows defects were nonetheless found and fixed from here on 2026-10-28 by
+reasoning about the platform's documented behaviour and asserting it with
+Windows-shaped inputs: `canonicalize` returning a verbatim path (which made the
+scanner refuse every healthy Windows source as a replaced symlink), `D:\Media` and
+`D:/Media` not comparing equal, and four fixed grid columns on a 3440-wide window.
+**None of the three has been observed on Windows**, and the check that would falsify
+each is named in `WINDOWS_VALIDATION.md` §7. Do not read "fixed" here as "verified".
 
 Nothing in this document has been run against Windows or a TV.
 

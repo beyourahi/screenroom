@@ -252,7 +252,8 @@ assumed by the presentation shader.
 - **4K / hardware decode**: the software bridge is `hwdec=no` by design and capped
   at 1920 px, so 4K smoothness is neither claimed nor measured.
 - **Windows**: nothing here ran on Windows, including the D3D11 path (unbuilt) and
-  the case-insensitive path folding.
+  the case-insensitive path folding. `WINDOWS_VALIDATION.md` is the handoff that
+  turns each of these into a runnable check.
 
 ### Release-build measurement (2026-10-27)
 
@@ -519,25 +520,30 @@ opens at all. Both need a visible window and an owner-approved session.
 
 ```bash
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets
 cargo fmt --all --check
 ```
 
-**168 tests, 0 failures**, clippy clean, formatting clean:
+**189 tests, 0 failures**, clippy with no first-party warnings, formatting clean:
 
 | Suite | Tests |
 | --- | --- |
-| `screenroom-core` unit (filename, fingerprint) | 13 |
-| `core/tests/library.rs` (incl. per-viewer isolation, path semantics) | 26 |
+| `screenroom-core` unit (filename, fingerprint, path identity) | 23 |
+| `core/tests/library.rs` (incl. per-viewer isolation, path semantics) | 27 |
 | `core/tests/storage.rs` (preferences, subtitle style, backup) | 19 |
-| `core/tests/scanner.rs` (incl. an unplugged drive) | 9 |
+| `core/tests/scanner.rs` (incl. an unplugged drive, a deleted folder, a withdrawn grant) | 10 |
 | `core/tests/recovery.rs` | 7 |
 | `core/tests/scale.rs` (10,000 items) | 2 |
-| `screenroom-player` unit | 15 |
+| `screenroom-player` unit (incl. the bundled-libmpv search order) | 20 |
 | `player/tests/worker.rs` (real decode, audio, tracks, subtitle style) | 12 |
 | `player/tests/libmpv_smoke.rs` | 2 |
-| `screenroom-desktop` unit | 57 |
+| `screenroom-desktop` unit (incl. the window-width grid rule) | 61 |
 | `desktop/tests/playback.rs` | 6 |
+
+The count is not the coverage. Two scanner tests have `#[cfg(unix)]` bodies, and the
+fourteen player tests print `skipped: …` and pass vacuously when no libmpv is found.
+Neither of those is a Windows-specific gap; both are recorded so the number is not
+mistaken for evidence it does not carry.
 
 Headless scripts, which are not part of `cargo test`:
 
@@ -553,7 +559,7 @@ Headless scripts, which are not part of `cargo test`:
 
 | Gate | Status | Reason |
 | --- | --- | --- |
-| Desktop frame presentation on real Windows GPU | BLOCKED | no Windows hardware/Visual Studio on this host |
+| Desktop frame presentation on real Windows GPU | BLOCKED | no Windows hardware/Visual Studio on this host; every `cfg!(windows)` branch is unbuilt as well as unrun. The exact handoff — commands, expectations, acceptance checks and named falsifications — is `WINDOWS_VALIDATION.md` |
 | Windows 4K/HDR/hardware decode | BLOCKED | same |
 | Physical Samsung UA50AU8000RXER (install, USB, AVPlay, durability) | BLOCKED | device and Tizen signing profile not available |
 | Lightning 3 on the Tizen 6.0 engine | NOT YET RUN | needs the TV client and the device |
@@ -580,24 +586,34 @@ receipt.
 4. **Private design system boundary.** Mapping is implemented with the token export
    kept out of Git; a fully public build (no private pin at all) still has to be
    built once and proven to compile and run.
-5. **Windows path semantics — partly closed, partly not.** The folding rule was a
-   `cfg!` and is now a value (`PathSemantics`, chosen by
-   [`Library::with_path_semantics`]), which is the right shape for it: case-folding
-   is a property of the *volume*, not of the operating system, and a case-sensitive
-   APFS or NTFS volume exists. Both branches are now tested from this Mac, and the
-   key rule is asserted directly (`/Media/Shows` folds to `/media/shows` under
-   `CaseInsensitive` and is left alone under `CaseSensitive`).
+5. **Windows path semantics — the rules are closed, the platform is not.** The
+   folding rule was a `cfg!` and is now a value (`PathSemantics`, chosen by
+   [`Library::with_path_semantics`]): case-folding is a property of the *volume*, not
+   of the operating system, and a case-sensitive APFS or NTFS volume exists. Both
+   branches are tested from this Mac, and the key rule is asserted directly
+   (`/Media/Shows` folds to `/media/shows` under `CaseInsensitive` and is left alone
+   under `CaseSensitive`).
 
-   **Still open:** the file-system half of it. On this host's case-folding volume,
-   `Media/SHOWS` resolves to `Media/Shows`, so the case-sensitive *grant* path
-   cannot be reached through the file system here; the test detects that and asserts
-   the reachable half instead of claiming the other. And **no Windows target
-   compiles from this Mac at all**: `cargo check --target x86_64-pc-windows-msvc`
-   fails inside `libsqlite3-sys`, whose bundled SQLite needs the MSVC SDK's headers
+   The *spelling* rules were added on 2026-10-28 (`paths::location_key`, with
+   `PathStyle` as a value for the same reason), because comparing paths literally
+   was wrong on Windows in two ways: `std::fs::canonicalize` returns a verbatim path
+   there, so the scanner's symlink guard refused **every** healthy Windows source as
+   a replaced link, and `D:\Media` did not compare equal to `D:/Media`, so the same
+   folder could be granted twice. Both are asserted from this Mac with
+   Windows-shaped inputs.
+
+   **Still open:** the file-system half. On this host's case-folding volume,
+   `Media/SHOWS` resolves to `Media/Shows`, so the case-sensitive *grant* path cannot
+   be reached through the file system here; the test detects that and asserts the
+   reachable half instead of claiming the other. And **no Windows target compiles
+   from this Mac at all**: `cargo check --target x86_64-pc-windows-msvc` fails inside
+   `libsqlite3-sys`, whose bundled SQLite needs the MSVC SDK's headers
    (`fatal error: 'stdlib.h' file not found`). That is a toolchain gap, not a code
    failure, and it means every `cfg!(windows)` branch in the tree — the libmpv
-   candidate names, the D3D11 bridge choice — is still unbuilt and unrun. Windows
-   remains a blocked gate.
+   candidate names, the D3D11 bridge choice, the `WindowsPortable` folder logic — is
+   still unbuilt and unrun. Windows remains a blocked gate; `WINDOWS_VALIDATION.md`
+   is the handoff.
+
 6. **Packaged binary vs development tree.** The `.app` bundles libmpv but not its
    transitive Homebrew dependencies, and it is unsigned. That is deliberate for a
    personal install; making it portable is a separate licensing and signing task.
@@ -610,6 +626,22 @@ receipt.
    10,000 entries but not at 50,000 (~93 ms for a page plus count), where `OFFSET`
    must be replaced with keyset paging. Not fixed ahead of a library that size
    existing; measured in M1 above.
+9. **A drive that returns under a different letter needs a relink.** Windows mints
+   a new drive letter for the same volume, and the letter is part of the path
+   spelling, so a USB source granted as `E:\Media` is not recognised as `F:\Media`:
+   there is no volume-serial identity yet. The recovery is an explicit relink, which
+   re-issues the grant and re-proves every file, so nothing is deleted and history,
+   lists and resume positions survive. Recorded as a limit rather than a defect
+   because the recovery path exists and is the honest one — that two letters are one
+   volume is not something a string can know.
+10. **A download sidecar in capitals is not noticed on a case-sensitive file
+    system.** `has_download_sidecar` probes for the lowercase suffix with `exists()`,
+    which finds `Movie.mkv.CRDOWNLOAD` on Windows and on this host's case-folding APFS
+    volume but not on Linux. There the file is imported while still being written and
+    is caught by the size/mtime settle check instead. Left alone because the
+    Windows-side case — the one this session had to answer — already works, and the
+    Linux half means matching case against the directory listing the walk already
+    holds.
 
 ---
 
