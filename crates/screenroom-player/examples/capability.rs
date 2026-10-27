@@ -11,7 +11,12 @@
 //! the normal search prefers the system paths on a development machine.
 
 fn main() {
-    let error = match std::env::args().nth(1) {
+    let argument = std::env::args().nth(1);
+    if argument.as_deref() == Some("--explain") {
+        explain();
+        return;
+    }
+    let error = match argument {
         None => {
             let capability = screenroom_player::capability();
             report(&capability);
@@ -29,6 +34,29 @@ fn main() {
     if let Some(reason) = error {
         eprintln!("the requested libmpv is not usable: {reason}");
         std::process::exit(1);
+    }
+}
+
+/// Prints every path `load` would try, in order, plus how the order was chosen.
+///
+/// This exists for the Windows machine, which cannot be inspected from the Mac that
+/// develops the code: a bare "no libmpv shared library found" is a blank refusal, and
+/// the interesting question there is whether the install's own copy was reached
+/// before the platform search — which is a security property, not just a preference.
+fn explain() {
+    println!(
+        "bundle layout:   {:?}",
+        screenroom_player::BundleLayout::host()
+    );
+    println!(
+        "platform search consults the working directory: {}",
+        screenroom_player::system_search_consults_working_directory()
+    );
+    println!();
+    println!("search order (first match wins):");
+    for (index, path) in screenroom_player::libmpv_search_plan().iter().enumerate() {
+        let exists = if path.exists() { "present" } else { "absent" };
+        println!("  {:>2}. {exists:<7} {}", index + 1, path.display());
     }
 }
 

@@ -124,34 +124,179 @@ fn candidates() -> &'static [&'static str] {
     }
 }
 
-/// libmpv inside a packaged application bundle, tried after the system paths.
+/// How a packaged installation lays its files out around the executable.
 ///
-/// A `.app` must not assume the user has Homebrew, so the bundle can carry its own
-/// libmpv in `Contents/Frameworks`. `dlopen` does not search there for a bare
-/// name, and setting `DYLD_LIBRARY_PATH` from inside the process is not an option
-/// on a signed application, so the path is built from the running executable's own
-/// location instead. That also means the bundle works wherever the user puts it.
-#[cfg(target_os = "macos")]
+/// A value rather than a `cfg!` so both layouts can be asserted from either host.
+/// The Windows layout in particular cannot be exercised on this machine, and the
+/// rules it encodes — which folders a shipped DLL may live in — are exactly the
+/// ones worth pinning down before they are discovered on Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleLayout {
+    /// A macOS `.app`: the executable is `Contents/MacOS/<exe>` and a bundled
+    /// library lives in `Contents/Frameworks`.
+    MacOsAppBundle,
+    /// A Windows folder holding the `.exe` — what a portable install and an
+    /// installer's program folder both look like.
+    WindowsPortable,
+    /// Linux, where libmpv comes from the system and nothing is bundled.
+    SystemOnly,
+}
+
+impl BundleLayout {
+    /// The layout of the platform this binary was built for.
+    pub fn host() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::MacOsAppBundle
+        } else if cfg!(windows) {
+            Self::WindowsPortable
+        } else {
+            Self::SystemOnly
+        }
+    }
+}
+
+/// Whether this platform's own library search consults the working directory.
+///
+/// Windows does. `libloading` issues `LoadLibraryExW(name, 0, 0)`, and that search
+/// order puts the current directory ahead of `PATH`, so a bare name can be satisfied
+/// by a file in whatever folder the application was launched from. macOS and Linux
+/// do not search the working directory for a bare library name.
+///
+/// This is a separate question from [`BundleLayout`]: it is about the *order* the two
+/// candidate lists are tried in, and it exists so that order can be asserted on the
+/// host that cannot observe it.
+pub fn system_search_consults_working_directory() -> bool {
+    cfg!(windows)
+}
+
+/// The bare names the platform's own search resolves.
+fn system_candidates() -> Vec<PathBuf> {
+    candidates().iter().map(PathBuf::from).collect()
+}
+
+/// Builds the search order from the platform search and the packaged paths.
+///
+/// Pure, and takes the platform fact as an argument, so both orders are assertable
+/// where only one can be observed.
+///
+/// The two orders are deliberate and opposite:
+///
+/// * Where the platform search consults the working directory (Windows), the
+///   explicit paths come **first**. Every one of them names a single file, so
+///   nothing about the user's current folder can influence which library loads.
+///   A planted `mpv-2.dll` in the folder the user launched from cannot be reached.
+/// * Elsewhere the platform search comes first, so a development machine keeps
+///   preferring a newer libmpv from its package manager over an older one bundled
+///   with an installed copy of the application. There, the system search is by
+///   name and location rather than by working directory, so preferring it is not a
+///   security trade.
+fn library_search_order(
+    system: &[PathBuf],
+    bundled: &[PathBuf],
+    system_search_consults_working_directory: bool,
+) -> Vec<PathBuf> {
+    let mut order = Vec::with_capacity(system.len() + bundled.len());
+    if system_search_consults_working_directory {
+        order.extend_from_slice(bundled);
+        order.extend_from_slice(system);
+    } else {
+        order.extend_from_slice(system);
+        order.extend_from_slice(bundled);
+    }
+    order
+}
+
+/// The file names a bundled libmpv may have, per platform.
+fn bundled_names() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["mpv-2.dll", "libmpv-2.dll", "libmpv.dll"]
+    } else if cfg!(target_os = "macos") {
+        &["libmpv.2.dylib", "libmpv.dylib"]
+    } else {
+        &[]
+    }
+}
+
+/// Where a packaged installation should look for its own libmpv, in order.
+///
+/// Pure, and takes the executable's directory rather than reading it, so the layout
+/// of a platform this machine is not running can still be asserted.
+///
+/// **Why the paths are explicit rather than bare names.** A bare name is resolved
+/// by the platform's own search, and on Windows that search includes the *current
+/// working directory*: `LoadLibraryExW(name, 0, 0)` — which is what `libloading`
+/// issues — would happily load an `mpv-2.dll` sitting in whatever folder the user
+/// happened to launch from. A media library in Downloads is a plausible place for
+/// a planted DLL next to the executable, so the application directory is named
+/// explicitly instead and the working directory never enters the search.
+///
+/// Passing `binary_dir` as the directory that the installed folder's *executable*
+/// sits in.
+///
+/// A folder that does not exist simply fails to load, which is why the list is
+/// yielded in preference order rather than filtered: checking existence here would
+/// make this depend on the file system and stop being pure.
+fn bundled_libmpv_paths(binary_dir: &Path, names: &[&str], layout: BundleLayout) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    match layout {
+        BundleLayout::MacOsAppBundle => {
+            // `Contents/MacOS/Screenroom` -> `Contents`, then `Contents/Frameworks`.
+            let contents = binary_dir.parent().map(Path::to_path_buf);
+            for name in names {
+                if let Some(contents) = &contents {
+                    paths.push(contents.join("Frameworks").join(name));
+                }
+                // Also beside the executable, which is what a hand-assembled or
+                // unpacked copy looks like.
+                paths.push(binary_dir.join(name));
+            }
+        }
+        BundleLayout::WindowsPortable => {
+            for name in names {
+                // Beside the `.exe` first: that is where a portable install puts it
+                // and where Windows itself would have looked.
+                paths.push(binary_dir.join(name));
+                // Then the subfolders a shipped archive or an installer's
+                // redistributable step typically uses.
+                paths.push(binary_dir.join("bin").join(name));
+                paths.push(binary_dir.join("lib").join(name));
+            }
+        }
+        BundleLayout::SystemOnly => {}
+    }
+    paths
+}
+
+/// The exact order `load` would try, for diagnosing a machine that cannot be
+/// reached from here.
+///
+/// A Windows install that reports "no libmpv shared library found" is otherwise a
+/// blank refusal. This names every path that was tried, in order, so the answer is
+/// visible from the machine itself rather than guessed at from another one. It
+/// reads only the executable's own location, so it is safe to run anywhere.
+pub fn libmpv_search_plan() -> Vec<PathBuf> {
+    library_search_order(
+        &system_candidates(),
+        &packaged_candidates(),
+        system_search_consults_working_directory(),
+    )
+}
+
+/// libmpv inside a packaged installation, tried after the system paths.
+///
+/// Built from the running executable's own location rather than from the working
+/// directory or an environment variable, so an installed copy works wherever the
+/// user put it — and, on Windows, so that the working directory is never searched.
+/// Setting `DYLD_LIBRARY_PATH` from inside the process is not an option on a signed
+/// macOS application, which is the other reason the path is computed here.
 fn packaged_candidates() -> Vec<PathBuf> {
     let Ok(executable) = std::env::current_exe() else {
         return Vec::new();
     };
-    // `Contents/MacOS/Screenroom` -> `Contents`.
-    let Some(contents) = executable.parent().and_then(Path::parent) else {
+    let Some(binary_dir) = executable.parent() else {
         return Vec::new();
     };
-    let beside = executable.parent().unwrap_or(contents);
-    let names = ["libmpv.2.dylib", "libmpv.dylib"];
-    names
-        .iter()
-        .flat_map(|name| [contents.join("Frameworks").join(name), beside.join(name)])
-        .collect()
-}
-
-/// No bundled-library search on platforms that load it from the system.
-#[cfg(not(target_os = "macos"))]
-fn packaged_candidates() -> Vec<PathBuf> {
-    Vec::new()
+    bundled_libmpv_paths(binary_dir, bundled_names(), BundleLayout::host())
 }
 
 pub(crate) type MpvHandle = *mut c_void;
@@ -232,17 +377,14 @@ impl std::fmt::Debug for LibMpv {
 impl LibMpv {
     /// Loads the first available libmpv on this device.
     pub fn load() -> Result<Arc<Self>, PlayerError> {
+        let order = library_search_order(
+            &system_candidates(),
+            &packaged_candidates(),
+            system_search_consults_working_directory(),
+        );
         let mut attempted = Vec::new();
-        for candidate in candidates() {
+        for candidate in &order {
             match Self::load_path(candidate) {
-                Ok(library) => return Ok(Arc::new(library)),
-                Err(error) => attempted.push(format!("{candidate} ({error})")),
-            }
-        }
-        // Only reached when nothing on the system path resolved, so a development
-        // machine's libmpv is still preferred over a bundle's older copy.
-        for candidate in packaged_candidates() {
-            match Self::load_path(&candidate) {
                 Ok(library) => return Ok(Arc::new(library)),
                 Err(error) => attempted.push(format!("{} ({error})", candidate.display())),
             }
@@ -769,6 +911,133 @@ mod tests {
             PlayerState::Playing.transition(PlayerState::Failed),
             PlayerState::Failed
         );
+    }
+
+    #[test]
+    fn a_windows_install_finds_its_own_libmpv_beside_the_executable() {
+        // The Windows layout is asserted from macOS because it cannot be run here,
+        // and it is the layout with the least room for improvisation: a shipped
+        // `mpv-2.dll` may sit beside the `.exe` or in the `bin`/`lib` folder a
+        // release archive uses, and nothing else is searched.
+        let install = Path::new(r"C:\Program Files\Screenroom");
+        let names = ["mpv-2.dll", "libmpv.dll"];
+        let paths = bundled_libmpv_paths(install, &names, BundleLayout::WindowsPortable);
+
+        // Compared as paths rather than as strings. `Path::join` uses this host's
+        // separator, so building a Windows-shaped path on macOS renders
+        // `...\Screenroom/mpv-2.dll`. That is an artefact of testing the layout from
+        // the wrong platform and not a defect on Windows, where `join` uses `\`; the
+        // folder *structure* is what is being asserted either way.
+        assert_eq!(
+            paths,
+            vec![
+                install.join("mpv-2.dll"),
+                install.join("bin").join("mpv-2.dll"),
+                install.join("lib").join("mpv-2.dll"),
+                install.join("libmpv.dll"),
+                install.join("bin").join("libmpv.dll"),
+                install.join("lib").join("libmpv.dll"),
+            ]
+        );
+
+        // Order is the point: beside the executable first, and the real name before
+        // the alternates.
+        assert!(paths[0].ends_with("mpv-2.dll"));
+        assert_eq!(paths[0].parent(), Some(install));
+
+        // Every path is anchored to the install folder, never to the process's
+        // working directory. A bare name here is what would let a planted DLL in
+        // whatever folder the user launched from be loaded instead.
+        for path in &paths {
+            assert!(
+                path.starts_with(install),
+                "a bundled candidate must be anchored to the install folder: {}",
+                path.display()
+            );
+            assert!(
+                path.file_name().is_some(),
+                "a candidate must name a file: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn the_windows_name_list_starts_with_the_real_dll_name() {
+        // `bundled_names` is platform-gated, so this asserts the list for whichever
+        // platform it is running on and says which one that was.
+        let names = bundled_names();
+        if cfg!(windows) {
+            assert_eq!(names, &["mpv-2.dll", "libmpv-2.dll", "libmpv.dll"]);
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(names, &["libmpv.2.dylib", "libmpv.dylib"]);
+        } else {
+            assert!(
+                names.is_empty(),
+                "Linux bundles nothing and resolves nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_macos_bundle_is_unchanged_by_the_windows_layout() {
+        let names = ["libmpv.2.dylib"];
+        let paths = bundled_libmpv_paths(
+            Path::new("/Applications/Screenroom.app/Contents/MacOS"),
+            &names,
+            BundleLayout::MacOsAppBundle,
+        );
+        let rendered: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(
+            rendered,
+            vec![
+                "/Applications/Screenroom.app/Contents/Frameworks/libmpv.2.dylib",
+                "/Applications/Screenroom.app/Contents/MacOS/libmpv.2.dylib",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_system_only_layout_bundles_nothing() {
+        // The `SystemOnly` branch is the Linux one, and its whole content is
+        // "produce no candidates". It is assertable on any host because the layout
+        // is passed in rather than read from the environment.
+        let names = ["libmpv.so.2", "libmpv.so.1"];
+        assert!(
+            bundled_libmpv_paths(Path::new("/usr/bin"), &names, BundleLayout::SystemOnly)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_working_directory_is_searched_last_on_windows_and_never_first() {
+        // The order is the security property: on Windows every explicit path is
+        // tried before any bare name, so the working directory cannot decide which
+        // library loads. The other order is asserted too, because it is the one
+        // that keeps a development machine on its package manager's newer libmpv.
+        let system = vec![PathBuf::from("mpv-2.dll")];
+        let bundled = vec![PathBuf::from(r"C:\App\mpv-2.dll")];
+
+        let windows = library_search_order(&system, &bundled, true);
+        assert_eq!(windows[0], bundled[0]);
+        assert_eq!(windows[1], system[0]);
+
+        let macos = library_search_order(&system, &bundled, false);
+        assert_eq!(macos[0], system[0]);
+        assert_eq!(macos[1], bundled[0]);
+
+        // And the fact that selects between them matches this platform, so the
+        // behaviour under test is the one that will actually run.
+        assert_eq!(system_search_consults_working_directory(), cfg!(windows));
+        assert_eq!(BundleLayout::host(), {
+            if cfg!(target_os = "macos") {
+                BundleLayout::MacOsAppBundle
+            } else if cfg!(windows) {
+                BundleLayout::WindowsPortable
+            } else {
+                BundleLayout::SystemOnly
+            }
+        });
     }
 
     #[test]

@@ -105,7 +105,6 @@ impl LibraryQuery {
     }
 }
 
-/// A single SQLite library.
 /// How the folder holding the library compares the case of a path.
 ///
 /// This decides one thing only: whether two roots that differ just in case are the
@@ -137,6 +136,7 @@ impl PathSemantics {
     }
 }
 
+/// A single SQLite library.
 pub struct Library {
     connection: Mutex<Connection>,
     active_scans: Mutex<HashSet<String>>,
