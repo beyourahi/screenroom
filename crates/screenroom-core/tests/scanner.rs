@@ -146,10 +146,14 @@ fn complete_rescan_withdraws_availability_without_losing_progress() {
 fn an_unplugged_drive_is_not_an_empty_library() {
     // The worst failure this application could have is treating a missing disk as a
     // deleted library: a rescan of an unplugged drive must not withdraw availability,
-    // drop rows, or lose progress. It must report the source as disconnected and
+    // drop rows, or lose progress. It must report the source as unavailable and
     // report the scan as incomplete, so nothing downstream believes it finished.
+    //
+    // A volume that is gone and a folder that was deleted are both covered, because
+    // they carry different recovery copy and the same preservation guarantees.
     let dir = TempDir::new().unwrap();
-    let root = dir.path().join("drive");
+    let volume = dir.path().join("volume");
+    let root = volume.join("drive");
     fs::create_dir_all(&root).unwrap();
     write_settled(&root.join("Film.2020.mkv"), b"film");
     write_settled(&root.join("Show.S01E01.mkv"), b"episode");
@@ -173,7 +177,9 @@ fn an_unplugged_drive_is_not_an_empty_library() {
         .unwrap();
     let file_id = file.id.clone();
 
-    // The drive goes away — not one file, the whole root.
+    // The folder is deleted while its volume stays mounted. The recovery is a
+    // relink, so saying "drive not attached" here would send the owner to do
+    // something that cannot work.
     fs::remove_dir_all(&root).unwrap();
     let summary = scanner(&library)
         .scan(&source.id, &ScanToken::new(), |_| {})
@@ -187,11 +193,12 @@ fn an_unplugged_drive_is_not_an_empty_library() {
     assert_eq!(summary.visited, 0);
     assert_eq!(
         summary.issues.first().map(|issue| issue.code),
-        Some("source_disconnected")
+        Some("source_missing"),
+        "a deleted folder is not an unmounted drive"
     );
     assert_eq!(
         library.source(&source.id).unwrap().state,
-        SourceState::Disconnected
+        SourceState::Missing
     );
 
     // Everything the owner had is still there, and still theirs.
@@ -206,7 +213,7 @@ fn an_unplugged_drive_is_not_an_empty_library() {
     };
     assert_eq!(library.count(&favorites).unwrap(), 1);
 
-    // And the drive coming back restores availability rather than leaving it stale.
+    // And the folder coming back restores availability rather than leaving it stale.
     fs::create_dir_all(&root).unwrap();
     write_settled(&root.join("Film.2020.mkv"), b"film");
     write_settled(&root.join("Show.S01E01.mkv"), b"episode");
@@ -223,6 +230,89 @@ fn an_unplugged_drive_is_not_an_empty_library() {
         "reconnecting the drive did not restore availability"
     );
     assert_eq!(library.count(&LibraryQuery::default()).unwrap(), 2);
+
+    // Now the volume itself goes away, taking the mount point with it. This one is
+    // a disconnected drive, and the recovery is to attach it again.
+    fs::remove_dir_all(&volume).unwrap();
+    let unplugged = scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+    assert!(!unplugged.complete);
+    assert_eq!(
+        unplugged.issues.first().map(|issue| issue.code),
+        Some("source_disconnected")
+    );
+    assert_eq!(
+        library.source(&source.id).unwrap().state,
+        SourceState::Disconnected
+    );
+    assert_eq!(
+        library.count(&LibraryQuery::default()).unwrap(),
+        2,
+        "an unmounted volume withdrew rows"
+    );
+    assert!(
+        library
+            .item(&file_id, Some(&profile.id))
+            .unwrap()
+            .unwrap()
+            .favorite,
+        "an unmounted volume lost a list entry"
+    );
+}
+
+#[test]
+fn a_root_behind_a_withdrawn_grant_is_not_a_missing_drive() {
+    // Access being revoked is a third case with its own recovery: re-granting. It is
+    // the one the owner cannot fix by looking at cables, so conflating it with the
+    // others would waste their time.
+    //
+    // Skipped when the process can read a mode-000 directory anyway, which is the
+    // case for a root user; the assertion is about the classification the operating
+    // system reports, not about this test being able to create the condition.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let locked = dir.path().join("locked");
+        let root = locked.join("media");
+        fs::create_dir_all(&root).unwrap();
+        write_settled(&root.join("Film.2020.mkv"), b"film");
+
+        let library = Library::open_in_memory().unwrap();
+        let source = library.add_source(&root, None).unwrap();
+        scanner(&library)
+            .scan(&source.id, &ScanToken::new(), |_| {})
+            .unwrap();
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = fs::read_dir(&locked).is_err();
+        let outcome = denied.then(|| {
+            scanner(&library)
+                .scan(&source.id, &ScanToken::new(), |_| {})
+                .unwrap()
+        });
+        // Restore before asserting, so a failure cannot leave an unreadable
+        // directory behind for the temporary-directory cleanup.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        if let Some(summary) = outcome {
+            assert_eq!(
+                summary.issues.first().map(|issue| issue.code),
+                Some("permission_lost")
+            );
+            assert_eq!(
+                library.source(&source.id).unwrap().state,
+                SourceState::PermissionLost
+            );
+            assert_eq!(
+                library.count(&LibraryQuery::default()).unwrap(),
+                1,
+                "a withdrawn grant withdrew rows"
+            );
+        }
+    }
 }
 
 #[test]

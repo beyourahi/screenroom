@@ -162,23 +162,9 @@ impl<'a> LibraryScanner<'a> {
         let root = match std::fs::canonicalize(&source.root_path) {
             Ok(root) => root,
             Err(error) => {
-                let permission = error.kind() == std::io::ErrorKind::PermissionDenied;
-                self.library.set_source_state(
-                    source_id,
-                    if permission {
-                        SourceState::PermissionLost
-                    } else {
-                        SourceState::Disconnected
-                    },
-                )?;
-                issues.push(
-                    "",
-                    if permission {
-                        "permission_lost"
-                    } else {
-                        "source_disconnected"
-                    },
-                );
+                let (state, code) = unavailable_root(Path::new(&source.root_path), error.kind());
+                self.library.set_source_state(source_id, state)?;
+                issues.push("", code);
                 let update = ScanUpdate {
                     visited: 0,
                     imported: 0,
@@ -457,6 +443,32 @@ fn is_season_folder(name: &str) -> bool {
     };
     let number = number.trim_start_matches([' ', '.', '_', '-']);
     !number.is_empty() && number.chars().all(|character| character.is_ascii_digit())
+}
+
+/// Which unavailability a root that will not resolve actually is.
+///
+/// The three cases have different recovery actions, so they are decided here rather
+/// than collapsed in a view: access was withdrawn needs a re-grant, a folder that is
+/// gone needs a relink, and a volume that is not attached needs plugging back in.
+/// Reporting a deleted folder as "drive not attached" tells the owner to do
+/// something that cannot work.
+///
+/// The probe is the stored root's **parent**. A parent that still exists means the
+/// volume holding the folder is mounted and the folder itself has gone; a parent
+/// that has also gone means the volume is not there. Nothing walks further up,
+/// because an unmounted mount point's own ancestors always still exist (`/Volumes`,
+/// `C:\`) and would answer "mounted" for every missing drive.
+fn unavailable_root(stored_root: &Path, kind: std::io::ErrorKind) -> (SourceState, &'static str) {
+    if kind == std::io::ErrorKind::PermissionDenied {
+        return (SourceState::PermissionLost, "permission_lost");
+    }
+    match stored_root.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() && parent.exists() => {
+            (SourceState::Missing, "source_missing")
+        }
+        // No parent at all is a file system root, which cannot be missing on its own.
+        _ => (SourceState::Disconnected, "source_disconnected"),
+    }
 }
 
 fn has_download_sidecar(path: &Path) -> bool {
