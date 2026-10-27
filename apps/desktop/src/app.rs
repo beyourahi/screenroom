@@ -42,14 +42,30 @@ const PLAYER_TICK: Duration = Duration::from_millis(16);
 /// How often status (scan progress) is polled when no player is open.
 const STATUS_TICK: Duration = Duration::from_millis(250);
 
-/// Cards per grid row. Four fits a 1280-wide window and an ultrawide comfortably.
-const COLUMNS: usize = 4;
+/// The window width assumed until a real resize event arrives.
+///
+/// Matches the initial `window_size` below, so the first frame lays out the same way
+/// the second one will.
+const INITIAL_WINDOW_WIDTH: f32 = 1280.0;
 
-/// Rows per page. 24 cards keeps a page bounded and the query cheap.
+/// Rows a page is built from, so a page stays bounded and the query cheap.
+///
+/// This is the *paging* unit and deliberately does not follow the window: a page is
+/// a fixed 24 items however wide the window is, which is what keeps the measured
+/// query budget (see `IMPLEMENTATION_STATUS.md`) valid. Only the visual column count
+/// adapts, and a page that does not fill its last row is padded rather than
+/// re-queried.
 const PAGE_ROWS: usize = 6;
 
-/// Items per page, derived so the grid never shows a ragged final row.
-const PAGE_SIZE: i64 = (COLUMNS * PAGE_ROWS) as i64;
+/// Items per page.
+const PAGE_SIZE: i64 = (DEFAULT_COLUMNS * PAGE_ROWS) as i64;
+
+/// Cards per row in an ordinary window.
+///
+/// The column count is derived from the width at runtime (see [`grid_columns`]);
+/// this is the reference point that keeps a 1280-wide window looking as it did when
+/// the count was a constant.
+const DEFAULT_COLUMNS: usize = 4;
 
 /// Continue Watching rail length.
 const RAIL: i64 = 8;
@@ -349,6 +365,12 @@ pub struct App {
     active: Option<Active>,
     scrub: Option<f64>,
 
+    /// Window width in logical pixels, updated from resize events.
+    ///
+    /// Held because the grid's column count is derived from it. Kept as a plain f32
+    /// rather than a `Size` so a test can set a width without a window existing.
+    window_width: f32,
+
     /// Stored preferences, held so a per-frame tick never reads the database.
     preferences: Preferences,
 
@@ -505,6 +527,8 @@ pub enum Message {
     SeekStep(f64),
     /// Choose a track, or turn a kind off with [`NO_TRACK`].
     SelectTrack(TrackKind, i64),
+    /// The window was resized to this width in logical pixels.
+    Resized(f32),
     /// Subtitle text size, in percent of normal, as a slider reports it.
     SubtitleScale(f64),
     /// Subtitle placement, in percent of the screen height from the top.
@@ -631,6 +655,7 @@ impl App {
             frame: None,
             active: None,
             scrub: None,
+            window_width: INITIAL_WINDOW_WIDTH,
             preferences,
             profiles: Vec::new(),
             sources: Vec::new(),
@@ -1813,6 +1838,14 @@ impl App {
             }
             Message::SubtitleLanguageChanged(value) => self.subtitle_input = value,
             Message::AudioLanguageChanged(value) => self.audio_input = value,
+            Message::Resized(width) => {
+                // A zero or non-finite width arrives while a window is being
+                // minimised or created; keeping the previous value avoids a layout
+                // that briefly has no columns at all.
+                if width.is_finite() && width > 0.0 {
+                    self.window_width = width;
+                }
+            }
             Message::SubtitleScale(value) => self.apply_subtitle_style(
                 round_percent(
                     value,
@@ -1885,12 +1918,16 @@ impl App {
             return;
         }
         let current = self.focus.min(len - 1);
+        // Up and Down move by a whole row, so the step has to be the column count the
+        // grid was actually drawn with: a fixed step would land on the wrong card as
+        // soon as the window is wide enough to change the layout.
+        let step = self.columns();
         let next = match direction {
             Focus::Left => current.checked_sub(1),
             Focus::Right => (current + 1 < len).then_some(current + 1),
-            Focus::Up => current.checked_sub(COLUMNS),
+            Focus::Up => current.checked_sub(step),
             Focus::Down => {
-                let candidate = current + COLUMNS;
+                let candidate = current + step;
                 (candidate < len).then_some(candidate)
             }
         };
@@ -2061,6 +2098,10 @@ impl App {
             // window's close box and that button cannot disagree about whether the
             // open file was stored.
             iced::window::close_requests().map(|_| Message::Close),
+            // The grid's column count follows the window, so a 3440-wide ultrawide
+            // shows more cards rather than four very wide ones. Resizes arrive as
+            // events rather than being polled, so this costs nothing while idle.
+            iced::window::resize_events().map(|(_id, size)| Message::Resized(size.width)),
         ];
         let interval = if self.screen == Screen::Player {
             PLAYER_TICK
@@ -2560,22 +2601,32 @@ impl App {
     /// A bounded grid of cards, where `base` is the focus index of the first card.
     fn card_grid(&self, items: &[LibraryItem], base: usize) -> Element<'_, Message> {
         let tokens = design::tokens();
+        // Computed once, so the row chunking, the focus index and the padding all
+        // agree even if a resize event arrives mid-view.
+        let columns = self.columns();
         let mut grid = column![]
             .spacing(tokens.spacing.field_x)
             .width(Length::Fill);
-        for (row_index, chunk) in items.chunks(COLUMNS).enumerate() {
+        for (row_index, chunk) in items.chunks(columns).enumerate() {
             let mut cells = row![].spacing(tokens.spacing.field_x).width(Length::Fill);
             for (column_index, item) in chunk.iter().enumerate() {
-                let index = base + row_index * COLUMNS + column_index;
+                let index = base + row_index * columns + column_index;
                 cells = cells.push(self.card(item, self.focus == index));
             }
-            // Pad the final row so every card keeps the same width.
-            for _ in chunk.len()..COLUMNS {
+            // Pad the final row so every card keeps the same width. A page is a fixed
+            // 24 items, so with an odd column count the last row is genuinely short:
+            // padding is what stops those cards stretching to fill it.
+            for _ in chunk.len()..columns {
                 cells = cells.push(Space::new().width(Length::FillPortion(1)));
             }
             grid = grid.push(cells);
         }
         grid.into()
+    }
+
+    /// Cards per row for the window currently open.
+    fn columns(&self) -> usize {
+        grid_columns(self.window_width)
     }
 
     /// One poster-less card: title, position, and its state.
@@ -3298,6 +3349,45 @@ pub fn browse_empty_copy(has_sources: bool, narrowed: bool) -> (&'static str, &'
     }
 }
 
+/// Cards per grid row for a window this wide, in logical pixels.
+///
+/// The grid was four fixed columns, which is right for the 1280-wide default window
+/// and wrong at both ends of the range this owner actually uses. Four cards across a
+/// 3440px ultrawide are ~860px each, so a poster grid reads as four billboards; at a
+/// narrow window they are cramped. The count follows a comfortable card width instead.
+///
+/// A pure function of the width, so the layout at 3440×1440 and at 1280×800 are both
+/// asserted without a window existing — which matters because the ultrawide is the
+/// one machine this cannot be run on.
+///
+/// The bounds are deliberate: two columns is the fewest that still reads as a grid,
+/// and eight is where a 3440-wide window lands before cards start looking thin.
+/// Everything outside the range clamps rather than erroring, because a window
+/// manager is allowed to ask for any width at all.
+pub fn grid_columns(window_width: f32) -> usize {
+    /// Card width the layout aims for, including the gap between cards.
+    const TARGET_CARD_PX: f32 = 300.0;
+    /// Fewest columns that still reads as a grid.
+    const MIN_COLUMNS: usize = 2;
+    /// Most columns offered, so an ultrawide does not produce slivers.
+    const MAX_COLUMNS: usize = 8;
+
+    if !window_width.is_finite() {
+        return DEFAULT_COLUMNS;
+    }
+    // The shell pads both sides, so the usable width is narrower than the window.
+    let usable = window_width - 2.0 * design::tokens().spacing.shell_pad;
+    if usable <= 0.0 {
+        return MIN_COLUMNS;
+    }
+    let columns = (usable / TARGET_CARD_PX).floor();
+    // A NaN cast to usize is 0, and 0 columns would divide by zero below.
+    if !columns.is_finite() || columns < 1.0 {
+        return MIN_COLUMNS;
+    }
+    (columns as usize).clamp(MIN_COLUMNS, MAX_COLUMNS)
+}
+
 /// Rounds a slider position to a whole percent inside `min..=max`.
 ///
 /// A slider works in floats and a preference is stored as a whole percent, so the
@@ -3349,6 +3439,97 @@ mod tests {
         assert_eq!(clock(3_661.0), "1:01:01");
         assert_eq!(clock(-4.0), "0:00");
         assert_eq!(clock(f64::NAN), "0:00");
+    }
+
+    #[test]
+    fn the_grid_shows_more_cards_as_the_window_widens() {
+        // The two windows this owner actually uses, asserted without either existing.
+        // The ultrawide is the machine this cannot be run on, so the layout rule is
+        // the only thing that can be checked here.
+        let laptop = grid_columns(1280.0);
+        let ultrawide = grid_columns(3440.0);
+        assert_eq!(
+            laptop, DEFAULT_COLUMNS,
+            "a 1280-wide window keeps its old look"
+        );
+        assert!(
+            ultrawide > laptop,
+            "an ultrawide must show more cards, not wider ones: {ultrawide} vs {laptop}"
+        );
+
+        // And the width of a card on the ultrawide stays in the range the rule aims
+        // for, which is the actual complaint: four columns of 860px each.
+        let usable = 3440.0 - 2.0 * design::tokens().spacing.shell_pad;
+        let card = usable / ultrawide as f32;
+        assert!(
+            card < 600.0,
+            "a card on the ultrawide is {card:.0}px wide, which is a billboard"
+        );
+    }
+
+    #[test]
+    fn the_column_count_is_monotonic_and_always_usable() {
+        // A window manager may ask for any width at all, including nonsense.
+        let mut previous = 0;
+        for width in [
+            320.0_f32, 800.0, 1024.0, 1280.0, 1920.0, 2560.0, 3440.0, 5120.0,
+        ] {
+            let columns = grid_columns(width);
+            assert!(
+                (2..=8).contains(&columns),
+                "{width}px produced {columns} columns, which is outside the range"
+            );
+            assert!(
+                columns >= previous,
+                "widening the window reduced the column count: {width}px gave {columns}"
+            );
+            previous = columns;
+        }
+
+        // Degenerate widths must still produce a drawable grid rather than zero
+        // columns, which would divide by zero in the card layout.
+        for width in [0.0_f32, -100.0, 10.0, f32::NAN, f32::INFINITY] {
+            let columns = grid_columns(width);
+            assert!(columns >= 2, "{width} produced {columns} columns");
+        }
+    }
+
+    #[test]
+    fn keyboard_rows_move_by_the_columns_the_grid_was_drawn_with() {
+        // Up/Down step a whole row, so the step and the layout have to agree: a fixed
+        // step would land on the wrong card on a wider window. This is the coupling
+        // that a constant column count used to hide.
+        let (mut app, _directory) = app_with(24);
+        app.window_width = 3440.0;
+        let columns = app.columns();
+        assert!(columns > DEFAULT_COLUMNS, "this test needs a wider grid");
+
+        app.focus = 0;
+        app.move_focus(Focus::Down);
+        assert_eq!(app.focus, columns, "Down must move exactly one row");
+        app.move_focus(Focus::Up);
+        assert_eq!(app.focus, 0, "Up must return to the same column");
+
+        // Right stays one item, so moving along a row is unaffected.
+        app.move_focus(Focus::Right);
+        assert_eq!(app.focus, 1);
+    }
+
+    #[test]
+    fn a_resize_event_that_has_no_usable_width_is_ignored() {
+        // A minimize or a window being created reports a zero width; keeping the last
+        // good value avoids a frame laid out with no usable width.
+        let (mut app, _directory) = app_with(4);
+        app.window_width = 1920.0;
+        for width in [0.0_f32, -1.0, f32::NAN, f32::INFINITY] {
+            let _ = app.update(Message::Resized(width));
+            assert_eq!(
+                app.window_width, 1920.0,
+                "a width of {width} must not replace a usable one"
+            );
+        }
+        let _ = app.update(Message::Resized(3440.0));
+        assert_eq!(app.window_width, 3440.0);
     }
 
     #[test]
@@ -3469,9 +3650,13 @@ mod tests {
     }
 
     #[test]
-    fn the_page_grid_never_shows_a_ragged_row() {
-        assert_eq!(PAGE_SIZE, (COLUMNS * PAGE_ROWS) as i64);
-        assert_eq!(PAGE_SIZE % COLUMNS as i64, 0);
+    fn the_page_size_is_a_whole_number_of_reference_rows() {
+        // The column count is now derived from the window width, so a page need not
+        // fill its last row. What keeps the grid square is the layout padding a
+        // partial row with spacers; this only keeps the page size a whole number of
+        // rows for the width the reference grid describes.
+        assert_eq!(PAGE_SIZE, (DEFAULT_COLUMNS * PAGE_ROWS) as i64);
+        assert_eq!(PAGE_SIZE % DEFAULT_COLUMNS as i64, 0);
     }
 
     #[test]
@@ -3583,6 +3768,9 @@ mod tests {
     #[test]
     fn focus_walks_the_grid_and_stops_at_the_edges() {
         let (mut app, _directory) = app_with(10);
+        // A test-built app has never been resized, so it is laid out for the
+        // reference width; the wider case is covered separately.
+        assert_eq!(app.columns(), DEFAULT_COLUMNS);
         assert_eq!(app.focus, 0);
         app.move_focus(Focus::Left);
         assert_eq!(app.focus, 0, "focus must not leave the first card");
@@ -3591,7 +3779,7 @@ mod tests {
         app.move_focus(Focus::Up);
         assert_eq!(app.focus, 1, "there is no row above the first");
         app.move_focus(Focus::Down);
-        assert_eq!(app.focus, 1 + COLUMNS, "down moves a whole row");
+        assert_eq!(app.focus, 1 + DEFAULT_COLUMNS, "down moves a whole row");
         // Walk to the last card and confirm it does not run past the page.
         for _ in 0..20 {
             app.move_focus(Focus::Right);
