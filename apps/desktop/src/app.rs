@@ -25,9 +25,12 @@ use iced::widget::{
 };
 use iced::{Alignment, Element, Length, Subscription, Task, keyboard};
 use screenroom_core::{
-    CoreError, Library, LibraryItem, LibraryQuery, LibraryScanner, MediaKind, ScanToken, Sort,
+    CoreError, Library, LibraryItem, LibraryQuery, LibraryScanner, MediaKind, Preferences, Profile,
+    ScanToken, Sort, Source, SourceState,
 };
-use screenroom_player::{Player, PlayerCapability, PlayerSnapshot};
+use screenroom_player::{
+    MediaTrack, NO_TRACK, Player, PlayerCapability, PlayerSnapshot, TrackKind,
+};
 
 use crate::design::{self, Level};
 use crate::playback::PlaybackTracker;
@@ -86,6 +89,25 @@ pub fn default_library_path() -> Option<PathBuf> {
     Some(base.join("Screenroom").join("library.db"))
 }
 
+/// Where a backup is written when the user has not chosen somewhere else.
+///
+/// The name is dated so a second backup cannot silently replace the first, and it
+/// sits in the same folder as the library: the library's directory is known to be
+/// writable, which a guessed Documents folder is not.
+pub fn default_backup_path() -> String {
+    let Some(library) = default_library_path() else {
+        return String::new();
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    library
+        .with_file_name(format!("screenroom-backup-{stamp}.db"))
+        .to_string_lossy()
+        .to_string()
+}
+
 /// Which surface is on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -97,6 +119,8 @@ pub enum Screen {
     Detail,
     /// Video playback.
     Player,
+    /// Viewer, playback, folder and data settings.
+    Settings,
 }
 
 /// The library kind filter offered in Browse.
@@ -280,6 +304,29 @@ pub struct App {
     active: Option<Active>,
     scrub: Option<f64>,
 
+    /// Stored preferences, held so a per-frame tick never reads the database.
+    preferences: Preferences,
+
+    /// Viewer profiles, reloaded whenever they can have changed.
+    profiles: Vec<Profile>,
+    /// Authorized folders, reloaded whenever they can have changed.
+    sources: Vec<Source>,
+    /// New-profile text field.
+    new_profile: String,
+    /// Source chosen for relinking, and the new root typed for it.
+    relink_target: Option<String>,
+    relink_path: String,
+    /// Destination for the next backup, pre-filled with a dated default.
+    backup_path: String,
+    /// Backup chosen for restoring, and whether the confirm step is armed.
+    restore_path: String,
+    armed_restore: Option<String>,
+    /// Language text fields, applied when submitted rather than per keystroke.
+    subtitle_input: String,
+    audio_input: String,
+    /// Folder whose removal is waiting for confirmation.
+    armed_remove: Option<String>,
+
     /// Text field for granting a new media root.
     new_root: String,
     scan_token: Option<ScanToken>,
@@ -344,6 +391,51 @@ pub enum Message {
     AddFolder,
     /// Cancel a running scan.
     CancelScan,
+    /// Rescan one folder the library already holds.
+    RescanSource(String),
+    /// Ask to remove a folder, or confirm that request when repeated.
+    RemoveSource(String),
+    /// Withdraw a removal or restore confirmation.
+    CancelArmed,
+    /// Choose the folder to relink.
+    RelinkTargetChosen(String),
+    /// The relink path text field changed.
+    RelinkPathChanged(String),
+    /// Point the chosen folder at the typed path and rescan it.
+    RelinkSource,
+
+    /// Navigate to Settings.
+    GoSettings,
+    /// The active profile changed.
+    ProfileChosen(String),
+    /// The new-profile text field changed.
+    NewProfileChanged(String),
+    /// Add the profile in the text field and switch to it.
+    AddProfile,
+    /// Remove a profile.
+    RemoveProfile(String),
+    /// Turn automatic next-episode playback on or off.
+    ToggleAutoplay(bool),
+    /// Apply the typed subtitle language, or clear it when empty.
+    ApplySubtitleLanguage,
+    /// Apply the typed audio language, or clear it when empty.
+    ApplyAudioLanguage,
+    /// The subtitle language field changed.
+    SubtitleLanguageChanged(String),
+    /// The audio language field changed.
+    AudioLanguageChanged(String),
+    /// The backup destination changed.
+    BackupPathChanged(String),
+    /// Write a backup now.
+    BackupNow,
+    /// The restore source changed.
+    RestorePathChanged(String),
+    /// Validate the chosen backup, then restore from it on the second press.
+    RestoreNow,
+    /// Check a backup file and report what it holds without changing anything.
+    InspectRestore,
+    /// Dismiss the last status line.
+    ClearStatus,
 
     /// Leave the player and return to the library.
     BackFromPlayer,
@@ -355,6 +447,8 @@ pub enum Message {
     SeekCommit,
     /// Seek by a fixed step, positive forwards.
     SeekStep(f64),
+    /// Choose a track, or turn a kind off with [`NO_TRACK`].
+    SelectTrack(TrackKind, i64),
     /// Poll the player and the scan.
     Tick,
     /// A keyboard event.
@@ -449,6 +543,9 @@ impl App {
             .and_then(|profiles| profiles.into_iter().next())
             .map(|profile| profile.id)
             .unwrap_or_default();
+        // A preference read must never keep the library from opening, so an
+        // unreadable preferences row falls back to the defaults.
+        let preferences = library.preferences().unwrap_or_default();
         let mut app = Self {
             library,
             library_label,
@@ -464,12 +561,32 @@ impl App {
             frame: None,
             active: None,
             scrub: None,
+            preferences,
+            profiles: Vec::new(),
+            sources: Vec::new(),
+            new_profile: String::new(),
+            relink_target: None,
+            relink_path: String::new(),
+            backup_path: default_backup_path(),
+            restore_path: String::new(),
+            armed_restore: None,
+            subtitle_input: String::new(),
+            audio_input: String::new(),
+            armed_remove: None,
             new_root: String::new(),
             scan_token: None,
             scan_events: None,
             status: None,
             error,
         };
+        // The language fields start from what is stored, so the screen never
+        // shows an empty box for a preference that is actually set.
+        app.subtitle_input = app
+            .preferences
+            .subtitle_language
+            .clone()
+            .unwrap_or_default();
+        app.audio_input = app.preferences.audio_language.clone().unwrap_or_default();
         app.reload();
         app
     }
@@ -480,6 +597,30 @@ impl App {
     fn reload(&mut self) {
         self.reload_home();
         self.reload_browse();
+        self.reload_administration();
+    }
+
+    /// Reloads the profile and folder lists the Settings screen administers.
+    ///
+    /// Failures are reported rather than replaced by an empty list: an empty
+    /// Settings screen would suggest there are no profiles or folders, which is a
+    /// different and untrue statement.
+    fn reload_administration(&mut self) {
+        match self.library.profiles() {
+            Ok(profiles) => self.profiles = profiles,
+            Err(error) => self.report(&error),
+        }
+        match self.library.sources() {
+            Ok(sources) => self.sources = sources,
+            Err(error) => self.report(&error),
+        }
+        if self
+            .relink_target
+            .as_ref()
+            .is_some_and(|id| !self.sources.iter().any(|source| &source.id == id))
+        {
+            self.relink_target = None;
+        }
     }
 
     fn reload_home(&mut self) {
@@ -551,12 +692,13 @@ impl App {
         match self.screen {
             Screen::Home => self.home.len(),
             Screen::Browse => self.browse.items.len(),
+            // Settings is a form with no grid, and the player has its own keys.
+            Screen::Settings | Screen::Player => 0,
             Screen::Detail => self
                 .detail
                 .as_ref()
                 .map(|detail| detail.episodes.len().max(1))
                 .unwrap_or(0),
-            Screen::Player => 0,
         }
     }
 
@@ -751,6 +893,11 @@ impl App {
             self.save(&mut active, &snapshot, ended);
             self.active = Some(active);
         }
+        // After the save, so the episode is stored and marked watched before the
+        // next one takes over the session.
+        if ended {
+            self.advance_to_next_episode();
+        }
     }
 
     fn toggle_play(&mut self) {
@@ -773,6 +920,21 @@ impl App {
             return;
         };
         let origin = self.active.as_ref().map(|active| active.origin);
+        self.finish_active();
+        self.open_player(&file_id, true);
+        // `open_player` reads the origin from the screen, which is still the
+        // player here; put back where this viewing came from.
+        if let (Some(origin), Some(active)) = (origin, self.active.as_mut()) {
+            active.origin = origin;
+        }
+    }
+
+    /// Saves and closes the current viewing, stops the player, clears its state.
+    ///
+    /// Shared by replay and autoplay, which both end one viewing and start
+    /// another: the finished viewing has to be stored first in either case, and
+    /// both must leave no open session behind.
+    fn finish_active(&mut self) {
         if let Some(mut active) = self.active.take() {
             let snapshot = self.player.as_ref().map(|player| player.snapshot());
             if let Some(snapshot) = snapshot {
@@ -788,11 +950,62 @@ impl App {
         self.frame = None;
         self.scrub = None;
         self.snapshot = PlayerSnapshot::default();
-        self.open_player(&file_id, true);
-        // `open_player` reads the origin from the screen, which is still the
-        // player here; put back where this viewing came from.
+    }
+
+    /// Continues into the next verified episode once one finishes.
+    ///
+    /// The finished viewing is already saved and marked watched before this runs,
+    /// so finding nothing to play leaves the library correct. A gap stops the
+    /// chain rather than skipping it: `next_episode` reports `None` instead of
+    /// guessing, and that `None` is respected.
+    ///
+    /// Autoplay starts only a file that is readable right now. An unreadable next
+    /// episode leaves the finished player on screen with the reason, rather than
+    /// swapping one failure for another the viewer never asked for.
+    /// The episode that should follow `file_id`, or `None` to stop.
+    ///
+    /// Split out from the transition so the decision can be tested without a
+    /// player: the choice of what plays next is product logic, and only starting
+    /// it needs libmpv.
+    fn next_episode_after(&self, file_id: &str) -> Result<Option<LibraryItem>, CoreError> {
+        if !self.preferences.autoplay_next {
+            return Ok(None);
+        }
+        self.library.next_episode(file_id, Some(&self.profile_id))
+    }
+
+    fn advance_to_next_episode(&mut self) {
+        let Some(finished) = self.active.as_ref().map(|active| active.file_id.clone()) else {
+            return;
+        };
+        let next = match self.next_episode_after(&finished) {
+            Ok(next) => next,
+            Err(error) => return self.report(&error),
+        };
+        let Some(next) = next else {
+            return;
+        };
+        let title = self
+            .active
+            .as_ref()
+            .map(|active| active.title.clone())
+            .unwrap_or_default();
+        if !next.available {
+            self.status = Some(format!(
+                "{title} finished. The next episode cannot be read right now; relink its folder."
+            ));
+            return;
+        }
+        let origin = self.active.as_ref().map(|active| active.origin);
+        self.finish_active();
+        self.open_player(&next.id, false);
         if let (Some(origin), Some(active)) = (origin, self.active.as_mut()) {
             active.origin = origin;
+        }
+        // Say that the switch was automatic, so it reads as continuing the series
+        // rather than as the app jumping somewhere on its own.
+        if self.screen == Screen::Player {
+            self.status = Some(format!("Finished {title}. Playing next: {}", next.title));
         }
     }
 
@@ -817,6 +1030,318 @@ impl App {
     }
 
     // ------------------------------------------------------------------ scan
+
+    /// The track chooser's options and current selection for one kind.
+    ///
+    /// The player is the single source of truth: the selection is read back from
+    /// the snapshot rather than remembered here, so a switch libmpv refused shows
+    /// as not having happened. Subtitles add a real "Off" entry, because turning
+    /// them off is a libmpv operation and a state the user has to be able to see.
+    fn track_chooser(&self, kind: TrackKind) -> (Vec<TrackChoice>, Option<TrackChoice>) {
+        let mut choices: Vec<TrackChoice> = self
+            .snapshot
+            .tracks
+            .iter()
+            .filter(|track| track.kind == kind)
+            .map(TrackChoice::from_track)
+            .collect();
+        let in_use = self
+            .snapshot
+            .tracks
+            .iter()
+            .filter(|track| track.kind == kind && track.selected)
+            .map(|track| track.id)
+            .next();
+        if kind == TrackKind::Subtitle && !choices.is_empty() {
+            choices.insert(0, TrackChoice::off());
+        }
+        let selected = choices
+            .iter()
+            .find(|choice| in_use == Some(choice.id))
+            .cloned()
+            // Subtitles default to "Off" rather than to an empty control, so the
+            // row always states what is happening.
+            .or_else(|| choices.first().cloned());
+        (choices, selected)
+    }
+
+    // -------------------------------------------------------------- settings
+
+    /// Switches the active viewer profile.
+    ///
+    /// The switch is not a display change: progress, lists and Continue Watching
+    /// are projected for one profile, so every screen is reloaded from the new
+    /// profile rather than reusing what the previous one was showing.
+    fn choose_profile(&mut self, profile_id: String) {
+        if !self.profiles.iter().any(|profile| profile.id == profile_id) {
+            self.error = Some("That profile is no longer in the library.".to_string());
+            return;
+        }
+        self.profile_id = profile_id.clone();
+        self.focus = 0;
+        self.detail = None;
+        self.error = None;
+        // The library is stored as the profile to open with, so the choice
+        // survives a restart instead of resetting to the first profile.
+        let preferences = Preferences {
+            default_profile: Some(profile_id),
+            ..self.preferences.clone()
+        };
+        self.save_preferences(preferences);
+        self.reload();
+    }
+
+    /// Adds the profile in the text field and makes it the active one.
+    fn add_profile(&mut self) {
+        let name = self.new_profile.trim().to_string();
+        if name.is_empty() {
+            self.error = Some("Type a name for the new profile first.".to_string());
+            return;
+        }
+        match self.library.add_profile(&name) {
+            Ok(profile) => {
+                self.new_profile.clear();
+                self.reload_administration();
+                self.status = Some(format!("Added {}", profile.name));
+                self.choose_profile(profile.id);
+            }
+            Err(error) => self.report(&error),
+        }
+    }
+
+    /// Removes a profile and everything it watched.
+    fn remove_profile(&mut self, profile_id: String) {
+        let name = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| "that profile".to_string());
+        if let Err(error) = self.library.remove_profile(&profile_id) {
+            return self.report(&error);
+        }
+        // The removed profile cannot stay the active one, and a stored default
+        // pointing at it would fail the next preference save.
+        let fallback = self
+            .library
+            .profiles()
+            .ok()
+            .and_then(|profiles| profiles.into_iter().next())
+            .map(|profile| profile.id);
+        let preferences = Preferences {
+            default_profile: fallback.clone().filter(|id| *id != self.profile_id),
+            ..self.preferences.clone()
+        };
+        self.save_preferences(preferences);
+        if self.profile_id == profile_id
+            && let Some(fallback) = fallback
+        {
+            self.profile_id = fallback;
+        }
+        self.status = Some(format!("Removed {name} and its watch history."));
+        self.reload();
+    }
+
+    /// Stores the whole preference set, keeping the in-memory copy in step.
+    fn save_preferences(&mut self, preferences: Preferences) {
+        match self.library.set_preferences(&preferences) {
+            Ok(()) => {
+                self.preferences = preferences;
+                self.error = None;
+            }
+            Err(error) => self.report(&error),
+        }
+    }
+
+    /// Applies a typed language tag, or clears the preference when blank.
+    fn apply_language(&mut self, subtitle: bool) {
+        let (value, current) = if subtitle {
+            (
+                self.subtitle_input.clone(),
+                self.preferences.subtitle_language.clone(),
+            )
+        } else {
+            (
+                self.audio_input.clone(),
+                self.preferences.audio_language.clone(),
+            )
+        };
+        let trimmed = value.trim();
+        let next = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        if next == current {
+            return;
+        }
+        let preferences = if subtitle {
+            Preferences {
+                subtitle_language: next,
+                ..self.preferences.clone()
+            }
+        } else {
+            Preferences {
+                audio_language: next,
+                ..self.preferences.clone()
+            }
+        };
+        let before_ok = self.error.is_none();
+        self.save_preferences(preferences);
+        if before_ok && self.error.is_none() {
+            self.status = Some("Preference saved.".to_string());
+        }
+    }
+
+    /// Rescans a folder the library already holds.
+    fn rescan_source(&mut self, source_id: String) {
+        if let Err(error) = self
+            .library
+            .set_source_state(&source_id, SourceState::Available)
+        {
+            return self.report(&error);
+        }
+        self.reload_administration();
+        self.start_scan(source_id);
+    }
+
+    /// Points a folder at a new location, then rescans it.
+    ///
+    /// Relinking is what makes a removable drive work again after the mount path
+    /// changes: the grant is re-issued, every file under it becomes unavailable
+    /// until the rescan re-proves each one, and nothing is deleted in the meantime.
+    fn relink_source(&mut self) {
+        let Some(source_id) = self.relink_target.clone() else {
+            self.error = Some("Choose the folder to relink first.".to_string());
+            return;
+        };
+        let raw = self.relink_path.trim().to_string();
+        if raw.is_empty() {
+            self.error = Some("Type the folder's new location first.".to_string());
+            return;
+        }
+        if let Err(error) = self.library.relink_source(&source_id, PathBuf::from(&raw)) {
+            return self.report(&error);
+        }
+        self.relink_path.clear();
+        self.status = Some("Folder relinked — rescanning.".to_string());
+        self.reload_administration();
+        self.start_scan(source_id);
+    }
+
+    /// Removes a folder from the library, or asks first.
+    ///
+    /// Removal hides the folder's files and keeps every work, progress row and
+    /// list entry, so it is recoverable — but it is still a large visible change,
+    /// which is why the first press only asks.
+    fn remove_source(&mut self, source_id: String) {
+        if self.armed_remove.as_deref() != Some(source_id.as_str()) {
+            self.armed_remove = Some(source_id);
+            self.status = Some(
+                "Press Remove again to hide this folder's files. Nothing on disk is deleted."
+                    .to_string(),
+            );
+            return;
+        }
+        self.armed_remove = None;
+        match self.library.remove_source(&source_id) {
+            Ok(()) => {
+                self.status = Some(
+                    "Folder removed from the library. Its files are untouched on disk.".to_string(),
+                );
+                self.reload();
+            }
+            Err(error) => self.report(&error),
+        }
+    }
+
+    /// Writes a backup of the whole library to the typed path.
+    fn backup_now(&mut self) {
+        let raw = self.backup_path.trim().to_string();
+        if raw.is_empty() {
+            self.error = Some("Choose where the backup should be written.".to_string());
+            return;
+        }
+        match self.library.backup_to(PathBuf::from(&raw)) {
+            Ok(report) => {
+                self.error = None;
+                self.status = Some(format!(
+                    "Backed up {} KB — {}.",
+                    report.bytes / 1024,
+                    report.info
+                ));
+            }
+            Err(error) => self.report(&error),
+        }
+    }
+
+    /// Reports what a backup file holds without changing anything.
+    fn inspect_restore(&mut self) {
+        let raw = self.restore_path.trim().to_string();
+        if raw.is_empty() {
+            self.error = Some("Choose the backup to restore from.".to_string());
+            return;
+        }
+        self.armed_restore = None;
+        match Library::inspect_backup(PathBuf::from(&raw)) {
+            Ok(info) => {
+                self.error = None;
+                self.status = Some(format!("That backup holds {info}"));
+            }
+            Err(error) => self.report(&error),
+        }
+    }
+
+    /// Restores from the chosen backup, after one confirmation.
+    ///
+    /// Restore replaces this library's profile, progress and list data with the
+    /// backup's, so the first press only states what will happen. The core copies
+    /// the current library aside before it writes anything, and that safety copy
+    /// is named in the result so the user is told where it is.
+    fn restore_now(&mut self) {
+        let raw = self.restore_path.trim().to_string();
+        if raw.is_empty() {
+            self.error = Some("Choose the backup to restore from.".to_string());
+            return;
+        }
+        if self.armed_restore.as_deref() != Some(raw.as_str()) {
+            self.armed_restore = Some(raw.clone());
+            let summary = Library::inspect_backup(PathBuf::from(&raw))
+                .map(|info| info.to_string())
+                .unwrap_or_else(|error| format!("unreadable ({})", error.code()));
+            self.status = Some(format!(
+                "Press Restore again to replace this library with {summary}. \
+                 Your current library is copied aside first."
+            ));
+            return;
+        }
+        self.armed_restore = None;
+        match self.library.restore_from(PathBuf::from(&raw)) {
+            Ok(report) => {
+                // The active profile may not exist in the restored data, so the
+                // session is re-derived rather than left pointing at a profile
+                // that is gone.
+                if !self
+                    .library
+                    .profiles()
+                    .map(|profiles| profiles.iter().any(|profile| profile.id == self.profile_id))
+                    .unwrap_or(false)
+                {
+                    self.profile_id = self
+                        .library
+                        .profiles()
+                        .ok()
+                        .and_then(|profiles| profiles.into_iter().next())
+                        .map(|profile| profile.id)
+                        .unwrap_or_default();
+                }
+                self.detail = None;
+                self.reload();
+                let safety = report
+                    .previous_saved_to
+                    .map(|path| format!(" The previous library is at {path}."))
+                    .unwrap_or_default();
+                self.status = Some(format!("Restored {} entries.{safety}", report.info.works));
+            }
+            Err(error) => self.report(&error),
+        }
+    }
 
     /// Grants the typed folder and scans it on a worker thread.
     ///
@@ -1054,6 +1579,53 @@ impl App {
 
             Message::NewRootChanged(value) => self.new_root = value,
             Message::AddFolder => self.add_folder(),
+            Message::RescanSource(source_id) => self.rescan_source(source_id),
+            Message::RemoveSource(source_id) => self.remove_source(source_id),
+            Message::CancelArmed => {
+                self.armed_remove = None;
+                self.armed_restore = None;
+                self.status = None;
+            }
+            Message::RelinkTargetChosen(source_id) => self.relink_target = Some(source_id),
+            Message::RelinkPathChanged(value) => self.relink_path = value,
+            Message::RelinkSource => self.relink_source(),
+
+            Message::GoSettings => {
+                self.screen = Screen::Settings;
+                self.focus = 0;
+                self.armed_remove = None;
+                self.armed_restore = None;
+                self.reload_administration();
+            }
+            Message::ProfileChosen(profile_id) => self.choose_profile(profile_id),
+            Message::NewProfileChanged(value) => self.new_profile = value,
+            Message::AddProfile => self.add_profile(),
+            Message::RemoveProfile(profile_id) => self.remove_profile(profile_id),
+            Message::ToggleAutoplay(enabled) => {
+                let preferences = Preferences {
+                    autoplay_next: enabled,
+                    ..self.preferences.clone()
+                };
+                self.save_preferences(preferences);
+            }
+            Message::SubtitleLanguageChanged(value) => self.subtitle_input = value,
+            Message::AudioLanguageChanged(value) => self.audio_input = value,
+            Message::ApplySubtitleLanguage => self.apply_language(true),
+            Message::ApplyAudioLanguage => self.apply_language(false),
+            Message::BackupPathChanged(value) => self.backup_path = value,
+            Message::BackupNow => self.backup_now(),
+            Message::RestorePathChanged(value) => {
+                self.restore_path = value;
+                // A different file is a different decision, so the confirmation
+                // does not carry over to it.
+                self.armed_restore = None;
+            }
+            Message::InspectRestore => self.inspect_restore(),
+            Message::RestoreNow => self.restore_now(),
+            Message::ClearStatus => {
+                self.status = None;
+                self.error = None;
+            }
             Message::CancelScan => {
                 if let Some(token) = &self.scan_token {
                     token.cancel();
@@ -1066,6 +1638,11 @@ impl App {
             Message::Scrub(seconds) => self.scrub = Some(seconds),
             Message::SeekCommit => self.commit_seek(),
             Message::SeekStep(delta) => self.seek_step(delta),
+            Message::SelectTrack(kind, id) => {
+                if let Some(player) = &self.player {
+                    player.select_track(kind, id);
+                }
+            }
             Message::Tick => self.poll(),
             Message::Keyboard(event) => self.handle_key(event),
             Message::Close => return iced::exit(),
@@ -1103,7 +1680,7 @@ impl App {
                 .get(self.focus)
                 .map(|item| item.id.clone()),
             Screen::Detail => self.detail.as_ref().map(|detail| detail.item.id.clone()),
-            Screen::Player => None,
+            Screen::Player | Screen::Settings => None,
         };
         match (self.screen, file_id) {
             // From Detail, Enter means "play"; the arrows move within a series.
@@ -1123,7 +1700,7 @@ impl App {
                 self.focus = 0;
                 self.reload_browse();
             }
-            Screen::Browse => self.screen = Screen::Home,
+            Screen::Browse | Screen::Settings => self.screen = Screen::Home,
             Screen::Home => {}
         }
     }
@@ -1172,6 +1749,9 @@ impl App {
                 Key::Character(ref character) if character.as_str() == "2" => {
                     let _ = self.update(Message::GoBrowse);
                 }
+                Key::Character(ref character) if character.as_str() == "3" => {
+                    let _ = self.update(Message::GoSettings);
+                }
                 _ => {}
             }
             return;
@@ -1198,6 +1778,13 @@ impl App {
                 },
                 _ => {}
             },
+            // Settings is a form, not a grid: the arrows belong to whichever
+            // field has focus, so only Escape is claimed here.
+            Screen::Settings => {
+                if let Key::Named(Named::Escape) = key {
+                    self.back();
+                }
+            }
             _ => match key {
                 Key::Named(Named::Escape) => self.back(),
                 Key::Named(Named::Enter) => self.activate(),
@@ -1263,6 +1850,7 @@ impl App {
             Screen::Browse => self.browse_view(),
             Screen::Detail => self.detail_view(),
             Screen::Player => self.player_view(),
+            Screen::Settings => self.settings_view(),
         };
         container(
             column![self.header(), body, self.footer()]
@@ -1296,6 +1884,10 @@ impl App {
             button(text("Library").size(tokens.type_scale.label))
                 .on_press(Message::GoBrowse)
                 .style(design::quiet_style(self.screen == Screen::Browse))
+                .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+            button(text("Settings").size(tokens.type_scale.label))
+                .on_press(Message::GoSettings)
+                .style(design::quiet_style(self.screen == Screen::Settings))
                 .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
         ]
         .spacing(tokens.spacing.field_x)
@@ -1362,6 +1954,7 @@ impl App {
             ),
             Screen::Detail => "Details".to_string(),
             Screen::Player => "Player".to_string(),
+            Screen::Settings => "Settings".to_string(),
         }
     }
 
@@ -1381,7 +1974,8 @@ impl App {
         let hint = match self.screen {
             Screen::Player => "Space play/pause · ←/→ seek 10s · Esc back",
             Screen::Detail => "Enter play · f favourite · w watchlist · m watched · Esc back",
-            _ => "Arrows move · Enter opens · ⌘1 Home · ⌘2 Library · Esc back",
+            Screen::Settings => "Esc back · ⌘1 Home · ⌘2 Library",
+            _ => "Arrows move · Enter opens · ⌘1 Home · ⌘2 Library · ⌘3 Settings · Esc back",
         };
         container(
             row![
@@ -1826,6 +2420,280 @@ impl App {
 
     // ------------------------------------------------------------- Player
 
+    // -------------------------------------------------------------- Settings
+
+    /// Viewer, playback, folder and data settings.
+    ///
+    /// Every control here performs the action it names: there is no control that
+    /// only looks enabled. Where an action is destructive — removing a folder,
+    /// restoring a backup — the first press states what will happen and the second
+    /// carries it out, which is the honest form of a confirmation when the app has
+    /// no separate dialog chrome.
+    fn settings_view(&self) -> Element<'_, Message> {
+        let tokens = design::tokens();
+        let heading = settings_heading;
+        let note = settings_note;
+        let panel = settings_panel;
+
+        // --- viewer -------------------------------------------------------
+        let mut viewers = column![].spacing(tokens.spacing.field_y);
+        for profile in &self.profiles {
+            let active = profile.id == self.profile_id;
+            let mut row: iced::widget::Row<'_, Message> =
+                row![text(profile.name.clone()).size(tokens.type_scale.body),]
+                    .spacing(tokens.spacing.field_x)
+                    .align_y(Alignment::Center);
+            if active {
+                row = row.push(
+                    text("active".to_string())
+                        .size(tokens.type_scale.micro)
+                        .color(tokens.palette.signal),
+                );
+            } else {
+                row = row.push(
+                    button(text("Use").size(tokens.type_scale.label))
+                        .on_press(Message::ProfileChosen(profile.id.clone()))
+                        .style(design::action_style(false))
+                        .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+                );
+            }
+            // The last profile cannot be removed, so the control is absent rather
+            // than present and failing.
+            if self.profiles.len() > 1 {
+                row = row.push(
+                    button(text("Remove").size(tokens.type_scale.label))
+                        .on_press(Message::RemoveProfile(profile.id.clone()))
+                        .style(design::danger_style(false))
+                        .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+                );
+            }
+            viewers = viewers.push(row);
+        }
+        viewers = viewers
+            .push(Space::new().height(tokens.spacing.field_y))
+            .push(
+                row![
+                    text_input("New profile name", &self.new_profile)
+                        .on_input(Message::NewProfileChanged)
+                        .on_submit(Message::AddProfile)
+                        .style(design::input_style())
+                        .padding(tokens.spacing.field_y)
+                        .width(220.0),
+                    button(text("Add profile").size(tokens.type_scale.label))
+                        .on_press(Message::AddProfile)
+                        .style(design::action_style(false))
+                        .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+                ]
+                .spacing(tokens.spacing.field_x)
+                .align_y(Alignment::Center),
+            )
+            .push(note(
+                "Each profile keeps its own progress, favourites and watchlist.",
+            ));
+
+        // --- playback -----------------------------------------------------
+        let playback = column![
+            checkbox(self.preferences.autoplay_next)
+                .label("Play the next episode automatically")
+                .on_toggle(Message::ToggleAutoplay)
+                .size(18.0),
+            note(
+                "A gap in a season stops the chain: the next episode is never skipped guessing.",
+            ),
+            row![
+                text("Subtitle language".to_string()).size(tokens.type_scale.label),
+                text_input("e.g. en", &self.subtitle_input)
+                    .on_input(Message::SubtitleLanguageChanged)
+                    .on_submit(Message::ApplySubtitleLanguage)
+                    .style(design::input_style())
+                    .padding(tokens.spacing.field_y)
+                    .width(140.0),
+                button(text("Apply").size(tokens.type_scale.label))
+                    .on_press(Message::ApplySubtitleLanguage)
+                    .style(design::quiet_style(false))
+                    .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+            ]
+            .spacing(tokens.spacing.field_x)
+            .align_y(Alignment::Center),
+            row![
+                text("Audio language".to_string()).size(tokens.type_scale.label),
+                text_input("e.g. en", &self.audio_input)
+                    .on_input(Message::AudioLanguageChanged)
+                    .on_submit(Message::ApplyAudioLanguage)
+                    .style(design::input_style())
+                    .padding(tokens.spacing.field_y)
+                    .width(140.0),
+                button(text("Apply").size(tokens.type_scale.label))
+                    .on_press(Message::ApplyAudioLanguage)
+                    .style(design::quiet_style(false))
+                    .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+            ]
+            .spacing(tokens.spacing.field_x)
+            .align_y(Alignment::Center),
+            note(
+                "Press Enter to apply. Leave a field empty and press Enter to let the player choose.",
+            ),
+        ]
+        .spacing(tokens.spacing.field_y);
+
+        // --- folders ------------------------------------------------------
+        let mut folders = column![].spacing(tokens.spacing.field_y);
+        if self.sources.is_empty() {
+            folders = folders.push(note(
+                "No folders yet. Grant one below and Screenroom scans it in place.",
+            ));
+        }
+        for source in &self.sources {
+            let armed = self.armed_remove.as_deref() == Some(source.id.as_str());
+            folders = folders
+                .push(
+                    column![
+                        text(source.label.clone()).size(tokens.type_scale.body),
+                        text(source.root_path.clone())
+                            .size(tokens.type_scale.micro)
+                            .color(tokens.palette.ink_muted),
+                        note(source_state_label(source.state)),
+                    ]
+                    .spacing(tokens.spacing.field_y / 2.0),
+                )
+                .push(
+                    row![
+                        button(text("Rescan").size(tokens.type_scale.label))
+                            .on_press(Message::RescanSource(source.id.clone()))
+                            .style(design::quiet_style(false))
+                            .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+                        button(
+                            text(if armed {
+                                "Press again to remove"
+                            } else {
+                                "Remove"
+                            })
+                            .size(tokens.type_scale.label)
+                        )
+                        .on_press(Message::RemoveSource(source.id.clone()))
+                        .style(design::danger_style(armed))
+                        .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+                    ]
+                    .spacing(tokens.spacing.field_x)
+                    .align_y(Alignment::Center),
+                );
+        }
+        folders = folders.push(text("Grant a folder".to_string()).size(tokens.type_scale.label));
+        folders = folders.push(self.add_folder_row());
+
+        if !self.sources.is_empty() {
+            let choices: Vec<SourceChoice> = self
+                .sources
+                .iter()
+                .map(|source| SourceChoice {
+                    id: source.id.clone(),
+                    label: source.label.clone(),
+                })
+                .collect();
+            let chosen = self
+                .relink_target
+                .as_ref()
+                .and_then(|id| choices.iter().find(|choice| &choice.id == id).cloned());
+            folders = folders
+                .push(Space::new().height(tokens.spacing.field_y))
+                .push(
+                    text("Relink a folder".to_string()).size(tokens.type_scale.label),
+                )
+                .push(
+                    row![
+                        pick_list(choices, chosen, |choice: SourceChoice| {
+                            Message::RelinkTargetChosen(choice.id)
+                        }),
+                        text_input("New location, for example /Volumes/Media", &self.relink_path)
+                            .on_input(Message::RelinkPathChanged)
+                            .on_submit(Message::RelinkSource)
+                            .style(design::input_style())
+                            .padding(tokens.spacing.field_y)
+                            .width(Length::Fill),
+                        button(text("Relink and rescan").size(tokens.type_scale.label))
+                            .on_press(Message::RelinkSource)
+                            .style(design::action_style(false))
+                            .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+                    ]
+                    .spacing(tokens.spacing.field_x)
+                    .align_y(Alignment::Center),
+                )
+                .push(note(
+                    "Use this when a removable drive mounts somewhere new. Nothing on disk is changed.",
+                ));
+        }
+
+        // --- data ---------------------------------------------------------
+        let restore_armed = self.armed_restore.is_some();
+        let data = column![
+            text("Back up".to_string()).size(tokens.type_scale.label),
+            row![
+                text_input("Backup file path", &self.backup_path)
+                    .on_input(Message::BackupPathChanged)
+                    .on_submit(Message::BackupNow)
+                    .style(design::input_style())
+                    .padding(tokens.spacing.field_y)
+                    .width(Length::Fill),
+                button(text("Back up now").size(tokens.type_scale.label))
+                    .on_press(Message::BackupNow)
+                    .style(design::action_style(false))
+                    .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+            ]
+            .spacing(tokens.spacing.field_x)
+            .align_y(Alignment::Center),
+            Space::new().height(tokens.spacing.field_y),
+            text("Restore".to_string()).size(tokens.type_scale.label),
+            row![
+                text_input("Backup file to restore from", &self.restore_path)
+                    .on_input(Message::RestorePathChanged)
+                    .on_submit(Message::InspectRestore)
+                    .style(design::input_style())
+                    .padding(tokens.spacing.field_y)
+                    .width(Length::Fill),
+                button(text("Check file").size(tokens.type_scale.label))
+                    .on_press(Message::InspectRestore)
+                    .style(design::quiet_style(false))
+                    .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+                button(
+                    text(if restore_armed {
+                        "Press again to restore"
+                    } else {
+                        "Restore"
+                    })
+                    .size(tokens.type_scale.label)
+                )
+                .on_press(Message::RestoreNow)
+                .style(design::danger_style(restore_armed))
+                .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+            ]
+            .spacing(tokens.spacing.field_x)
+            .align_y(Alignment::Center),
+            note(
+                "Restoring replaces profiles, progress and lists with the backup's. Your current \
+                 library is copied to a .before-restore file first.",
+            ),
+        ]
+        .spacing(tokens.spacing.field_y);
+
+        let body = column![
+            heading("Viewer"),
+            panel(viewers.into()),
+            heading("Playback"),
+            panel(playback.into()),
+            heading("Folders"),
+            panel(folders.into()),
+            heading("Data"),
+            panel(data.into()),
+            Space::new().height(tokens.spacing.content_pad),
+        ]
+        .spacing(tokens.spacing.field_x);
+
+        scrollable(body)
+            .height(Length::Fill)
+            .width(Length::Fill)
+            .into()
+    }
+
     fn player_view(&self) -> Element<'_, Message> {
         let tokens = design::tokens();
         let title = self
@@ -1893,6 +2761,37 @@ impl App {
         .spacing(tokens.spacing.field_x)
         .align_y(Alignment::Center);
 
+        let (audio_choices, audio_selected) = self.track_chooser(TrackKind::Audio);
+        let (subtitle_choices, subtitle_selected) = self.track_chooser(TrackKind::Subtitle);
+        let track_row: Element<'_, Message> = if audio_choices.is_empty()
+            && subtitle_choices.is_empty()
+        {
+            text("The player reported no selectable audio or subtitle tracks for this file.")
+                .size(tokens.type_scale.micro)
+                .color(tokens.palette.ink_muted)
+                .into()
+        } else {
+            row![
+                text("Audio")
+                    .size(tokens.type_scale.micro)
+                    .color(tokens.palette.ink_muted),
+                pick_list(audio_choices, audio_selected, |choice: TrackChoice| {
+                    Message::SelectTrack(TrackKind::Audio, choice.id)
+                }),
+                text("Subtitles")
+                    .size(tokens.type_scale.micro)
+                    .color(tokens.palette.ink_muted),
+                pick_list(
+                    subtitle_choices,
+                    subtitle_selected,
+                    |choice: TrackChoice| { Message::SelectTrack(TrackKind::Subtitle, choice.id) }
+                ),
+            ]
+            .spacing(tokens.spacing.field_x)
+            .align_y(Alignment::Center)
+            .into()
+        };
+
         let resume = self
             .active
             .as_ref()
@@ -1921,11 +2820,115 @@ impl App {
         ]
         .spacing(tokens.spacing.field_x);
 
-        container(column![header, surface, controls, footer].spacing(tokens.spacing.content_pad))
-            .padding(tokens.spacing.content_pad)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        container(
+            column![header, surface, controls, track_row, footer]
+                .spacing(tokens.spacing.content_pad),
+        )
+        .padding(tokens.spacing.content_pad)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    }
+}
+
+/// A section title on the Settings screen.
+fn settings_heading(label: &str) -> Element<'_, Message> {
+    text(label.to_string())
+        .size(design::tokens().type_scale.subtitle)
+        .into()
+}
+
+/// An explanatory line under a Settings control.
+///
+/// These carry the consequences a control cannot state by itself — that a gap
+/// stops autoplay, that restore copies the current library aside — so the copy is
+/// part of the control's meaning rather than decoration.
+fn settings_note(label: &str) -> Element<'_, Message> {
+    text(label.to_string())
+        .size(design::tokens().type_scale.micro)
+        .color(design::tokens().palette.ink_muted)
+        .into()
+}
+
+/// Wraps one Settings section in the raised panel surface.
+fn settings_panel(content: Element<'_, Message>) -> Element<'_, Message> {
+    container(content)
+        .style(|_theme| design::container_style(Level::Panel, false))
+        .padding(design::tokens().spacing.content_pad)
+        .width(Length::Fill)
+        .into()
+}
+
+/// One entry in the folder chooser on the Settings screen.
+///
+/// Carries the label and the identifier together, so the list shows the user's own
+/// folder name while the message that comes back names the folder by its stable
+/// id rather than by a display string that could change underneath it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceChoice {
+    /// Stable source identifier, used in the message.
+    pub id: String,
+    /// User-facing folder label, shown in the list.
+    pub label: String,
+}
+
+impl std::fmt::Display for SourceChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// Plain-language description of a folder's availability.
+///
+/// Each state names a different recovery, which is why they are not collapsed
+/// into "unavailable": a disconnected drive is plugged back in, a revoked grant
+/// is granted again, and a missing path is relinked.
+fn source_state_label(state: SourceState) -> &'static str {
+    match state {
+        SourceState::Available => "Available",
+        SourceState::Disconnected => {
+            "Drive not attached — reconnect it, then Rescan. Your history is kept."
+        }
+        SourceState::PermissionLost => "Access was withdrawn — grant access to the folder again.",
+        SourceState::Missing => "Folder is gone — relink it to its new location.",
+        SourceState::Removed => "Removed from the library. Files on disk are untouched.",
+    }
+}
+
+/// One entry in the player's track chooser.
+///
+/// `id` is both the identity compared against the player's reported selection and
+/// the value handed back when the entry is picked, so "Off" is a real [`NO_TRACK`]
+/// selection rather than a separate kind of value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackChoice {
+    /// libmpv track id, or [`NO_TRACK`] for the "Off" entry.
+    pub id: i64,
+    /// The label shown in the list.
+    pub label: String,
+}
+
+impl TrackChoice {
+    /// The entry that switches a kind off.
+    fn off() -> Self {
+        Self {
+            id: NO_TRACK,
+            label: "Off".to_string(),
+        }
+    }
+
+    /// Labels a reported track for the chooser.
+    fn from_track(track: &MediaTrack) -> Self {
+        Self {
+            id: track.id,
+            label: track.label(),
+        }
+    }
+}
+
+impl std::fmt::Display for TrackChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
     }
 }
 
@@ -2286,5 +3289,388 @@ mod tests {
         let path = default_library_path().expect("a data directory on this host");
         assert!(path.is_absolute());
         assert!(path.ends_with("Screenroom/library.db"));
+    }
+
+    /// A series of two episodes, so autoplay has something real to follow.
+    fn series_app() -> (App, Vec<String>, tempfile::TempDir) {
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let library = Library::open_in_memory().expect("library");
+        let source = library.add_source(directory.path(), None).expect("source");
+        let mut ids = Vec::new();
+        for name in ["Show.S01E01.Pilot.mkv", "Show.S01E02.Second.mkv"] {
+            std::fs::write(directory.path().join(name), b"not really a video").expect("write");
+            let parsed = parse_filename(name, None);
+            ids.push(
+                library
+                    .ingest_file(Ingest {
+                        source_id: &source.id,
+                        relative_path: name,
+                        fingerprint: &format!("fingerprint-{name}"),
+                        size: 18,
+                        modified_ms: 1,
+                        scan_id: "test",
+                        parsed: Some(&parsed),
+                        expected_root: Some(&source.root_path),
+                    })
+                    .expect("ingest"),
+            );
+        }
+        let app = App::with_library(library, None, "test".into());
+        (app, ids, directory)
+    }
+
+    #[test]
+    fn autoplay_follows_the_next_verified_episode() {
+        let (app, ids, _directory) = series_app();
+        let next = app
+            .next_episode_after(&ids[0])
+            .expect("lookup")
+            .expect("the second episode follows the first");
+        assert_eq!(next.id, ids[1]);
+        assert!(
+            app.next_episode_after(&ids[1]).unwrap().is_none(),
+            "the last episode has no successor to guess at"
+        );
+    }
+
+    #[test]
+    fn autoplay_stands_down_when_the_preference_is_off() {
+        let (mut app, ids, _directory) = series_app();
+        let _ = app.update(Message::ToggleAutoplay(false));
+        assert!(!app.preferences.autoplay_next);
+        assert!(
+            app.next_episode_after(&ids[0]).unwrap().is_none(),
+            "a viewer who turned autoplay off must not have it happen anyway"
+        );
+        // The preference is stored, not just held in memory.
+        assert!(!app.library.preferences().unwrap().autoplay_next);
+    }
+
+    #[test]
+    fn a_movie_has_no_next_episode() {
+        let (app, _directory) = app_with(1);
+        let item = app.browse.items[0].clone();
+        assert!(
+            app.next_episode_after(&item.id).unwrap().is_none(),
+            "autoplay must not invent an episode after a film"
+        );
+    }
+
+    #[test]
+    fn the_track_chooser_offers_off_and_reads_the_selection_back() {
+        let (mut app, _directory) = app_with(1);
+        assert!(
+            app.track_chooser(TrackKind::Subtitle).0.is_empty(),
+            "no reported tracks means no chooser to offer"
+        );
+        app.snapshot.tracks = vec![
+            MediaTrack {
+                id: 1,
+                kind: TrackKind::Audio,
+                title: Some("English 5.1".to_string()),
+                language: Some("en".to_string()),
+                codec: Some("aac".to_string()),
+                selected: true,
+                external: false,
+            },
+            MediaTrack {
+                id: 2,
+                kind: TrackKind::Subtitle,
+                title: None,
+                language: Some("fr".to_string()),
+                codec: Some("subrip".to_string()),
+                selected: false,
+                external: false,
+            },
+        ];
+
+        let (audio, selected) = app.track_chooser(TrackKind::Audio);
+        assert_eq!(audio.len(), 1);
+        assert_eq!(selected.map(|choice| choice.id), Some(1));
+        assert!(audio[0].label.contains("English 5.1"));
+
+        let (subtitles, selected) = app.track_chooser(TrackKind::Subtitle);
+        assert_eq!(
+            subtitles.len(),
+            2,
+            "the chooser offers Off as well as the track"
+        );
+        assert_eq!(subtitles[0].id, NO_TRACK);
+        assert_eq!(subtitles[0].label, "Off");
+        assert_eq!(
+            selected.map(|choice| choice.id),
+            Some(NO_TRACK),
+            "subtitles that are off must show as Off, not as an empty control"
+        );
+    }
+
+    #[test]
+    fn switching_a_profile_keeps_each_viewers_data_separate() {
+        let (mut app, _directory) = app_with(3);
+        let work = app.browse.items[0].work_id.clone();
+        let first = app.profile_id.clone();
+        app.library.set_favorite(&first, &work, true).unwrap();
+
+        let _ = app.update(Message::NewProfileChanged("Guest".to_string()));
+        let _ = app.update(Message::AddProfile);
+        let guest = app.profile_id.clone();
+        assert_ne!(guest, first, "adding a profile switches to it");
+        assert_eq!(app.profiles.len(), 2);
+        assert!(
+            !app.browse.items.iter().any(|item| item.favorite),
+            "the new profile must not inherit the first profile's favourites"
+        );
+
+        // The choice is stored, so a restart reopens as the same viewer.
+        assert_eq!(
+            app.library.preferences().unwrap().default_profile,
+            Some(guest.clone())
+        );
+
+        // And the original viewer still has their own favourite.
+        let _ = app.update(Message::ProfileChosen(first));
+        assert_eq!(
+            app.library
+                .count(&LibraryQuery {
+                    profile_id: Some(app.profile_id.clone()),
+                    favorites_only: true,
+                    ..LibraryQuery::page(PAGE_SIZE)
+                })
+                .unwrap(),
+            1,
+            "the first viewer still has their own favourite"
+        );
+        assert_eq!(
+            app.library
+                .count(&LibraryQuery {
+                    profile_id: Some(guest),
+                    favorites_only: true,
+                    ..LibraryQuery::page(PAGE_SIZE)
+                })
+                .unwrap(),
+            0,
+            "and the other viewer has none of it"
+        );
+    }
+
+    #[test]
+    fn the_last_profile_is_kept() {
+        let (mut app, _directory) = app_with(1);
+        assert_eq!(app.profiles.len(), 1);
+        let only = app.profile_id.clone();
+        let _ = app.update(Message::RemoveProfile(only.clone()));
+        assert_eq!(app.profiles.len(), 1, "a device always keeps one profile");
+        assert_eq!(app.profile_id, only);
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|e| e.contains("one profile")),
+            "the refusal is explained"
+        );
+    }
+
+    #[test]
+    fn an_invalid_language_tag_is_reported_and_not_stored() {
+        let (mut app, _directory) = app_with(1);
+        let _ = app.update(Message::SubtitleLanguageChanged(
+            "en; drop table".to_string(),
+        ));
+        let _ = app.update(Message::ApplySubtitleLanguage);
+        assert_eq!(app.library.preferences().unwrap().subtitle_language, None);
+        assert!(app.error.is_some(), "the refusal is shown");
+
+        let _ = app.update(Message::SubtitleLanguageChanged("fr".to_string()));
+        let _ = app.update(Message::ApplySubtitleLanguage);
+        assert_eq!(
+            app.library
+                .preferences()
+                .unwrap()
+                .subtitle_language
+                .as_deref(),
+            Some("fr")
+        );
+    }
+
+    #[test]
+    fn removing_a_folder_asks_first_and_keeps_the_watch_history() {
+        let (mut app, _directory) = app_with(2);
+        let source = app.sources[0].clone();
+        let item = app.browse.items[0].clone();
+        app.library
+            .set_favorite(&app.profile_id, &item.work_id, true)
+            .unwrap();
+
+        let _ = app.update(Message::RemoveSource(source.id.clone()));
+        assert_eq!(
+            app.armed_remove.as_deref(),
+            Some(source.id.as_str()),
+            "the first press asks rather than acts"
+        );
+        assert_eq!(app.sources.len(), 1, "nothing has happened yet");
+
+        let _ = app.update(Message::RemoveSource(source.id.clone()));
+        assert!(app.armed_remove.is_none());
+        assert_eq!(app.browse.total, 0, "the folder's files leave the library");
+        assert!(
+            app.library.sources().unwrap().is_empty(),
+            "the folder leaves the visible list"
+        );
+        assert!(
+            app.library.source(&source.id).is_ok(),
+            "but its row survives, so recovery copy can still name it"
+        );
+        // The favourite is hidden while the folder is out of the library, and it
+        // is not deleted: re-admitting the folder brings it straight back. That,
+        // not the queried count, is the claim that nothing was destroyed.
+        assert_eq!(
+            app.library
+                .count(&LibraryQuery {
+                    profile_id: Some(app.profile_id.clone()),
+                    favorites_only: true,
+                    ..LibraryQuery::page(PAGE_SIZE)
+                })
+                .unwrap(),
+            0,
+            "a removed folder's entries are hidden, not offered"
+        );
+        app.library
+            .set_source_state(&source.id, SourceState::Available)
+            .expect("re-admit");
+        app.reload();
+        assert_eq!(
+            app.library
+                .count(&LibraryQuery {
+                    profile_id: Some(app.profile_id.clone()),
+                    favorites_only: true,
+                    ..LibraryQuery::page(PAGE_SIZE)
+                })
+                .unwrap(),
+            1,
+            "the favourite was kept through the removal"
+        );
+    }
+
+    #[test]
+    fn a_backup_and_restore_round_trip_through_the_settings_screen() {
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let library = Library::open(directory.path().join("library.db")).expect("library");
+        let media = directory.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        let source = library.add_source(&media, None).expect("source");
+        let name = "Heat.1995.mkv";
+        std::fs::write(media.join(name), b"not really a video").unwrap();
+        let parsed = parse_filename(name, None);
+        let file_id = library
+            .ingest_file(Ingest {
+                source_id: &source.id,
+                relative_path: name,
+                fingerprint: "f",
+                size: 18,
+                modified_ms: 1,
+                scan_id: "test",
+                parsed: Some(&parsed),
+                expected_root: Some(&source.root_path),
+            })
+            .expect("ingest");
+        let mut app = App::with_library(library, None, "test".into());
+        app.profile_id = app.library.profiles().unwrap().remove(0).id;
+        let backup = directory.path().join("backup.db");
+        app.backup_path = backup.to_string_lossy().to_string();
+        let _ = app.update(Message::BackupNow);
+        assert!(backup.is_file(), "the backup is written: {:?}", app.error);
+        assert!(app.error.is_none(), "unexpected error: {:?}", app.error);
+
+        // A change made after the backup, so the restore is observable.
+        app.library
+            .set_favorite(&app.profile_id, "anything", true)
+            .ok();
+        let session = app
+            .library
+            .start_session(&app.profile_id, &file_id)
+            .unwrap();
+        app.library
+            .checkpoint(screenroom_core::Checkpoint {
+                session: &session,
+                position_ms: 5_000,
+                duration_ms: 60_000,
+                sequence: 1,
+                seek_generation: 0,
+                ended: false,
+            })
+            .unwrap();
+        app.library.end_session(&session).unwrap();
+        assert_eq!(
+            app.library
+                .continue_watching(&app.profile_id, 5)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        app.restore_path = backup.to_string_lossy().to_string();
+        let _ = app.update(Message::RestoreNow);
+        assert!(app.armed_restore.is_some(), "restore asks before replacing");
+        assert_eq!(
+            app.library
+                .continue_watching(&app.profile_id, 5)
+                .unwrap()
+                .len(),
+            1,
+            "asking changes nothing"
+        );
+
+        let _ = app.update(Message::RestoreNow);
+        assert!(app.armed_restore.is_none());
+        assert!(app.error.is_none(), "unexpected error: {:?}", app.error);
+        assert_eq!(
+            app.library
+                .continue_watching(&app.profile_id, 5)
+                .unwrap()
+                .len(),
+            0,
+            "the restored state is the backup's, not the later change"
+        );
+        let safety = app
+            .status
+            .clone()
+            .expect("the result names the safety copy");
+        assert!(safety.contains("before-restore"), "status was: {safety}");
+    }
+
+    #[test]
+    fn inspecting_a_backup_reports_what_it_holds_without_restoring() {
+        let (mut app, _directory) = app_with(2);
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let backup = directory.path().join("copy.db");
+        app.library.backup_to(&backup).expect("backup");
+        app.restore_path = backup.to_string_lossy().to_string();
+        let _ = app.update(Message::InspectRestore);
+        let status = app.status.clone().expect("a summary");
+        assert!(status.contains("2 works"), "status was: {status}");
+        assert!(
+            app.armed_restore.is_none(),
+            "checking a file is not a restore"
+        );
+        assert_eq!(app.browse.total, 2, "and it changed nothing");
+    }
+
+    #[test]
+    fn the_settings_screen_is_reachable_and_leaves_again() {
+        let (mut app, _directory) = app_with(2);
+        let _ = app.update(Message::GoSettings);
+        assert_eq!(app.screen, Screen::Settings);
+        assert!(!app.profiles.is_empty());
+        assert!(!app.sources.is_empty());
+        app.back();
+        assert_eq!(app.screen, Screen::Home);
+    }
+
+    #[test]
+    fn choosing_an_unknown_profile_changes_nothing() {
+        let (mut app, _directory) = app_with(1);
+        let before = app.profile_id.clone();
+        let _ = app.update(Message::ProfileChosen("no-such-profile".to_string()));
+        assert_eq!(app.profile_id, before);
+        assert!(app.error.is_some());
     }
 }
