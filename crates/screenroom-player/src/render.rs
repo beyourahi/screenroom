@@ -195,10 +195,11 @@ impl SoftwareRenderer {
 
     /// Renders the current frame into the target and returns it packed as RGBA8.
     ///
-    /// Returns `Ok(None)` when libmpv had no new frame. The packed copy is
-    /// required for two reasons: libmpv's `"rgb0"` target leaves the fourth byte
-    /// undefined (so alpha must be set to opaque), and the presentation layer
-    /// expects a tightly packed buffer.
+    /// Returns `Ok(None)` when libmpv had no new frame. The packed copy is needed
+    /// because libmpv's `"rgb0"` target writes into a stride-padded buffer while
+    /// the presentation layer wants tightly packed rows. The fourth byte of that
+    /// target is *undefined*, so presenters must force opaque output rather than
+    /// trust it — see [`crate::Frame`].
     pub fn render(&mut self) -> Result<Option<Frame>, PlayerError> {
         if self.width == 0 || self.height == 0 {
             return Ok(None);
@@ -235,10 +236,9 @@ impl SoftwareRenderer {
             },
         ];
 
+        let began = std::time::Instant::now();
         let code = unsafe { (symbols.render)(self.context.as_ptr(), params.as_mut_ptr().cast()) };
-        if std::env::var_os("SCREENROOM_PLAYER_TRACE").is_some() {
-            eprintln!("[render] mpv_render_context_render -> {code}");
-        }
+        let drawn = began.elapsed();
         if code < 0 {
             return Err(PlayerError::Mpv {
                 context: "mpv_render_context_render".to_string(),
@@ -248,16 +248,19 @@ impl SoftwareRenderer {
         }
 
         self.generation += 1;
+        let began = std::time::Instant::now();
+        let frame = self.pack(pointer);
         if std::env::var_os("SCREENROOM_PLAYER_TRACE").is_some() {
             eprintln!(
-                "[render] packing {}x{} stride {} alignment {}",
+                "[render] {}x{} stride {} align {} — libmpv {:?}, pack {:?}",
                 self.width,
                 self.height,
                 self.stride,
-                (pointer as usize) % 64
+                (pointer as usize) % 64,
+                drawn,
+                began.elapsed()
             );
         }
-        let frame = self.pack(pointer);
         Ok(Some(frame))
     }
 
@@ -286,6 +289,12 @@ impl SoftwareRenderer {
         unsafe { self.buffer.as_mut_ptr().add(self.offset) }
     }
 
+    /// Tightens the stride-padded render target into a packed RGBA buffer.
+    ///
+    /// This is one `copy_from_slice` per row, so it runs at memcpy speed. The
+    /// previous per-pixel loop rewrote all four bytes of every pixel and cost
+    /// ~40 ms for a single 1920x1080 frame in an unoptimized build, which capped
+    /// presentation at ~11 fps; nothing here inspects pixel values any more.
     fn pack(&self, _pointer: *mut u8) -> Frame {
         let width = self.width as usize;
         let height = self.height as usize;
@@ -298,15 +307,7 @@ impl SoftwareRenderer {
             .chunks_exact(self.stride)
             .zip(rgba.chunks_exact_mut(row_bytes))
         {
-            let (pixels, _) = row[..row_bytes].as_chunks::<4>();
-            let (output, _) = out_row.as_chunks_mut::<4>();
-            for (pixel, out) in pixels.iter().zip(output.iter_mut()) {
-                out[0] = pixel[0];
-                out[1] = pixel[1];
-                out[2] = pixel[2];
-                // libmpv leaves this byte undefined; the surface is opaque.
-                out[3] = 255;
-            }
+            out_row.copy_from_slice(&row[..row_bytes]);
         }
 
         Frame {

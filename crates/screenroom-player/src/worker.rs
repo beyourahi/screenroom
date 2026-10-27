@@ -594,11 +594,15 @@ impl Runner {
             return;
         }
         trace!("present: rendering frame");
+        let began = std::time::Instant::now();
         match self.renderer.render() {
             Ok(Some(frame)) => {
                 trace!(
-                    "present: frame {}x{} gen {}",
-                    frame.width, frame.height, frame.generation
+                    "present: frame {}x{} gen {} in {:?}",
+                    frame.width,
+                    frame.height,
+                    frame.generation,
+                    began.elapsed()
                 );
                 publish(shared, |snapshot| snapshot.frame = Some(frame))
             }

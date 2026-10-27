@@ -98,12 +98,14 @@ fn plays_a_real_file_and_presents_frames() {
     assert!(frame.is_well_formed(), "frame buffer is malformed");
     assert_eq!((frame.width, frame.height), (320, 240));
     assert!(!frame.is_blank(), "the presented frame was empty");
-    // testsrc2 is colourized, so at least one pixel must carry colour.
+    // testsrc2 is colourized, so at least one pixel must carry colour. Only the
+    // colour channels are checked: the frame's alpha byte is documented as
+    // undefined, and the presenter is what forces opaque output.
     let coloured = (0..frame.height)
         .step_by(17)
         .flat_map(|y| (0..frame.width).step_by(17).map(move |x| (x, y)))
         .filter_map(|(x, y)| frame.pixel(x, y))
-        .any(|[r, g, b, a]| a == 255 && (r > 8 || g > 8 || b > 8));
+        .any(|[r, g, b, _]| r > 8 || g > 8 || b > 8);
     assert!(coloured, "every sampled pixel was black");
 
     let advanced = wait_for(&player, Duration::from_secs(10), |snapshot| {
@@ -172,6 +174,103 @@ fn resume_position_is_honoured_when_loading() {
         resumed.position > 0.9,
         "resume did not take effect: {}",
         resumed.position
+    );
+}
+
+/// Builds a longer, full-resolution clip for the rate measurement.
+///
+/// The audio track is not decoration: the player runs with `video-sync=audio`,
+/// so a silent clip takes a different pacing path than real media and would
+/// misreport the bridge's rate.
+fn timing_clip(directory: &TempDir) -> PathBuf {
+    let path = directory.path().join("timing.mp4");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-nostdin",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=1920x1080:rate=30:duration=8",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=8",
+            "-ac",
+            "2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "28",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+        ])
+        .arg(&path)
+        .status()
+        .expect("ffmpeg should be installed");
+    assert!(status.success(), "ffmpeg could not build the timing clip");
+    path
+}
+
+/// Measures the frame rate of the software presentation bridge at 1080p.
+///
+/// This is the production path the desktop app draws from: libmpv's software
+/// renderer writes an RGBA buffer and publishes it with a new generation number.
+/// Counting those generations over a wall-clock interval is the rate the window
+/// can actually be fed. The measured figure is printed, because the desktop
+/// frame-rate gate needs a number rather than "it looked smooth".
+///
+/// The source runs at 30 fps; the floor asserted here is deliberately below that,
+/// so the test fails on a real collapse rather than on a busy machine.
+#[test]
+fn the_software_bridge_sustains_a_watchable_frame_rate() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = timing_clip(&directory);
+    let Some(player) = player() else { return };
+    player.load(&path);
+    let started = wait_for(&player, Duration::from_secs(30), |snapshot| {
+        snapshot.frame.is_some() && snapshot.position > 0.3
+    });
+
+    // Sampled at two points rather than polled: the generation number is
+    // monotonic per published frame, so the difference is exact and the
+    // measurement itself cannot become the bottleneck.
+    let first = started
+        .frame
+        .as_ref()
+        .map(|frame| frame.generation)
+        .unwrap_or(0);
+    let began = Instant::now();
+    std::thread::sleep(Duration::from_secs(4));
+    let ended = player.snapshot();
+    let elapsed = began.elapsed().as_secs_f64();
+
+    let presented = ended
+        .frame
+        .as_ref()
+        .map(|frame| frame.generation)
+        .unwrap_or(first)
+        .saturating_sub(first);
+    let rate = presented as f64 / elapsed.max(0.001);
+    // How far the playhead moved over the same interval: below real time means
+    // the media is waiting on this pipeline, not that frames were dropped.
+    let advance = (ended.position - started.position) / elapsed.max(0.001);
+    println!(
+        "software bridge: {presented} frames in {elapsed:.2} s = {rate:.1} fps at 1920x1080 \
+         (playhead advanced {advance:.2}x real time)"
+    );
+    assert!(
+        rate >= 20.0,
+        "the bridge published {rate:.1} fps, too slow to watch"
     );
 }
 

@@ -12,7 +12,10 @@
 //! * the texture is recreated only when the frame size changes,
 //! * an identical frame generation is not re-uploaded,
 //! * letterbox bars are drawn by the shader, so the source aspect ratio is
-//!   preserved without stretching (PRD Q03).
+//!   preserved without stretching (PRD Q03). [`fit_factors`] returns the fraction
+//!   of each axis the video occupies and [`source_uv`] turns that into the source
+//!   coordinate, returning `None` for the bar pixels; the WGSL fragment stage does
+//!   exactly the same arithmetic, which is why it can be tested without a GPU.
 //!
 //! The OpenGL (macOS) and D3D11 (Windows) zero-copy paths slot in behind
 //! [`FrameSource`] without touching the widget or the shader.
@@ -22,8 +25,9 @@ use iced::{Rectangle, mouse};
 
 /// Aspect-correct fit factors for one frame inside a target rectangle.
 ///
-/// Returns the multipliers applied to UV coordinates centered on 0.5: `1.0`
-/// keeps the full axis, a smaller value letterboxes that axis.
+/// Each value is the fraction of that axis the video occupies: `1.0` fills the
+/// axis, a smaller value means bars on the other axis. The factors are *not*
+/// multipliers for the source UV — see [`source_uv`].
 pub fn fit_factors(source_width: u32, source_height: u32, target: Rectangle) -> (f32, f32) {
     if source_width == 0 || source_height == 0 || target.width <= 0.0 || target.height <= 0.0 {
         return (1.0, 1.0);
@@ -31,10 +35,29 @@ pub fn fit_factors(source_width: u32, source_height: u32, target: Rectangle) -> 
     let source_aspect = source_width as f32 / source_height as f32;
     let target_aspect = target.width / target.height;
     if source_aspect > target_aspect {
+        // Wider than the window: full width, letterbox top and bottom.
         (1.0, target_aspect / source_aspect)
     } else {
+        // Taller than the window: full height, pillarbox left and right.
         (source_aspect / target_aspect, 1.0)
     }
+}
+
+/// The source texture coordinate for a target coordinate, or `None` where the
+/// target is outside the video and the shader must draw a black bar.
+///
+/// This mirrors `SHADER`'s fragment stage exactly. The division matters: with
+/// the factor as a multiplier the mapped UV stays inside `0..1` for every target
+/// pixel, so no bar is ever produced and the picture is stretched to fill the
+/// widget. Unit tests exercise this function because the shader itself cannot be
+/// run without a GPU.
+pub fn source_uv(target: (f32, f32), fit: (f32, f32)) -> Option<(f32, f32)> {
+    if fit.0 <= 0.0 || fit.1 <= 0.0 {
+        return None;
+    }
+    let u = (target.0 - 0.5) / fit.0 + 0.5;
+    let v = (target.1 - 0.5) / fit.1 + 0.5;
+    ((0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v)).then_some((u, v))
 }
 
 /// Frames come from the player crate so both sides share one definition.
@@ -343,12 +366,17 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Preserve the source aspect ratio: bars sample outside and render black.
-    var uv = (input.uv - vec2<f32>(0.5, 0.5)) * fit.fit + vec2<f32>(0.5, 0.5);
+    // `fit` is the fraction of each axis the video occupies, so the source
+    // coordinate is found by dividing: pixels outside 0..1 are the bars and are
+    // drawn black. Multiplying here would stretch the picture instead.
+    var uv = (input.uv - vec2<f32>(0.5, 0.5)) / fit.fit + vec2<f32>(0.5, 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
-    return textureSample(frame_texture, frame_sampler, uv);
+    // libmpv leaves the frame's fourth byte undefined, so opacity is forced here
+    // rather than trusted from the buffer. Doing it on the GPU also keeps the
+    // host-side frame path free of per-pixel work.
+    return vec4<f32>(textureSample(frame_texture, frame_sampler, uv).rgb, 1.0);
 }
 "#;
 
@@ -390,6 +418,60 @@ mod tests {
     fn degenerate_inputs_do_not_panic_or_stretch() {
         assert_eq!(fit_factors(0, 0, bounds(100.0, 100.0)), (1.0, 1.0));
         assert_eq!(fit_factors(100, 100, bounds(0.0, 100.0)), (1.0, 1.0));
+    }
+
+    #[test]
+    fn the_centre_of_the_widget_is_the_centre_of_the_frame() {
+        let fit = fit_factors(1920, 1080, bounds(1240.0, 425.0));
+        let (u, v) = source_uv((0.5, 0.5), fit).expect("the centre is always video");
+        assert!((u - 0.5).abs() < 1e-6);
+        assert!((v - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_wider_widget_pillarboxes_instead_of_stretching() {
+        // A 16:9 frame in a ~2.9:1 area must keep its height and gain side bars.
+        let fit = fit_factors(1920, 1080, bounds(1240.0, 425.0));
+        assert_eq!(fit.1, 1.0, "height is the filled axis");
+        assert!(fit.0 < 1.0, "width must be reduced for side bars");
+
+        // The left and right edges of the widget are bars, not picture.
+        assert!(source_uv((0.0, 0.5), fit).is_none());
+        assert!(source_uv((1.0, 0.5), fit).is_none());
+        // The video occupies exactly `fit.0` of the width, centred.
+        let margin = (1.0 - fit.0) / 2.0;
+        assert!(source_uv((margin, 0.5), fit).is_some());
+        assert!(source_uv((1.0 - margin, 0.5), fit).is_some());
+        assert!(source_uv((margin - 0.01, 0.5), fit).is_none());
+        assert!(source_uv((1.0 - margin + 0.01, 0.5), fit).is_none());
+    }
+
+    #[test]
+    fn a_taller_widget_letterboxes_top_and_bottom() {
+        let fit = fit_factors(1920, 800, bounds(500.0, 500.0));
+        assert_eq!(fit.0, 1.0);
+        assert!(fit.1 < 1.0);
+        assert!(source_uv((0.5, 0.0), fit).is_none());
+        assert!(source_uv((0.5, 1.0), fit).is_none());
+        assert!(source_uv((0.5, 0.5), fit).is_some());
+    }
+
+    #[test]
+    fn a_matching_aspect_shows_no_bars_anywhere() {
+        let fit = fit_factors(1920, 1080, bounds(1280.0, 720.0));
+        assert!((fit.0 - 1.0).abs() < 1e-6 && (fit.1 - 1.0).abs() < 1e-6);
+        for target in [(0.0, 0.0), (0.0, 1.0), (1.0, 0.0), (1.0, 1.0), (0.5, 0.5)] {
+            assert!(
+                source_uv(target, fit).is_some(),
+                "a matching aspect must fill the widget: {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_degenerate_fit_draws_nothing_rather_than_dividing_by_zero() {
+        assert!(source_uv((0.5, 0.5), (0.0, 1.0)).is_none());
+        assert!(source_uv((0.5, 0.5), (1.0, 0.0)).is_none());
     }
 
     #[test]

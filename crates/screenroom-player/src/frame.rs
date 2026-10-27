@@ -14,6 +14,11 @@ pub struct Frame {
     /// Frame height in pixels.
     pub height: u32,
     /// RGBA bytes, exactly `width * height * 4` long.
+    ///
+    /// Red, green and blue are the picture. **The alpha byte is not
+    /// meaningful**: libmpv's `rgb0` render target documents it as undefined, so
+    /// a presenter must treat every frame as opaque and force alpha to 1 in its
+    /// own compositing rather than reading this byte.
     pub rgba: Arc<Vec<u8>>,
     /// Monotonic frame number; the presentation layer skips re-uploads.
     pub generation: u64,
