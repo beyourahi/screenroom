@@ -276,6 +276,19 @@ impl Browse {
             ((self.total as usize).div_ceil(PAGE_SIZE as usize)).max(1)
         }
     }
+
+    /// True when anything is narrowing the result set.
+    ///
+    /// Sort order is deliberately excluded: it reorders results but can never
+    /// remove one, so offering "change the filters" for a sort would be a dead end.
+    fn narrowed(&self) -> bool {
+        !self.text.trim().is_empty()
+            || self.kind != KindFilter::All
+            || self.genre.is_some()
+            || self.watchlist_only
+            || self.favorites_only
+            || self.available_only
+    }
 }
 
 /// Detail screen state for one file.
@@ -2333,10 +2346,9 @@ impl App {
         .spacing(tokens.spacing.field_y);
 
         let body: Element<'_, Message> = if self.browse.total == 0 {
-            self.empty_note(
-                "Nothing matches.",
-                "Change the filters, or add a folder on Home.",
-            )
+            let (title, detail) =
+                browse_empty_copy(!self.sources.is_empty(), self.browse.narrowed());
+            self.empty_note(title, detail)
         } else {
             self.card_grid(&self.browse.items, 0)
         };
@@ -3257,6 +3269,35 @@ enum Flag {
     Watchlist,
 }
 
+/// Copy for an empty Browse screen: a title and the concrete next action.
+///
+/// Three genuinely different situations arrive at the same "nothing here" moment,
+/// and naming the wrong one sends the viewer somewhere useless: a first run has no
+/// filters to change, and a folder that was granted but never read has nothing to
+/// change either. Both used to read "Nothing matches. Change the filters", which
+/// describes neither.
+///
+/// `has_sources` means at least one folder is granted; `narrowed` means a search or
+/// filter is excluding rows.
+pub fn browse_empty_copy(has_sources: bool, narrowed: bool) -> (&'static str, &'static str) {
+    match (has_sources, narrowed) {
+        (false, _) => (
+            "No media yet.",
+            "Add a folder on Home and Screenroom reads it where it is — \
+             nothing is moved, renamed or copied.",
+        ),
+        (true, true) => (
+            "Nothing matches those filters.",
+            "Clear the search or turn the filters off; the folder itself is fine.",
+        ),
+        (true, false) => (
+            "Nothing imported from your folders yet.",
+            "Rescan a folder in Settings. If it looks empty, check that the drive \
+             is connected.",
+        ),
+    }
+}
+
 /// Rounds a slider position to a whole percent inside `min..=max`.
 ///
 /// A slider works in floats and a preference is stored as a whole percent, so the
@@ -3308,6 +3349,62 @@ mod tests {
         assert_eq!(clock(3_661.0), "1:01:01");
         assert_eq!(clock(-4.0), "0:00");
         assert_eq!(clock(f64::NAN), "0:00");
+    }
+
+    #[test]
+    fn an_empty_browse_screen_names_the_situation_it_is_actually_in() {
+        // A first run, an unread folder and an over-narrow search all produce an
+        // empty grid. Telling all three to "change the filters" sends two of them
+        // to a control that cannot help.
+        let first_run = browse_empty_copy(false, false);
+        assert!(first_run.0.contains("No media"));
+        assert!(first_run.1.contains("Add a folder"));
+        assert!(!first_run.1.contains("filter"));
+
+        // The same copy with filters showing, because there is still nothing to
+        // filter: the next action does not change.
+        assert_eq!(browse_empty_copy(false, true), first_run);
+
+        let unread = browse_empty_copy(true, false);
+        assert!(unread.1.contains("Rescan"));
+        assert!(!unread.1.contains("Add a folder"));
+
+        let filtered = browse_empty_copy(true, true);
+        assert!(filtered.0.contains("filters"));
+        assert!(filtered.1.contains("Clear the search"));
+
+        // Every state is a real sentence with a next action, never a blank panel.
+        for (title, detail) in [first_run, unread, filtered] {
+            assert!(!title.is_empty() && !detail.is_empty());
+            assert!(detail.ends_with('.'), "copy should be a sentence: {detail}");
+        }
+    }
+
+    #[test]
+    fn sort_order_alone_does_not_count_as_narrowing_the_library() {
+        // Sorting can never remove a row, so an empty grid is not the sort's fault
+        // and "clear the filters" would be a dead end.
+        let mut browse = Browse::new();
+        browse.sort = SortChoice::Progress;
+        assert!(!browse.narrowed());
+
+        for narrow in [
+            |b: &mut Browse| b.text = "x".into(),
+            |b: &mut Browse| b.kind = KindFilter::Movies,
+            |b: &mut Browse| b.genre = Some("Drama".into()),
+            |b: &mut Browse| b.watchlist_only = true,
+            |b: &mut Browse| b.favorites_only = true,
+            |b: &mut Browse| b.available_only = true,
+        ] {
+            let mut browse = Browse::new();
+            narrow(&mut browse);
+            assert!(browse.narrowed(), "a narrowing filter went unnoticed");
+        }
+
+        // Whitespace in the search box is not a search.
+        let mut browse = Browse::new();
+        browse.text = "   ".into();
+        assert!(!browse.narrowed());
     }
 
     #[test]
