@@ -4,7 +4,7 @@ use std::fs::{self, File};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use screenroom_core::{Library, LibraryQuery, LibraryScanner, ScanToken};
+use screenroom_core::{Library, LibraryQuery, LibraryScanner, ScanToken, SourceState};
 use tempfile::TempDir;
 
 /// Writes `contents` and backdates the mtime so the settle window passes.
@@ -140,6 +140,131 @@ fn complete_rescan_withdraws_availability_without_losing_progress() {
         ..LibraryQuery::page(10)
     };
     assert_eq!(library.count(&only_available).unwrap(), 1);
+}
+
+#[test]
+fn an_unplugged_drive_is_not_an_empty_library() {
+    // The worst failure this application could have is treating a missing disk as a
+    // deleted library: a rescan of an unplugged drive must not withdraw availability,
+    // drop rows, or lose progress. It must report the source as disconnected and
+    // report the scan as incomplete, so nothing downstream believes it finished.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("drive");
+    fs::create_dir_all(&root).unwrap();
+    write_settled(&root.join("Film.2020.mkv"), b"film");
+    write_settled(&root.join("Show.S01E01.mkv"), b"episode");
+
+    let library = Library::open_in_memory().unwrap();
+    let source = library.add_source(&root, None).unwrap();
+    scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+    assert_eq!(library.count(&LibraryQuery::default()).unwrap(), 2);
+
+    let profile = library.profiles().unwrap().remove(0);
+    let file = library
+        .items(&LibraryQuery::page(10))
+        .unwrap()
+        .into_iter()
+        .find(|item| item.filename == "Film.2020.mkv")
+        .unwrap();
+    library
+        .set_favorite(&profile.id, &file.work_id, true)
+        .unwrap();
+    let file_id = file.id.clone();
+
+    // The drive goes away — not one file, the whole root.
+    fs::remove_dir_all(&root).unwrap();
+    let summary = scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+
+    assert!(
+        !summary.complete,
+        "a scan that could not read its root must not claim to have completed"
+    );
+    assert_eq!(summary.imported, 0);
+    assert_eq!(summary.visited, 0);
+    assert_eq!(
+        summary.issues.first().map(|issue| issue.code),
+        Some("source_disconnected")
+    );
+    assert_eq!(
+        library.source(&source.id).unwrap().state,
+        SourceState::Disconnected
+    );
+
+    // Everything the owner had is still there, and still theirs.
+    assert_eq!(library.count(&LibraryQuery::default()).unwrap(), 2);
+    let offline = library.item(&file_id, Some(&profile.id)).unwrap().unwrap();
+    assert!(!offline.available);
+    assert!(offline.favorite, "a list entry was lost with the drive");
+    let favorites = LibraryQuery {
+        profile_id: Some(profile.id.clone()),
+        favorites_only: true,
+        ..LibraryQuery::page(10)
+    };
+    assert_eq!(library.count(&favorites).unwrap(), 1);
+
+    // And the drive coming back restores availability rather than leaving it stale.
+    fs::create_dir_all(&root).unwrap();
+    write_settled(&root.join("Film.2020.mkv"), b"film");
+    write_settled(&root.join("Show.S01E01.mkv"), b"episode");
+    let again = scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+    assert!(again.complete);
+    assert!(
+        library
+            .item(&file_id, Some(&profile.id))
+            .unwrap()
+            .unwrap()
+            .available,
+        "reconnecting the drive did not restore availability"
+    );
+    assert_eq!(library.count(&LibraryQuery::default()).unwrap(), 2);
+}
+
+#[test]
+fn a_root_replaced_by_a_symlink_is_refused_rather_than_followed() {
+    // A root whose canonical path no longer matches what was authorized is a
+    // relink question, not a scan question: following it would read media the owner
+    // never granted.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    write_settled(&root.join("Inside.2020.mkv"), b"inside");
+
+    let library = Library::open_in_memory().unwrap();
+    let source = library.add_source(&root, None).unwrap();
+    scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+
+    let elsewhere = dir.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    write_settled(&elsewhere.join("Outside.2020.mkv"), b"outside");
+    fs::remove_dir_all(&root).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&elsewhere, &root).unwrap();
+
+    #[cfg(unix)]
+    {
+        let error = scanner(&library)
+            .scan(&source.id, &ScanToken::new(), |_| {})
+            .unwrap_err();
+        assert_eq!(error.code(), "unsafe_path");
+        // Nothing outside the granted root was imported, and nothing was withdrawn.
+        assert_eq!(library.count(&LibraryQuery::default()).unwrap(), 1);
+        assert!(
+            !library
+                .items(&LibraryQuery::page(10))
+                .unwrap()
+                .iter()
+                .any(|item| item.filename == "Outside.2020.mkv"),
+            "media outside the authorized root was read"
+        );
+    }
 }
 
 #[test]

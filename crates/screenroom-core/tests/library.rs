@@ -364,6 +364,81 @@ fn continue_watching_orders_by_recency_and_honours_hide() {
 }
 
 #[test]
+fn one_viewers_progress_never_appears_under_another() {
+    // Per-profile state is independent by design — there is no cross-device or
+    // cross-viewer sync requirement — so the risk is not that two profiles disagree
+    // but that they silently share a row. Every per-viewer table is checked here
+    // against a second profile that has done nothing.
+    let (_dir, library, source) = fixture();
+    let file = ingest(&library, &source, "Film.2020.mkv");
+    let mine = library.profiles().unwrap().remove(0);
+    let guest = library.add_profile("Guest").unwrap();
+    let seen = library.item(&file, Some(&mine.id)).unwrap().unwrap();
+    let (edition, work) = (seen.edition_id, seen.work_id);
+
+    let session = library.start_session(&mine.id, &file).unwrap();
+    library
+        .checkpoint(screenroom_core::Checkpoint {
+            session: &session,
+            position_ms: 5_000,
+            duration_ms: 10_000,
+            sequence: 1,
+            seek_generation: 0,
+            ended: false,
+        })
+        .unwrap();
+    library.end_session(&session).unwrap();
+    // Lists are keyed by work, progress by edition: both are per viewer.
+    library.set_favorite(&mine.id, &work, true).unwrap();
+    library.set_watchlisted(&mine.id, &work, true).unwrap();
+
+    // The same file, read as each viewer.
+    let as_mine = library.item(&file, Some(&mine.id)).unwrap().unwrap();
+    let as_guest = library.item(&file, Some(&guest.id)).unwrap().unwrap();
+    assert_eq!(as_mine.position_ms, 5_000);
+    assert_eq!(as_guest.position_ms, 0, "progress leaked across profiles");
+    assert!(as_mine.favorite && as_mine.watchlisted);
+    assert!(
+        !as_guest.favorite && !as_guest.watchlisted,
+        "a list entry leaked across profiles"
+    );
+
+    // Continue Watching and the list filters are per profile too.
+    assert_eq!(library.continue_watching(&mine.id, 10).unwrap().len(), 1);
+    assert_eq!(library.continue_watching(&guest.id, 10).unwrap().len(), 0);
+    let favorites = LibraryQuery {
+        profile_id: Some(guest.id.clone()),
+        favorites_only: true,
+        ..LibraryQuery::page(10)
+    };
+    assert_eq!(library.count(&favorites).unwrap(), 0);
+
+    // Hiding a resume on one profile must not hide it on the other, and marking a
+    // file watched for the guest must not finish it for the owner.
+    library.hide_continue(&mine.id, &edition).unwrap();
+    assert_eq!(library.continue_watching(&mine.id, 10).unwrap().len(), 0);
+    assert_eq!(library.continue_watching(&guest.id, 10).unwrap().len(), 0);
+    library.mark_watched(&guest.id, &edition, true).unwrap();
+    assert!(
+        library
+            .item(&file, Some(&guest.id))
+            .unwrap()
+            .unwrap()
+            .watched,
+        "the guest's own mark should stick for the guest"
+    );
+    assert_eq!(
+        library
+            .item(&file, Some(&mine.id))
+            .unwrap()
+            .unwrap()
+            .position_ms,
+        5_000,
+        "the guest finishing a file changed the owner's progress"
+    );
+}
+
+#[test]
 fn lists_survive_source_disconnect() {
     let (_dir, library, source) = fixture();
     let file = ingest(&library, &source, "Film.2020.mkv");
