@@ -3,7 +3,8 @@
 use std::fs;
 
 use screenroom_core::{
-    Ingest, Library, LibraryQuery, MediaKind, PathSemantics, Sort, SourceState, parse_filename,
+    Ingest, Library, LibraryQuery, MediaKind, PathSemantics, PathStyle, Sort, SourceState,
+    parse_filename,
 };
 use tempfile::TempDir;
 
@@ -171,6 +172,36 @@ fn the_default_semantics_follow_the_volume_this_library_is_on() {
     assert_eq!(
         default.path_key(std::path::Path::new("/Media/Shows")),
         explicit.path_key(std::path::Path::new("/Media/Shows")),
+    );
+}
+
+#[test]
+fn a_windows_canonical_path_matches_the_folder_it_came_from() {
+    // `std::fs::canonicalize` answers with a *verbatim* path on Windows, so a scan
+    // there compares `\\?\D:\Media` against the stored `D:\Media`. Comparing those
+    // literally refused every healthy Windows source as a replaced symbolic link.
+    // The style is a value, so the rule is checkable from here — which is the only
+    // place it can currently be checked at all.
+    let library = Library::open_in_memory()
+        .unwrap()
+        .with_path_style(PathStyle::Windows);
+    for (resolved, stored) in [
+        (r"\\?\D:\Media", r"D:\Media"),
+        (r"\\?\D:\Media\Shows", r"D:/Media/Shows"),
+        (r"\\?\UNC\server\share", r"\\server\share"),
+        (r"\\?\D:\Media\", r"d:\media"),
+    ] {
+        assert_eq!(
+            library.path_key(std::path::Path::new(resolved)),
+            library.path_key(std::path::Path::new(stored)),
+            "{resolved} must be accepted as the same folder as {stored}"
+        );
+    }
+
+    // The guard it feeds still has to refuse a folder that really is elsewhere.
+    assert_ne!(
+        library.path_key(std::path::Path::new(r"\\?\E:\Other")),
+        library.path_key(std::path::Path::new(r"D:\Media")),
     );
 }
 

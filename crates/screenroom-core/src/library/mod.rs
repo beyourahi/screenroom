@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::Profile;
 use crate::error::{CoreError, Result};
+use crate::paths::{PathStyle, location_key};
 use crate::{SCHEMA_VERSION, schema};
 
 pub use backup::{BackupInfo, BackupReport, RestoreReport};
@@ -141,6 +142,7 @@ pub struct Library {
     connection: Mutex<Connection>,
     active_scans: Mutex<HashSet<String>>,
     path_semantics: PathSemantics,
+    path_style: PathStyle,
     /// Where the database lives, or `None` for an in-memory library.
     ///
     /// Kept so backup and restore can tell the live file from a copy of it, and
@@ -173,6 +175,16 @@ impl Library {
     /// Opens a throwaway in-memory library, used by tests and previews.
     pub fn open_in_memory() -> Result<Self> {
         Self::from_connection(Connection::open_in_memory()?, None, PathSemantics::host())
+    }
+
+    /// How this library compares the *spelling* of two paths.
+    ///
+    /// The default follows the host, and can be overridden so a Windows-only rule
+    /// (a verbatim prefix, a drive letter, either separator) is exercisable from a
+    /// machine that is not Windows.
+    pub fn with_path_style(mut self, style: PathStyle) -> Self {
+        self.path_style = style;
+        self
     }
 
     /// Chooses how this library compares paths.
@@ -250,6 +262,7 @@ impl Library {
             connection: Mutex::new(connection),
             active_scans: Mutex::new(HashSet::new()),
             path_semantics,
+            path_style: PathStyle::host(),
             path,
         })
     }
@@ -320,9 +333,12 @@ impl Library {
         })
     }
 
-    /// Normalises a path for overlap comparison.
+    /// Normalises a path for overlap comparison and identity checks.
     ///
-    /// Folded when the volume folds case, untouched when it does not. Note that
+    /// Folded when the volume folds case, untouched when it does not, and spelled
+    /// one way regardless of which separator or prefix wrote it — see
+    /// [`crate::paths::location_key`], which is where the rules live and are tested.
+    /// Note that
     /// folding is **not** a substitute for resolving a path: this compares two
     /// already-canonical roots, so it is only deciding whether the same folder was
     /// named twice.
@@ -332,11 +348,11 @@ impl Library {
     /// value, and it is the one part of the library's behaviour that depends on the
     /// volume rather than on the data.
     pub fn path_key(&self, path: &Path) -> String {
-        let raw = path.to_string_lossy().to_string();
-        match self.path_semantics {
-            PathSemantics::CaseInsensitive => raw.to_lowercase(),
-            PathSemantics::CaseSensitive => raw,
-        }
+        location_key(
+            &path.to_string_lossy(),
+            self.path_semantics,
+            self.path_style,
+        )
     }
 
     /// Lists viewer profiles, oldest first.

@@ -24,6 +24,7 @@ pub mod error;
 pub mod filename;
 pub mod fingerprint;
 pub mod library;
+pub mod paths;
 pub mod scanner;
 mod schema;
 
@@ -38,6 +39,7 @@ pub use library::{
     BackupInfo, BackupReport, Checkpoint, Ingest, Library, LibraryQuery, PathSemantics,
     Preferences, RestoreReport, Sort,
 };
+pub use paths::{PathStyle, location_key};
 pub use scanner::{
     LibraryScanner, MEDIA_EXTENSIONS, ScanIssue, ScanSummary, ScanToken, ScanUpdate,
 };

@@ -196,7 +196,12 @@ impl<'a> LibraryScanner<'a> {
                 });
             }
         };
-        if root.to_string_lossy() != source.root_path {
+        // Compared as locations, not as strings. `canonicalize` does not return the
+        // spelling it was given — on Windows it answers with a verbatim path
+        // (`\\?\D:\Media` for `D:\Media`) — so a literal comparison rejected every
+        // healthy Windows source as a replaced symbolic link.
+        let stored_key = self.library.path_key(Path::new(&source.root_path));
+        if self.library.path_key(&root) != stored_key {
             return Err(CoreError::library(
                 "unsafe_path",
                 "The source was replaced by a symbolic link. Relink it explicitly.",
