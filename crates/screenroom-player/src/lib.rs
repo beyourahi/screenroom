@@ -36,7 +36,9 @@ mod render;
 mod worker;
 
 pub use frame::Frame;
-pub use worker::{Player, PlayerCommand, PlayerFailure, PlayerSnapshot};
+pub use worker::{
+    MediaTrack, NO_TRACK, Player, PlayerCommand, PlayerFailure, PlayerSnapshot, TrackKind,
+};
 
 /// Default timeout for waiting on a libmpv event, in seconds.
 pub const DEFAULT_EVENT_TIMEOUT: f64 = 5.0;
@@ -155,6 +157,9 @@ type FnTerminateDestroy = unsafe extern "C" fn(MpvHandle);
 type FnSetOptionString = unsafe extern "C" fn(MpvHandle, *const c_char, *const c_char) -> c_int;
 type FnCommand = unsafe extern "C" fn(MpvHandle, *const *const c_char) -> c_int;
 type FnGetProperty = unsafe extern "C" fn(MpvHandle, *const c_char, c_int, *mut c_void) -> c_int;
+/// `char *mpv_get_property_string(ctx, name)`; the result is freed with [`FnFree`].
+type FnGetPropertyString = unsafe extern "C" fn(MpvHandle, *const c_char) -> *mut c_char;
+type FnFree = unsafe extern "C" fn(*mut c_void);
 type FnErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
 type FnWaitEvent = unsafe extern "C" fn(MpvHandle, f64) -> *mut RawEvent;
 type FnClientApiVersion = unsafe extern "C" fn() -> u64;
@@ -167,6 +172,8 @@ struct Symbols {
     set_option_string: FnSetOptionString,
     command: FnCommand,
     get_property: FnGetProperty,
+    get_property_string: FnGetPropertyString,
+    free: FnFree,
     error_string: FnErrorString,
     wait_event: FnWaitEvent,
     client_api_version: FnClientApiVersion,
@@ -232,6 +239,12 @@ impl LibMpv {
                 get_property: *library
                     .get(b"mpv_get_property\0")
                     .map_err(|error| missing(path, "mpv_get_property", error))?,
+                get_property_string: *library
+                    .get(b"mpv_get_property_string\0")
+                    .map_err(|error| missing(path, "mpv_get_property_string", error))?,
+                free: *library
+                    .get(b"mpv_free\0")
+                    .map_err(|error| missing(path, "mpv_free", error))?,
                 error_string: *library
                     .get(b"mpv_error_string\0")
                     .map_err(|error| missing(path, "mpv_error_string", error))?,
@@ -494,6 +507,53 @@ impl Mpv {
         self.check(code, &format!("mpv_command({})", arguments[0]))
     }
 
+    /// Reads a string property such as `audio-codec-name` or `track-list/0/lang`.
+    ///
+    /// `Ok(None)` means the property is simply *not available* — no audio track, no
+    /// language tag — which is ordinary and must not be reported as an error.
+    /// `mpv_get_property_string` itself avoids guessing at the C layout of a string
+    /// property, which is the whole reason it is used instead of a raw
+    /// `mpv_get_property` call.
+    pub fn get_string(&self, name: &str) -> Result<Option<String>, PlayerError> {
+        let name = to_cstring(name)?;
+        let pointer = unsafe {
+            (self.library.symbols.get_property_string)(self.handle.as_ptr(), name.as_ptr())
+        };
+        if pointer.is_null() {
+            return Ok(None);
+        }
+        // Safety: libmpv owns `pointer` until it is freed below, and truncated
+        // UTF-16 is impossible here because the string is NUL-terminated bytes.
+        let text = unsafe { CStr::from_ptr(pointer) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { (self.library.symbols.free)(pointer.cast()) };
+        Ok(Some(text))
+    }
+
+    /// Reads a boolean property such as `track-list/0/selected`.
+    ///
+    /// libmpv treats a flag as its own format, not as an integer, so asking for
+    /// `MPV_FORMAT_INT64` on one fails and a caller that defaulted to `0` would
+    /// silently report every track as unselected. That mistake is why this exists.
+    pub fn get_flag(&self, name: &str) -> Result<bool, PlayerError> {
+        let name = to_cstring(name)?;
+        let mut value: c_int = 0;
+        let code = unsafe {
+            (self.library.symbols.get_property)(
+                self.handle.as_ptr(),
+                name.as_ptr(),
+                3, // MPV_FORMAT_FLAG
+                (&mut value as *mut c_int).cast(),
+            )
+        };
+        self.check(
+            code,
+            &format!("mpv_get_property({})", name.to_string_lossy()),
+        )?;
+        Ok(value != 0)
+    }
+
     /// Reads a numeric property such as `duration`.
     pub fn get_f64(&self, name: &str) -> Result<f64, PlayerError> {
         let name = to_cstring(name)?;
@@ -542,6 +602,10 @@ pub mod event {
     pub const END_FILE: i32 = 7;
     /// The file was opened and its streams are known.
     pub const FILE_LOADED: i32 = 8;
+    /// The set of tracks changed (a new file, or an external track was added).
+    pub const TRACKS_CHANGED: i32 = 12;
+    /// The selected tracks changed.
+    pub const TRACK_SWITCHED: i32 = 20;
     /// An observed property changed.
     pub const PROPERTY_CHANGE: i32 = 22;
 }

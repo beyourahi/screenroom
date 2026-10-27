@@ -47,9 +47,14 @@ const ID_TIME_POS: u64 = 1;
 const ID_DURATION: u64 = 2;
 const ID_PAUSE: u64 = 3;
 const ID_EOF_REACHED: u64 = 4;
+const ID_AUDIO_PTS: u64 = 5;
+const ID_AVSYNC: u64 = 6;
+const ID_TOTAL_AVSYNC_CHANGE: u64 = 7;
+const ID_MISTIMED_FRAMES: u64 = 8;
 
 /// `mpv_format` values used when observing properties (`mpv/client.h`).
 const FORMAT_FLAG: i32 = 3;
+const FORMAT_INT64: i32 = 4;
 const FORMAT_DOUBLE: i32 = 5;
 
 /// An `mpv_event_property` (`mpv/client.h`).
@@ -99,6 +104,25 @@ pub struct PlayerSnapshot {
     pub ended: bool,
     /// True once a file opened successfully.
     pub loaded: bool,
+    /// Selectable tracks the player reported for the current file.
+    pub tracks: Vec<MediaTrack>,
+    /// The audio output's own playhead, in seconds.
+    ///
+    /// This is the *device* clock, not the file position: libmpv advances it as
+    /// the audio output consumes samples. A stalled output freezes it, which is
+    /// what makes it usable as evidence that audio is really being played rather
+    /// than merely initialised. `None` when the file has no audio track.
+    pub audio_pts: Option<f64>,
+    /// libmpv's own last audio/video sync difference, in seconds.
+    ///
+    /// Positive means audio leads the video. Measured by the player rather than
+    /// inferred by comparing two clocks, which is the only reason the number is
+    /// worth recording in the ledger.
+    pub avsync: Option<f64>,
+    /// Cumulative A/V sync adjustment libmpv has applied to this file, in seconds.
+    pub total_avsync_change: Option<f64>,
+    /// Frames libmpv dropped or duplicated to hold sync.
+    pub mistimed_frames: Option<i64>,
 }
 
 impl Default for PlayerSnapshot {
@@ -111,6 +135,11 @@ impl Default for PlayerSnapshot {
             failure: None,
             ended: false,
             loaded: false,
+            tracks: Vec::new(),
+            audio_pts: None,
+            avsync: None,
+            total_avsync_change: None,
+            mistimed_frames: None,
         }
     }
 }
@@ -133,6 +162,74 @@ impl PlayerSnapshot {
     }
 }
 
+/// Which kind of stream a [`MediaTrack`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackKind {
+    /// The picture.
+    Video,
+    /// A sound track.
+    Audio,
+    /// A subtitle or closed-caption track.
+    Subtitle,
+}
+
+impl TrackKind {
+    /// libmpv's spelling of this kind, as used in `track-list/N/type`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrackKind::Video => "video",
+            TrackKind::Audio => "audio",
+            TrackKind::Subtitle => "subtitle",
+        }
+    }
+}
+
+/// One selectable stream, as libmpv reports it in `track-list`.
+///
+/// Only facts libmpv actually states are carried: a track with no language tag
+/// has `language: None` rather than an invented `und` or a guess read out of the
+/// filename, because the interface has to be able to say "no language tag"
+/// without lying about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaTrack {
+    /// libmpv's track id, used to select the track or turn it off.
+    pub id: i64,
+    /// Video, audio or subtitle.
+    pub kind: TrackKind,
+    /// The stream's own title, when it carries one.
+    pub title: Option<String>,
+    /// ISO language tag, when the stream carries one.
+    pub language: Option<String>,
+    /// Codec name, for example `aac` or `subrip`.
+    pub codec: Option<String>,
+    /// True when this is the track currently in use.
+    pub selected: bool,
+    /// True when the track came from a different file than the media itself.
+    pub external: bool,
+}
+
+impl MediaTrack {
+    /// The best short label for a chooser: title, then language, then codec.
+    pub fn label(&self) -> String {
+        let codec = self
+            .codec
+            .clone()
+            .unwrap_or_else(|| self.kind.as_str().to_string());
+        match (&self.title, &self.language) {
+            (Some(title), Some(language)) => format!("{title} · {language} · {codec}"),
+            (Some(title), None) => format!("{title} · {codec}"),
+            (None, Some(language)) => format!("{language} · {codec}"),
+            (None, None) => codec,
+        }
+    }
+}
+
+/// Track id that means "none selected": `MPV_TRACK_ID_NONE` in `client.h`.
+///
+/// libmpv spells this one as the string `no`, so it is translated at the call
+/// site rather than sent as a number.
+pub const NO_TRACK: i64 = 0;
+
 /// A request to the player thread.
 #[derive(Debug, Clone)]
 pub enum PlayerCommand {
@@ -149,6 +246,13 @@ pub enum PlayerCommand {
     SetPaused(bool),
     /// Stop playback and release the file.
     Stop,
+    /// Choose a track by its libmpv id, or disable the kind with [`NO_TRACK`].
+    SelectTrack {
+        /// Which family of stream to change.
+        kind: TrackKind,
+        /// libmpv track id, or [`NO_TRACK`] to turn subtitles off.
+        id: i64,
+    },
     /// Ask the worker to exit.
     Shutdown,
 }
@@ -231,6 +335,15 @@ impl Player {
         self.send(PlayerCommand::SetPaused(paused));
     }
 
+    /// Switches the track of `kind` to `id`, or turns that kind off.
+    ///
+    /// Turning subtitles off is a real libmpv operation (`no`), not a UI flag, so
+    /// the player's own notion of the selected track stays the single source of
+    /// truth and the next snapshot reflects it.
+    pub fn select_track(&self, kind: TrackKind, id: i64) {
+        self.send(PlayerCommand::SelectTrack { kind, id });
+    }
+
     /// Stops playback.
     pub fn stop(&self) {
         self.send(PlayerCommand::Stop);
@@ -296,6 +409,16 @@ struct Runner {
     loaded: bool,
     /// Position to jump to once the next file finishes loading.
     pending_resume: Option<f64>,
+    /// Tracks reported for the current file, in the order libmpv listed them.
+    tracks: Vec<MediaTrack>,
+    /// The audio output's clock in seconds; `None` when no audio is playing.
+    audio_pts: Option<f64>,
+    /// libmpv's last measured A/V sync difference, in seconds.
+    avsync: Option<f64>,
+    /// Cumulative sync adjustment libmpv applied, in seconds.
+    total_avsync_change: Option<f64>,
+    /// Frames dropped or duplicated for sync, per libmpv.
+    mistimed_frames: Option<i64>,
 }
 
 impl Runner {
@@ -334,6 +457,14 @@ impl Runner {
         core.observe("duration", FORMAT_DOUBLE, ID_DURATION)?;
         core.observe("pause", FORMAT_FLAG, ID_PAUSE)?;
         core.observe("eof-reached", FORMAT_FLAG, ID_EOF_REACHED)?;
+        // The audio output's own clock. Observed rather than polled so the
+        // measurement in the tests reads the same value the player acts on.
+        core.observe("audio-pts", FORMAT_DOUBLE, ID_AUDIO_PTS)?;
+        // libmpv's own sync instruments. Inferring sync from two clocks measures the
+        // clocks; these measure the sync.
+        core.observe("avsync", FORMAT_DOUBLE, ID_AVSYNC)?;
+        core.observe("total-avsync-change", FORMAT_DOUBLE, ID_TOTAL_AVSYNC_CHANGE)?;
+        core.observe("mistimed-frame-count", FORMAT_INT64, ID_MISTIMED_FRAMES)?;
 
         Ok(Self {
             renderer,
@@ -345,6 +476,11 @@ impl Runner {
             duration: 0.0,
             loaded: false,
             pending_resume: None,
+            tracks: Vec::new(),
+            audio_pts: None,
+            avsync: None,
+            total_avsync_change: None,
+            mistimed_frames: None,
         })
     }
 
@@ -379,6 +515,7 @@ impl Runner {
             PlayerCommand::Load { path, resume } => self.load(&path, resume, shared),
             PlayerCommand::Seek(seconds) => self.seek(seconds, shared),
             PlayerCommand::SetPaused(paused) => self.set_paused(paused, shared),
+            PlayerCommand::SelectTrack { kind, id } => self.select_track(kind, id, shared),
             PlayerCommand::Stop => self.stop(shared),
             PlayerCommand::Shutdown => {}
         }
@@ -406,6 +543,13 @@ impl Runner {
         self.position = 0.0;
         self.duration = 0.0;
         self.loaded = false;
+        // The previous file's tracks and audio clock must not survive into the
+        // next one, or the interface would offer streams that are already gone.
+        self.tracks.clear();
+        self.audio_pts = None;
+        self.avsync = None;
+        self.total_avsync_change = None;
+        self.mistimed_frames = None;
         self.pending_resume = resume.filter(|seconds| seconds.is_finite() && *seconds > 0.5);
         self.set_state(PlayerState::Resolving, shared);
         if let Err(error) = self.core.command(&["loadfile", path, "replace"]) {
@@ -446,12 +590,45 @@ impl Runner {
         }
     }
 
+    /// Applies a track choice and republishes the real selected state.
+    ///
+    /// The track list is re-read from libmpv afterwards instead of being patched
+    /// locally: if libmpv refuses the switch (an id that has since disappeared),
+    /// the snapshot must show what actually happened, not what was asked for.
+    fn select_track(&mut self, kind: TrackKind, id: i64, shared: &Arc<Mutex<PlayerSnapshot>>) {
+        if !self.loaded {
+            return;
+        }
+        let property = match kind {
+            TrackKind::Video => "vid",
+            TrackKind::Audio => "aid",
+            TrackKind::Subtitle => "sid",
+        };
+        let value = if id == NO_TRACK {
+            "no".to_string()
+        } else {
+            id.to_string()
+        };
+        if let Err(error) = self.core.command(&["set", property, &value]) {
+            self.fail("track_failed", error.to_string(), shared);
+            return;
+        }
+        self.tracks = read_tracks(&self.core);
+        let tracks = self.tracks.clone();
+        publish(shared, |snapshot| snapshot.tracks = tracks);
+    }
+
     fn stop(&mut self, shared: &Arc<Mutex<PlayerSnapshot>>) {
         let _ = self.core.command(&["stop"]);
         self.state = PlayerState::Idle;
         self.loaded = false;
         self.position = 0.0;
         self.duration = 0.0;
+        self.tracks.clear();
+        self.audio_pts = None;
+        self.avsync = None;
+        self.total_avsync_change = None;
+        self.mistimed_frames = None;
         publish(shared, |snapshot| {
             snapshot.state = PlayerState::Idle;
             snapshot.loaded = false;
@@ -459,6 +636,11 @@ impl Runner {
             snapshot.duration = 0.0;
             snapshot.ended = false;
             snapshot.frame = None;
+            snapshot.tracks = Vec::new();
+            snapshot.audio_pts = None;
+            snapshot.avsync = None;
+            snapshot.total_avsync_change = None;
+            snapshot.mistimed_frames = None;
         });
     }
 
@@ -468,6 +650,9 @@ impl Runner {
             event::START_FILE => self.set_state(PlayerState::Resolving, shared),
             event::FILE_LOADED => self.on_loaded(shared),
             event::END_FILE => self.on_end_file(raw, shared),
+            // A new file replaces the track list, and a switch changes which entry
+            // is selected; both are re-read so the snapshot shows libmpv's state.
+            event::TRACKS_CHANGED | event::TRACK_SWITCHED => self.refresh_tracks(shared),
             event::SHUTDOWN => {}
             _ => {}
         }
@@ -522,8 +707,33 @@ impl Runner {
                     publish(shared, |snapshot| snapshot.ended = true);
                 }
             }
+            ID_AUDIO_PTS => {
+                let value = unsafe { *(property.data as *const f64) };
+                // A file with no audio reports the property as unavailable, which
+                // the caller distinguishes from a clock sitting at zero.
+                self.audio_pts = value.is_finite().then_some(value);
+            }
+            ID_AVSYNC => {
+                let value = unsafe { *(property.data as *const f64) };
+                self.avsync = value.is_finite().then_some(value);
+            }
+            ID_TOTAL_AVSYNC_CHANGE => {
+                let value = unsafe { *(property.data as *const f64) };
+                self.total_avsync_change = value.is_finite().then_some(value);
+            }
+            ID_MISTIMED_FRAMES => {
+                let value = unsafe { *(property.data as *const i64) };
+                self.mistimed_frames = Some(value);
+            }
             _ => {}
         }
+        self.publish_snapshot(shared);
+    }
+
+    /// Re-reads the track list and publishes it.
+    fn refresh_tracks(&mut self, shared: &Arc<Mutex<PlayerSnapshot>>) {
+        self.tracks = read_tracks(&self.core);
+        trace!("tracks: {}", self.tracks.len());
         self.publish_snapshot(shared);
     }
 
@@ -531,6 +741,7 @@ impl Runner {
         trace!("event: file loaded");
         self.loaded = true;
         self.duration = self.core.get_f64("duration").unwrap_or(0.0).max(0.0);
+        self.tracks = read_tracks(&self.core);
 
         let width = self.core.get_i64("width").unwrap_or(0).max(0) as u32;
         let height = self.core.get_i64("height").unwrap_or(0).max(0) as u32;
@@ -633,13 +844,64 @@ impl Runner {
     fn publish_snapshot(&self, shared: &Arc<Mutex<PlayerSnapshot>>) {
         let (position, duration, state, loaded) =
             (self.position, self.duration, self.state, self.loaded);
+        let (tracks, audio_pts) = (self.tracks.clone(), self.audio_pts);
+        let (avsync, total_avsync_change, mistimed_frames) =
+            (self.avsync, self.total_avsync_change, self.mistimed_frames);
         publish(shared, |snapshot| {
             snapshot.position = position;
             snapshot.duration = duration;
             snapshot.state = state;
             snapshot.loaded = loaded;
+            snapshot.tracks = tracks;
+            snapshot.audio_pts = audio_pts;
+            snapshot.avsync = avsync;
+            snapshot.total_avsync_change = total_avsync_change;
+            snapshot.mistimed_frames = mistimed_frames;
         });
     }
+}
+
+/// Reads the current `track-list` from libmpv.
+///
+/// libmpv exposes the list as indexed sub-properties, so it is walked with plain
+/// property reads rather than by parsing a node tree: `track-list/count` gives the
+/// length and `track-list/<n>/<field>` the fields. A missing field is reported as
+/// `None`; a malformed index stops the walk rather than looping forever.
+fn read_tracks(core: &Mpv) -> Vec<MediaTrack> {
+    let count = core.get_i64("track-list/count").unwrap_or(0).clamp(0, 64);
+    let mut tracks = Vec::new();
+    for index in 0..count {
+        let field = |name: &str| {
+            core.get_string(&format!("track-list/{index}/{name}"))
+                .ok()
+                .flatten()
+        };
+        let kind = match field("type").as_deref() {
+            Some("video") => TrackKind::Video,
+            Some("audio") => TrackKind::Audio,
+            Some("sub") => TrackKind::Subtitle,
+            // An unknown stream type is not something the interface can present,
+            // and inventing a kind for it would put a dead control on screen.
+            _ => continue,
+        };
+        let Some(id) = core.get_i64(&format!("track-list/{index}/id")).ok() else {
+            continue;
+        };
+        tracks.push(MediaTrack {
+            id,
+            kind,
+            title: field("title").filter(|value| !value.trim().is_empty()),
+            language: field("lang").filter(|value| !value.trim().is_empty()),
+            codec: field("codec").filter(|value| !value.trim().is_empty()),
+            selected: core
+                .get_flag(&format!("track-list/{index}/selected"))
+                .unwrap_or(false),
+            external: core
+                .get_flag(&format!("track-list/{index}/external"))
+                .unwrap_or(false),
+        });
+    }
+    tracks
 }
 
 /// Applies `update` to the shared snapshot, ignoring a poisoned lock.
