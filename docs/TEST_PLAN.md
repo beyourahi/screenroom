@@ -9,7 +9,41 @@ built and tested; no physical-device test has been run. The archived v0.1 report
 6 unit tests/browser Chromium smoke/mocked TV methods and did **not** run on actual
 Windows/Samsung hardware. Do not count source review as passed tests.
 
-What runs today (`cargo test --workspace`, **149 tests, 0 failures** on macOS ARM64):
+Two checks need a visible window and are **PENDING** until the owner allows a
+session for them: the keyboard journeys in §4 (`W-01`/`W-02` equivalents on macOS)
+and the disc-removal cases in §4 (`R-01`). Nothing in this document has been run
+against Windows or a TV.
+
+## Testing without taking over the desktop
+
+**Policy (2026-10-28): background-first.** Verification runs on the owner's own
+MacBook while they are using it, so no check may bring Screenroom to the front,
+switch Spaces, move an active window, or take the keyboard and mouse. Foreground
+UI automation is opt-in via `SCREENROOM_ALLOW_FOREGROUND=1` and refuses without it;
+`scripts/foreground-guard.sh` is the gate. The full rule is in `AGENTS.md`.
+
+| Tier | Opens a window | Takes focus | What it can prove |
+|---|---|---|---|
+| `cargo test --workspace` | no | no | Domain, storage, scanner, player worker against real libmpv, paging at scale, checkpoint policy |
+| `cargo run -p screenroom-player --example capability` | no | no | Which libmpv this host resolved |
+| `crates/screenroom-player/examples/audio_clock.rs` | no | no | Audio clock against real decoding |
+| `scripts/check-quit-routing.sh` | hidden | **no** | That the menu bar's Quit was re-pointed at the window's close action |
+| `scripts/verify-quit.sh` | yes | **yes** — opt-in only | That a real dismissal stores the final position and closes the session |
+| `scripts/drive-app.sh`, `capture-window.sh` raise | yes | **yes** — opt-in only | Screenshots and keyboard journeys |
+
+`scripts/check-quit-routing.sh` exists because the menu bar only exists inside a
+running application: it launches the real binary with `SCREENROOM_QUIT_CHECK` set,
+which makes the process hide its window, examine the menu bar, write the outcome to
+a file and exit. Measured with the frontmost application sampled every 50 ms for the
+duration of the run, it stays whatever it was — on 2026-10-28, Google Chrome
+throughout.
+
+What this tier **cannot** prove: that quitting stores a position. That needs a real
+window and a real ⌘Q, so it belongs to `verify-quit.sh` and to a permissioned
+session. Recording it as passed on the strength of the hidden check would be
+claiming a test that did not happen.
+
+What runs today (`cargo test --workspace`, **153 tests, 0 failures** on macOS ARM64):
 
 | Suite | Proves |
 | --- | --- |
@@ -22,8 +56,9 @@ What runs today (`cargo test --workspace`, **149 tests, 0 failures** on macOS AR
 | `screenroom-player` unit | state machine, options, property mapping |
 | `player/tests/worker.rs` | real libmpv decode, frame rate, audio clock and `avsync`, track switching, failure states, long session |
 | `player/tests/libmpv_smoke.rs` | client API on this host |
-| `screenroom-desktop` unit | navigation, filters, autoplay decision, resume copy, close-path state |
+| `screenroom-desktop` unit | navigation, filters, autoplay decision, resume copy, close-path state, and that the menu-bar routing is found by action rather than by title |
 | `desktop/tests/playback.rs` | checkpoint policy against a real SQLite library and a real clip |
+| `scripts/check-quit-routing.sh` | that the running application re-pointed the menu bar's Quit (hidden window, no focus taken) |
 
 Everything below about Windows/TV tiers, browser tiers and the Svelte UI is
 historical planning; the platforms it names were narrowed by ADR-004.

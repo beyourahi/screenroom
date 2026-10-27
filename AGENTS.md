@@ -114,6 +114,45 @@ are external and are not part of Git.
 - The private Dropout Design System source and generated private token values
   stay out of Git and out of any public artifact.
 
+## Testing without taking over the desktop
+
+**Background-first, always.** Development and verification run on the owner's own
+MacBook while they are using it. A test may not bring Screenroom to the front,
+switch Spaces, move the owner's active window, or take the keyboard and mouse —
+not even briefly, and not "just to check something".
+
+In order of preference:
+
+1. **Headless.** `cargo test --workspace` and the player examples never open a
+   window. Prefer a unit, contract or integration test here. New coverage should
+   default to this tier.
+2. **Hidden window.** Where a check genuinely needs the running application's own
+   platform machinery — AppKit's menu bar, the event loop, the real database —
+   launch with `SCREENROOM_WINDOW=hidden`, or a check mode that implies it, and
+   must never call `activate`. `scripts/check-quit-routing.sh` is the model: real
+   process, hidden window, outcome written to a file, exit. Verify with
+   `SCREENROOM_ALLOW_FOREGROUND=0` that the frontmost application does not change.
+3. **Programmatic test interfaces.** When a behaviour currently needs a keystroke
+   and a visible window, prefer replacing that with a deterministic entry point
+   (an environment-gated check, an assertion over the database or the published
+   frame) over automating the visible UI. Keep the assertions at least as strong
+   as the interaction they replace.
+4. **Isolated graphical session.** Only for what genuinely needs a visible window,
+   and only after checking that a supported isolated environment is available. Do
+   not add heavyweight virtual machines, do not change global macOS settings, and
+   do not disturb unrelated applications.
+
+**Foreground UI automation is opt-in.** `scripts/drive-app.sh`, the raise in
+`scripts/capture-window.sh` and `scripts/verify-quit.sh` are gated on
+`SCREENROOM_ALLOW_FOREGROUND=1` through `scripts/foreground-guard.sh`, and refuse
+otherwise. Do not set that variable on the owner's behalf. When a check needs a
+visible window and permission has not been given, record it as **PENDING** with
+its exact steps and consolidate it into a later owner-approved session — never as
+passed, and never quietly skipped.
+
+Capturing a window (`screencapture -l <window>`) is passive and does not need
+permission; only activating the application does.
+
 ## Required evidence gates
 
 Read [`docs/FEASIBILITY_GATES.md`](docs/FEASIBILITY_GATES.md) first. Gates are per

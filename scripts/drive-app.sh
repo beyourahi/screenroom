@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Sends keys to a running Screenroom window and captures evidence.
 #
+# **This drives a visible window and takes over the desktop while it runs.** It is
+# gated on `SCREENROOM_ALLOW_FOREGROUND=1`; see `scripts/foreground-guard.sh` and
+# `docs/TEST_PLAN.md`. Reach for the headless checks first.
+#
 # macOS delivers synthetic keys only when the target window is raised inside the
 # same AppleScript block, so every helper does raise+nudge+key in one call.
 #
@@ -14,6 +18,11 @@
 #
 # Requires Accessibility + Screen Recording grants for the invoking terminal.
 set -uo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/foreground-guard.sh
+source "$root/scripts/foreground-guard.sh"
+screenroom_require_foreground "driving the Screenroom window"
 
 process="${SCREENROOM_PROCESS:-screenroom-desktop}"
 action="${1:?usage: drive-app.sh <key|capture> [name]}"

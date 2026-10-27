@@ -10,6 +10,11 @@
 #   scripts/capture-window.sh .artifacts/evidence/player.png
 #   SCREENROOM_PROCESS=other scripts/capture-window.sh out.png
 #
+# The capture itself is passive — it reads one window's own pixels and takes no
+# focus. The *raise* below does activate the application, so it only happens when
+# `SCREENROOM_ALLOW_FOREGROUND=1` is set; without it the helper still captures,
+# and simply cannot reach a window that is sitting on another Space.
+#
 # The helper is compiled once into target/devtools (Git-ignored) and reused.
 # Requires Screen Recording permission for the invoking terminal.
 set -euo pipefail
@@ -25,9 +30,11 @@ if [ ! -x "$binary" ] || [ "$source_file" -nt "$binary" ]; then
   xcrun swiftc -O -swift-version 5 -o "$binary" "$source_file" >/dev/null
 fi
 
-# Best-effort raise: a failure here is not fatal, because the capture is by window
-# number. It only makes the captured content current and un-occluded.
-osascript >/dev/null 2>&1 <<APPLESCRIPT || true
+# Best-effort raise, and only with permission: a failure here is not fatal, because
+# the capture is by window number. It only makes the captured content current and
+# un-occluded, and it is the one part of this helper that can move the desktop.
+if [ "${SCREENROOM_ALLOW_FOREGROUND:-0}" = "1" ]; then
+  osascript >/dev/null 2>&1 <<APPLESCRIPT || true
 tell application "System Events"
   tell process "$process"
     set frontmost to true
@@ -37,6 +44,7 @@ tell application "System Events"
   end tell
 end tell
 APPLESCRIPT
+fi
 
 mkdir -p "$(dirname "$out")"
 listing="$("$binary" "$process" --list 2>/dev/null)" || {

@@ -66,12 +66,31 @@ const SEEK_STEP: f64 = 10.0;
 /// after a few seconds instead of every update forever.
 const QUIT_ROUTING_BUDGET: u8 = 40;
 
+/// Whether this launch should put a window on screen.
+///
+/// A hidden window still gives the process everything a check needs — the event
+/// loop, AppKit's menu bar, the database — without taking anything from whoever is
+/// using the machine. Only two things ask for one: a check launch, and
+/// `SCREENROOM_WINDOW=hidden`.
+fn hides_its_window() -> bool {
+    crate::quit::check_requested()
+        || std::env::var_os("SCREENROOM_WINDOW").is_some_and(|value| value == "hidden")
+}
+
 /// Starts the desktop application.
 pub fn run() -> iced::Result {
+    // Set through `window` rather than a dedicated builder method, and before
+    // `window_size`, which only replaces the size and keeps everything else.
+    let window = iced::window::Settings {
+        visible: !hides_its_window(),
+        ..Default::default()
+    };
+
     iced::application(App::new, App::update, App::view)
         .title("Screenroom")
         .theme(App::theme)
         .subscription(App::subscription)
+        .window(window)
         .window_size((1280.0, 800.0))
         // Closing the window is not the same as the process ending: the app has to
         // be given the chance to store the position it is at and close the viewing
@@ -355,6 +374,8 @@ pub struct App {
     /// no menu bar to route and AppKit must not be reached off the main thread.
     quit_routing_budget: u8,
     quit_routing: crate::quit::QuitRouting,
+    /// File a check launch was asked to report the routing outcome to.
+    quit_check: Option<PathBuf>,
 }
 
 /// User intent.
@@ -522,6 +543,7 @@ impl App {
         // update loop rather than here.
         let (mut app, task) = Self::launch();
         app.quit_routing_budget = QUIT_ROUTING_BUDGET;
+        app.quit_check = crate::quit::check_path();
         (app, task)
     }
 
@@ -612,6 +634,7 @@ impl App {
             // Only a launch arms this; see the field's own note.
             quit_routing_budget: 0,
             quit_routing: crate::quit::QuitRouting::Unsupported,
+            quit_check: None,
         };
         // The language fields start from what is stored, so the screen never
         // shows an empty box for a preference that is actually set.
@@ -752,28 +775,48 @@ impl App {
     /// Best-effort and reported, never fatal: if it never succeeds, quitting still
     /// works — it simply cannot store the position it is at, and a user reading the
     /// log should be able to find out that is why.
-    fn route_quit(&mut self) {
+    ///
+    /// Returns whether the process should now stop, which it does when a check
+    /// launch has its answer.
+    fn route_quit(&mut self) -> bool {
         // The budget is the whole guard. It is not enough to check whether the last
         // outcome was graceful, because the starting value answers that before
         // anything has been tried.
         if self.quit_routing_budget == 0 {
-            return;
+            return false;
         }
         let routing = crate::quit::route_quit_through_close();
         self.quit_routing = routing;
-        if routing.is_graceful() {
-            // Done. Spending the budget is what stops every later update from
-            // asking the window server again.
+        // Spending the budget is what stops every later update from asking the
+        // window server again, whether the answer was good or the budget ran out.
+        let settled = if routing.is_graceful() {
             self.quit_routing_budget = 0;
-            return;
+            true
+        } else {
+            self.quit_routing_budget -= 1;
+            if self.quit_routing_budget == 0 {
+                eprintln!(
+                    "screenroom: the menu bar's Quit could not be routed through the window \
+                     close ({routing}); quitting may not store the position it is at."
+                );
+            }
+            self.quit_routing_budget == 0
+        };
+        if !settled {
+            return false;
         }
-        self.quit_routing_budget -= 1;
-        if self.quit_routing_budget == 0 {
+
+        // A check launch asked for nothing but this answer.
+        let Some(path) = self.quit_check.clone() else {
+            return false;
+        };
+        if let Err(error) = crate::quit::report_check(&path, routing) {
             eprintln!(
-                "screenroom: the menu bar's Quit could not be routed through the window \
-                 close ({routing}); quitting may not store the position it is at."
+                "screenroom: could not write the quit-routing check to {}: {error}",
+                path.display()
             );
         }
+        true
     }
 
     // ------------------------------------------------------------ navigation
@@ -1571,7 +1614,9 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         // Done here rather than while starting, because the menu bar this changes
         // does not exist until the application has finished starting.
-        self.route_quit();
+        if self.route_quit() {
+            return iced::exit();
+        }
         match message {
             Message::GoHome => {
                 self.screen = Screen::Home;

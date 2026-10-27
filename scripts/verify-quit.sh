@@ -17,6 +17,12 @@
 # that failed to land is retried — driving a window that sits on another Space is
 # unreliable, and a green result produced by nothing playing would be a lie.
 #
+# **This takes over the desktop while it runs**, because it dismisses a real
+# visible window with a real key press, so it needs `SCREENROOM_ALLOW_FOREGROUND=1`.
+# When you only want to know that the menu bar's Quit is wired correctly, use
+# `scripts/check-quit-routing.sh` instead: it launches with a hidden window and
+# never touches focus, Spaces or the keyboard.
+#
 # Requires Accessibility and Screen Recording permission for the invoking terminal,
 # the same as the two helpers this uses.
 #
@@ -26,6 +32,14 @@ set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+
+# shellcheck source=scripts/foreground-guard.sh
+source "$root/scripts/foreground-guard.sh"
+screenroom_require_foreground "dismissing a visible Screenroom window"
+
+# The two helpers this uses are gated the same way, and they have to be allowed
+# through for the run to mean anything.
+export SCREENROOM_ALLOW_FOREGROUND=1
 
 process="screenroom-desktop"
 binary="target/debug/screenroom-desktop"

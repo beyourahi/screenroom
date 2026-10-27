@@ -19,6 +19,7 @@
 //! worse than the behaviour it replaces.
 
 use std::ffi::CStr;
+use std::path::{Path, PathBuf};
 
 /// The selector the application menu's Quit item sends.
 ///
@@ -81,6 +82,35 @@ fn quit_item_index(actions: &[Option<&CStr>]) -> Option<usize> {
     actions
         .iter()
         .position(|action| *action == Some(QUIT_SELECTOR))
+}
+
+/// Environment variable naming a file to write this examination's outcome to.
+///
+/// A launch that sets it examines the menu bar, writes the outcome there, and
+/// stops rather than running a user interface nobody is watching. The menu bar
+/// only exists inside a running application, so that is the only way this can be
+/// checked at all — and it is checked without a window ever appearing, because a
+/// window on the desktop belongs to whoever is using the machine.
+///
+/// See `scripts/check-quit-routing.sh`.
+pub const CHECK_ENV: &str = "SCREENROOM_QUIT_CHECK";
+
+/// The file this launch was asked to report to, if any.
+pub fn check_path() -> Option<PathBuf> {
+    std::env::var_os(CHECK_ENV).map(PathBuf::from)
+}
+
+/// Whether this launch exists only to be checked, and should show nothing.
+pub fn check_requested() -> bool {
+    check_path().is_some()
+}
+
+/// Writes the outcome where the check asked for it.
+///
+/// Written once, when the outcome is final, so a reader waits for the file rather
+/// than guessing how long the application needs to start.
+pub fn report_check(path: &Path, routing: QuitRouting) -> std::io::Result<()> {
+    std::fs::write(path, format!("{routing}\n"))
 }
 
 /// Points the menu bar's Quit at the window's close action, once.
