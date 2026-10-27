@@ -9,5 +9,6 @@
 //! * [`app`] is the iced interface and owns nothing that a test needs to trust.
 
 pub mod app;
+pub mod design;
 pub mod playback;
 pub mod video_surface;

@@ -16,3 +16,5 @@ wgpu = "27"
 
 [dev-dependencies]
 tempfile.workspace = true
+# Only the design-system token exporter uses JSON; the app itself never parses it.
+serde_json.workspace = true
