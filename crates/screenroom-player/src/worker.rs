@@ -123,6 +123,15 @@ pub struct PlayerSnapshot {
     pub total_avsync_change: Option<f64>,
     /// Frames libmpv dropped or duplicated to hold sync.
     pub mistimed_frames: Option<i64>,
+    /// Subtitle text size libmpv is actually using, as a multiple of normal.
+    ///
+    /// Read back from `sub-scale` rather than echoed from the request, so this is
+    /// evidence of what the player accepted. `None` until a style is applied.
+    pub subtitle_scale: Option<f64>,
+    /// Subtitle position libmpv is actually using, in percent from the top.
+    ///
+    /// Read back from `sub-pos`, for the same reason as `subtitle_scale`.
+    pub subtitle_position: Option<f64>,
 }
 
 impl Default for PlayerSnapshot {
@@ -140,6 +149,8 @@ impl Default for PlayerSnapshot {
             avsync: None,
             total_avsync_change: None,
             mistimed_frames: None,
+            subtitle_scale: None,
+            subtitle_position: None,
         }
     }
 }
@@ -253,9 +264,31 @@ pub enum PlayerCommand {
         /// libmpv track id, or [`NO_TRACK`] to turn subtitles off.
         id: i64,
     },
+    /// Set how subtitles are drawn, independently of which track is selected.
+    SetSubtitleStyle {
+        /// Text size as a multiple of normal, matching libmpv's `sub-scale`.
+        scale: f64,
+        /// Vertical position in percent of the screen height, matching `sub-pos`.
+        position: f64,
+    },
     /// Ask the worker to exit.
     Shutdown,
 }
+
+/// The range Screenroom keeps `sub-scale` inside, as a multiple of normal size.
+///
+/// Screenroom's own guard, not libmpv's limit: libmpv accepts a much wider range,
+/// including a scale that renders a subtitle of no readable size. Anything outside
+/// this is clamped by [`Player::set_subtitle_style`] so a bad caller cannot make the
+/// player look broken. The Settings screen offers a narrower range still.
+pub const SUB_SCALE_RANGE: (f64, f64) = (0.1, 10.0);
+
+/// The range Screenroom keeps `sub-pos` inside, in percent of the screen height.
+///
+/// Matches libmpv's documented `sub-pos` range of 0-150, where 0 is the top and 100
+/// the bottom. Screenroom's Settings screen only offers 0-100; the extra headroom is
+/// kept so a stored style from another client still means the same thing.
+pub const SUB_POSITION_RANGE: (f64, f64) = (0.0, 150.0);
 
 /// The interface's handle to the player thread.
 pub struct Player {
@@ -344,6 +377,21 @@ impl Player {
         self.send(PlayerCommand::SelectTrack { kind, id });
     }
 
+    /// Sets how subtitles are drawn: `scale` is a multiple of normal text size,
+    /// `position` is where they sit as a percent of the screen height from the top.
+    ///
+    /// Both are libmpv properties rather than Screenroom's own drawing, so the same
+    /// call sizes text, ASS and bitmap subtitles alike, and a value outside what
+    /// libmpv accepts is clamped rather than passed on.
+    ///
+    /// One caveat worth knowing before trusting it: a subtitle script that positions
+    /// its own lines — a styled ASS release — keeps that positioning unless
+    /// `sub-ass-override` is raised, which Screenroom leaves alone. Size is still
+    /// the player's; placement may not be.
+    pub fn set_subtitle_style(&self, scale: f64, position: f64) {
+        self.send(PlayerCommand::SetSubtitleStyle { scale, position });
+    }
+
     /// Stops playback.
     pub fn stop(&self) {
         self.send(PlayerCommand::Stop);
@@ -419,6 +467,14 @@ struct Runner {
     total_avsync_change: Option<f64>,
     /// Frames dropped or duplicated for sync, per libmpv.
     mistimed_frames: Option<i64>,
+    /// Subtitle scale libmpv last reported, or `None` before one is applied.
+    ///
+    /// Kept across files on purpose: `sub-scale` and `sub-pos` belong to the video
+    /// output, so they outlive the file that happened to be open when they were set
+    /// — which is exactly why a new viewing inherits them.
+    subtitle_scale: Option<f64>,
+    /// Subtitle position libmpv last reported, in percent from the top.
+    subtitle_position: Option<f64>,
 }
 
 impl Runner {
@@ -481,6 +537,8 @@ impl Runner {
             avsync: None,
             total_avsync_change: None,
             mistimed_frames: None,
+            subtitle_scale: None,
+            subtitle_position: None,
         })
     }
 
@@ -516,6 +574,9 @@ impl Runner {
             PlayerCommand::Seek(seconds) => self.seek(seconds, shared),
             PlayerCommand::SetPaused(paused) => self.set_paused(paused, shared),
             PlayerCommand::SelectTrack { kind, id } => self.select_track(kind, id, shared),
+            PlayerCommand::SetSubtitleStyle { scale, position } => {
+                self.set_subtitle_style(scale, position, shared)
+            }
             PlayerCommand::Stop => self.stop(shared),
             PlayerCommand::Shutdown => {}
         }
@@ -588,6 +649,47 @@ impl Runner {
         if let Err(error) = self.core.command(&["set", "pause", value]) {
             self.fail("pause_failed", error.to_string(), shared);
         }
+    }
+
+    /// Applies subtitle size and placement.
+    ///
+    /// Deliberately not guarded by [`Self::loaded`], unlike track selection: these
+    /// are properties of the video output, so setting them before a file is opened
+    /// is exactly how the next file should inherit them.
+    fn set_subtitle_style(
+        &mut self,
+        scale: f64,
+        position: f64,
+        shared: &Arc<Mutex<PlayerSnapshot>>,
+    ) {
+        // A non-finite value would survive `clamp` unchanged, and formatting it into
+        // an option string would then be rejected by libmpv with a parse error the
+        // user cannot act on. Skipped instead, so the property keeps its last good
+        // value rather than the player reporting itself broken.
+        for (property, value, (low, high)) in [
+            ("sub-scale", scale, SUB_SCALE_RANGE),
+            ("sub-pos", position, SUB_POSITION_RANGE),
+        ] {
+            if !value.is_finite() {
+                continue;
+            }
+            let value = value.clamp(low, high).to_string();
+            if let Err(error) = self.core.command(&["set", property, &value]) {
+                self.fail("subtitle_style_failed", error.to_string(), shared);
+                return;
+            }
+        }
+        // Read back instead of storing what was asked for. libmpv resolves these
+        // through the video output and may hold a different number, and a snapshot
+        // that repeated the request would make the interface agree with itself
+        // while disagreeing with the picture.
+        self.subtitle_scale = self
+            .core
+            .get_f64("sub-scale")
+            .ok()
+            .filter(|v| v.is_finite());
+        self.subtitle_position = self.core.get_f64("sub-pos").ok().filter(|v| v.is_finite());
+        self.publish_snapshot(shared);
     }
 
     /// Applies a track choice and republishes the real selected state.
@@ -847,6 +949,7 @@ impl Runner {
         let (tracks, audio_pts) = (self.tracks.clone(), self.audio_pts);
         let (avsync, total_avsync_change, mistimed_frames) =
             (self.avsync, self.total_avsync_change, self.mistimed_frames);
+        let (subtitle_scale, subtitle_position) = (self.subtitle_scale, self.subtitle_position);
         publish(shared, |snapshot| {
             snapshot.position = position;
             snapshot.duration = duration;
@@ -857,6 +960,8 @@ impl Runner {
             snapshot.avsync = avsync;
             snapshot.total_avsync_change = total_avsync_change;
             snapshot.mistimed_frames = mistimed_frames;
+            snapshot.subtitle_scale = subtitle_scale;
+            snapshot.subtitle_position = subtitle_position;
         });
     }
 }

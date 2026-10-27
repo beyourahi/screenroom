@@ -492,6 +492,10 @@ pub enum Message {
     SeekStep(f64),
     /// Choose a track, or turn a kind off with [`NO_TRACK`].
     SelectTrack(TrackKind, i64),
+    /// Subtitle text size, in percent of normal, as a slider reports it.
+    SubtitleScale(f64),
+    /// Subtitle placement, in percent of the screen height from the top.
+    SubtitlePosition(f64),
     /// Poll the player and the scan.
     Tick,
     /// A keyboard event.
@@ -908,6 +912,12 @@ impl App {
 
         let resume = if from_start { 0 } else { opened.resume_from_ms };
         let player = self.player.as_ref().expect("player started above");
+        // Before the file, not after: these are video-output properties, so setting
+        // them first means the very first subtitle drawn is already the right size.
+        player.set_subtitle_style(
+            f64::from(self.preferences.subtitle_scale_percent) / 100.0,
+            f64::from(self.preferences.subtitle_position_percent),
+        );
         player.load_at(&path, Some(resume as f64 / 1_000.0));
         self.active = Some(Active {
             tracker: opened.tracker,
@@ -1289,6 +1299,43 @@ impl App {
             }
             Err(error) => self.report(&error),
         }
+    }
+
+    /// Stores a subtitle style and shows it on any subtitle already on screen.
+    ///
+    /// Both halves matter: the stored value is what the next viewing inherits, and
+    /// pushing it to the running player is what makes the change visible while
+    /// something is playing, which is the only moment a subtitle style means
+    /// anything.
+    fn apply_subtitle_style(&mut self, scale_percent: u16, position_percent: u16) {
+        let preferences = Preferences {
+            subtitle_scale_percent: scale_percent,
+            subtitle_position_percent: position_percent,
+            ..self.preferences.clone()
+        };
+        if preferences == self.preferences {
+            return;
+        }
+        let before_ok = self.error.is_none();
+        self.save_preferences(preferences);
+        if before_ok && self.error.is_none() {
+            self.status = Some("Subtitle style saved.".to_string());
+        }
+        self.push_subtitle_style();
+    }
+
+    /// Sends the stored subtitle style to the player, if one is running.
+    ///
+    /// A no-op with no player: there is nothing to draw the subtitles, and the
+    /// stored preference is applied when one opens.
+    fn push_subtitle_style(&self) {
+        let Some(player) = &self.player else {
+            return;
+        };
+        player.set_subtitle_style(
+            f64::from(self.preferences.subtitle_scale_percent) / 100.0,
+            f64::from(self.preferences.subtitle_position_percent),
+        );
     }
 
     /// Applies a typed language tag, or clears the preference when blank.
@@ -1753,6 +1800,22 @@ impl App {
             }
             Message::SubtitleLanguageChanged(value) => self.subtitle_input = value,
             Message::AudioLanguageChanged(value) => self.audio_input = value,
+            Message::SubtitleScale(value) => self.apply_subtitle_style(
+                round_percent(
+                    value,
+                    Preferences::SUBTITLE_SCALE_MIN_PERCENT,
+                    Preferences::SUBTITLE_SCALE_MAX_PERCENT,
+                ),
+                self.preferences.subtitle_position_percent,
+            ),
+            Message::SubtitlePosition(value) => self.apply_subtitle_style(
+                self.preferences.subtitle_scale_percent,
+                round_percent(
+                    value,
+                    Preferences::SUBTITLE_POSITION_MIN_PERCENT,
+                    Preferences::SUBTITLE_POSITION_MAX_PERCENT,
+                ),
+            ),
             Message::ApplySubtitleLanguage => self.apply_language(true),
             Message::ApplyAudioLanguage => self.apply_language(false),
             Message::BackupPathChanged(value) => self.backup_path = value,
@@ -2687,6 +2750,43 @@ impl App {
             ]
             .spacing(tokens.spacing.field_x)
             .align_y(Alignment::Center),
+            row![
+                text("Subtitle size".to_string()).size(tokens.type_scale.label),
+                slider(
+                    f64::from(Preferences::SUBTITLE_SCALE_MIN_PERCENT)
+                        ..=f64::from(Preferences::SUBTITLE_SCALE_MAX_PERCENT),
+                    f64::from(self.preferences.subtitle_scale_percent),
+                    Message::SubtitleScale,
+                )
+                .step(5.0)
+                .width(220.0),
+                text(format!("{}%", self.preferences.subtitle_scale_percent))
+                    .size(tokens.type_scale.caption)
+                    .color(tokens.palette.ink_muted),
+            ]
+            .spacing(tokens.spacing.field_x)
+            .align_y(Alignment::Center),
+            row![
+                text("Subtitle position".to_string()).size(tokens.type_scale.label),
+                slider(
+                    f64::from(Preferences::SUBTITLE_POSITION_MIN_PERCENT)
+                        ..=f64::from(Preferences::SUBTITLE_POSITION_MAX_PERCENT),
+                    f64::from(self.preferences.subtitle_position_percent),
+                    Message::SubtitlePosition,
+                )
+                .step(1.0)
+                .width(220.0),
+                text(format!("{}%", self.preferences.subtitle_position_percent))
+                    .size(tokens.type_scale.caption)
+                    .color(tokens.palette.ink_muted),
+            ]
+            .spacing(tokens.spacing.field_x)
+            .align_y(Alignment::Center),
+            note(
+                "Position is measured from the top of the picture, so 100% is the bottom. \
+                 A subtitle file that places its own lines keeps that placement; the \
+                 size still applies.",
+            ),
             note(
                 "Press Enter to apply. Leave a field empty and press Enter to let the player choose.",
             ),
@@ -3157,6 +3257,18 @@ enum Flag {
     Watchlist,
 }
 
+/// Rounds a slider position to a whole percent inside `min..=max`.
+///
+/// A slider works in floats and a preference is stored as a whole percent, so the
+/// conversion happens here rather than in the view, where it would be one more
+/// place for the shown value and the stored one to disagree.
+pub fn round_percent(value: f64, min: u16, max: u16) -> u16 {
+    if !value.is_finite() {
+        return min;
+    }
+    (value.round().max(0.0) as u16).clamp(min, max)
+}
+
 /// Truncates a label to `max` characters with an ellipsis.
 ///
 /// Cards are fixed height, so an overlong filename must not reflow the grid.
@@ -3196,6 +3308,38 @@ mod tests {
         assert_eq!(clock(3_661.0), "1:01:01");
         assert_eq!(clock(-4.0), "0:00");
         assert_eq!(clock(f64::NAN), "0:00");
+    }
+
+    #[test]
+    fn a_slider_position_becomes_a_whole_percent_inside_the_offered_range() {
+        let (min, max) = (
+            Preferences::SUBTITLE_SCALE_MIN_PERCENT,
+            Preferences::SUBTITLE_SCALE_MAX_PERCENT,
+        );
+        assert_eq!(round_percent(125.4, min, max), 125);
+        assert_eq!(round_percent(125.6, min, max), 126);
+        // A slider can report a hair outside its range while the handle snaps, and
+        // a preference outside the range is refused by the core, so it is clamped.
+        assert_eq!(round_percent(-8.0, min, max), min);
+        assert_eq!(round_percent(9_999.0, min, max), max);
+        // A non-finite position has no nearest percent; the minimum is at least a
+        // value the core will accept and store.
+        assert_eq!(round_percent(f64::NAN, min, max), min);
+        assert_eq!(round_percent(f64::INFINITY, min, max), min);
+    }
+
+    #[test]
+    fn the_offered_subtitle_range_is_one_the_core_accepts() {
+        // The two crates define these bounds independently: the player against what
+        // libmpv will take, the core against what it will store. If either drifts,
+        // a slider at its end would store a refused value and the Settings screen
+        // would show an error for a control the user can see.
+        let (scale_low, scale_high) = screenroom_player::SUB_SCALE_RANGE;
+        assert!(scale_low <= f64::from(Preferences::SUBTITLE_SCALE_MIN_PERCENT) / 100.0);
+        assert!(scale_high >= f64::from(Preferences::SUBTITLE_SCALE_MAX_PERCENT) / 100.0);
+        let (position_low, position_high) = screenroom_player::SUB_POSITION_RANGE;
+        assert!(position_low <= f64::from(Preferences::SUBTITLE_POSITION_MIN_PERCENT));
+        assert!(position_high >= f64::from(Preferences::SUBTITLE_POSITION_MAX_PERCENT));
     }
 
     #[test]

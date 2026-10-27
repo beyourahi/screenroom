@@ -77,6 +77,66 @@ fn preferences_start_with_defensible_defaults() {
         "a series should continue by default: the setting is one toggle away"
     );
     assert!(preferences.subtitle_language.is_none());
+    assert_eq!(preferences.subtitle_scale_percent, 100);
+    assert_eq!(preferences.subtitle_position_percent, 100);
+}
+
+#[test]
+fn a_subtitle_style_outside_the_offered_range_is_refused() {
+    let directory = TempDir::new().expect("temp dir");
+    let library = open_library(&directory);
+    for (preferences, code) in [
+        (
+            Preferences {
+                subtitle_scale_percent: 1,
+                ..Preferences::default()
+            },
+            "subtitle_scale_out_of_range",
+        ),
+        (
+            Preferences {
+                subtitle_scale_percent: 301,
+                ..Preferences::default()
+            },
+            "subtitle_scale_out_of_range",
+        ),
+        (
+            Preferences {
+                subtitle_position_percent: 101,
+                ..Preferences::default()
+            },
+            "subtitle_position_out_of_range",
+        ),
+    ] {
+        let error = library.set_preferences(&preferences).unwrap_err();
+        assert_eq!(error.code(), code);
+    }
+    // Refused on the way in, so the previously stored style is still what opens.
+    assert_eq!(library.preferences().unwrap(), Preferences::default());
+}
+
+#[test]
+fn an_unusable_stored_subtitle_style_still_lets_the_library_open() {
+    // A library written by a build with a wider range, or corrupted, must open.
+    // The read direction clamps and falls back; only the write direction refuses.
+    let directory = TempDir::new().expect("temp dir");
+    let library = open_library(&directory);
+    library
+        .set_setting("subtitleScalePercent", "9000")
+        .expect("inject a wide value");
+    library
+        .set_setting("subtitlePositionPercent", "not a number")
+        .expect("inject a corrupt value");
+
+    let preferences = library.preferences().expect("preferences");
+    assert_eq!(
+        preferences.subtitle_scale_percent,
+        Preferences::SUBTITLE_SCALE_MAX_PERCENT
+    );
+    assert_eq!(
+        preferences.subtitle_position_percent,
+        Preferences::default().subtitle_position_percent
+    );
 }
 
 #[test]
@@ -88,6 +148,8 @@ fn preferences_survive_a_reopen() {
         autoplay_next: false,
         subtitle_language: Some("pt-BR".to_string()),
         audio_language: Some("en".to_string()),
+        subtitle_scale_percent: 175,
+        subtitle_position_percent: 92,
         default_profile: Some(profile.id.clone()),
     };
     library.set_preferences(&chosen).expect("save");

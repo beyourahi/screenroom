@@ -37,7 +37,8 @@ mod worker;
 
 pub use frame::Frame;
 pub use worker::{
-    MediaTrack, NO_TRACK, Player, PlayerCommand, PlayerFailure, PlayerSnapshot, TrackKind,
+    MediaTrack, NO_TRACK, Player, PlayerCommand, PlayerFailure, PlayerSnapshot, SUB_POSITION_RANGE,
+    SUB_SCALE_RANGE, TrackKind,
 };
 
 /// Default timeout for waiting on a libmpv event, in seconds.

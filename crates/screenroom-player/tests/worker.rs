@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use screenroom_player::{NO_TRACK, Player, PlayerSnapshot, PlayerState, TrackKind};
+use screenroom_player::{
+    NO_TRACK, Player, PlayerSnapshot, PlayerState, SUB_POSITION_RANGE, SUB_SCALE_RANGE, TrackKind,
+};
 use tempfile::TempDir;
 
 /// Builds a two-second clip with a moving pattern and a tone.
@@ -703,6 +705,97 @@ fn tracks_are_enumerated_and_can_be_switched() {
             .iter()
             .any(|track| track.kind == TrackKind::Subtitle && track.selected),
         "turning subtitles off did not take effect"
+    );
+}
+
+#[test]
+fn subtitle_style_reaches_libmpv_and_survives_a_file_change() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = multi_track_clip(&directory);
+    let Some(player) = player() else { return };
+
+    player.load(&path);
+    wait_for(&player, Duration::from_secs(30), |snapshot| snapshot.loaded);
+
+    player.set_subtitle_style(1.75, 88.0);
+    let styled = wait_for(&player, Duration::from_secs(10), |snapshot| {
+        snapshot.subtitle_scale.is_some() && snapshot.subtitle_position.is_some()
+    });
+    // Not `assert_eq!(snapshot.subtitle_scale, 1.75)`: these are libmpv's numbers,
+    // read back from the properties, so the test asserts the player really holds the
+    // requested style rather than that a request was queued. libmpv rounds the
+    // scale internally, so the tolerance is on the value, not on the direction.
+    let scale = styled.subtitle_scale.expect("a scale");
+    assert!(
+        (scale - 1.75).abs() < 0.01,
+        "libmpv holds sub-scale {scale}, not the requested 1.75"
+    );
+    let position = styled.subtitle_position.expect("a position");
+    assert!(
+        (position - 88.0).abs() < 0.01,
+        "libmpv holds sub-pos {position}, not the requested 88"
+    );
+
+    // A style is a video-output property, so the next viewing inherits it: that is
+    // the whole point of storing it, and it must survive the file change rather
+    // than being cleared with the tracks.
+    player.load(&path);
+    let reloaded = wait_for(&player, Duration::from_secs(30), |snapshot| {
+        snapshot.loaded
+            && snapshot
+                .tracks
+                .iter()
+                .any(|t| t.kind == TrackKind::Subtitle)
+    });
+    assert_eq!(reloaded.subtitle_scale, styled.subtitle_scale);
+    assert_eq!(reloaded.subtitle_position, styled.subtitle_position);
+}
+
+#[test]
+fn an_impossible_subtitle_style_is_clamped_rather_than_passed_on() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = multi_track_clip(&directory);
+    let Some(player) = player() else { return };
+
+    player.load(&path);
+    wait_for(&player, Duration::from_secs(30), |snapshot| snapshot.loaded);
+
+    // A subtitle of no size, or one placed off the picture, reads as a broken player
+    // rather than a bad setting, so both ends are held inside what libmpv accepts.
+    player.set_subtitle_style(-5.0, 9_000.0);
+    let clamped = wait_for(&player, Duration::from_secs(10), |snapshot| {
+        snapshot.subtitle_scale.is_some()
+    });
+    // Compared with a tolerance, not for equality: libmpv holds `sub-scale` as a
+    // single-precision value, so 0.1 comes back as 0.10000000149011612. That is also
+    // why the interface shows a whole percentage rather than the read-back number.
+    let scale = clamped.subtitle_scale.expect("a clamped scale");
+    assert!(
+        (scale - SUB_SCALE_RANGE.0).abs() < 1e-6,
+        "clamped scale was {scale}, expected {}",
+        SUB_SCALE_RANGE.0
+    );
+    let position = clamped.subtitle_position.expect("a clamped position");
+    assert!(
+        (position - SUB_POSITION_RANGE.1).abs() < 1e-6,
+        "clamped position was {position}, expected {}",
+        SUB_POSITION_RANGE.1
+    );
+
+    // A non-finite value cannot be clamped into anything sensible, so it is skipped
+    // and the last good value stands instead of the player reporting itself broken.
+    player.set_subtitle_style(f64::NAN, f64::INFINITY);
+    let after = wait_for(&player, Duration::from_secs(3), |snapshot| {
+        snapshot.subtitle_scale == clamped.subtitle_scale
+            && snapshot.subtitle_position == clamped.subtitle_position
+    });
+    assert_eq!(
+        after.failure, None,
+        "a skipped value must not fail the player"
+    );
+    assert_eq!(
+        after.subtitle_scale, clamped.subtitle_scale,
+        "a non-finite scale must leave the last good value in place"
     );
 }
 

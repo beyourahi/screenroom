@@ -25,7 +25,15 @@ use super::Library;
 const AUTOPLAY_NEXT: &str = "autoplayNext";
 const SUBTITLE_LANGUAGE: &str = "subtitleLanguage";
 const AUDIO_LANGUAGE: &str = "audioLanguage";
+const SUBTITLE_SCALE: &str = "subtitleScalePercent";
+const SUBTITLE_POSITION: &str = "subtitlePositionPercent";
 const DEFAULT_PROFILE: &str = "defaultProfileId";
+
+/// Normal subtitle text size, as a percentage.
+const SUBTITLE_SCALE_NORMAL: u16 = 100;
+
+/// libmpv's own default for `sub-pos`: the bottom of the screen.
+const SUBTITLE_POSITION_BOTTOM: u16 = 100;
 
 /// The user's preferences for this device.
 ///
@@ -47,10 +55,33 @@ pub struct Preferences {
     pub subtitle_language: Option<String>,
     /// Preferred audio language tag, or `None` for the player's own choice.
     pub audio_language: Option<String>,
+    /// Subtitle text size, as a percentage of normal.
+    ///
+    /// A whole percentage rather than a fraction so the value round-trips through
+    /// the text-valued `settings` table exactly, and so this type stays a plain
+    /// comparable value with no floating-point equality to reason about.
+    pub subtitle_scale_percent: u16,
+    /// Where subtitles sit, in percent of the screen height measured from the top.
+    ///
+    /// This is libmpv's `sub-pos`, kept in its own units rather than translated:
+    /// a preference that means something different from the property it sets is
+    /// how a setting and its effect drift apart.
+    pub subtitle_position_percent: u16,
     /// Profile the app opens with.
     ///
     /// `None` means "first profile", which is what a single-viewer device wants.
     pub default_profile: Option<String>,
+}
+
+impl Preferences {
+    /// Smallest subtitle size the Settings screen offers, in percent.
+    pub const SUBTITLE_SCALE_MIN_PERCENT: u16 = 50;
+    /// Largest subtitle size the Settings screen offers, in percent.
+    pub const SUBTITLE_SCALE_MAX_PERCENT: u16 = 300;
+    /// Top edge a subtitle may be placed at, in percent of the screen height.
+    pub const SUBTITLE_POSITION_MIN_PERCENT: u16 = 0;
+    /// Bottom edge a subtitle may be placed at, in percent of the screen height.
+    pub const SUBTITLE_POSITION_MAX_PERCENT: u16 = 100;
 }
 
 impl Default for Preferences {
@@ -59,6 +90,8 @@ impl Default for Preferences {
             autoplay_next: true,
             subtitle_language: None,
             audio_language: None,
+            subtitle_scale_percent: SUBTITLE_SCALE_NORMAL,
+            subtitle_position_percent: SUBTITLE_POSITION_BOTTOM,
             default_profile: None,
         }
     }
@@ -80,6 +113,22 @@ impl Library {
                 AUTOPLAY_NEXT => preferences.autoplay_next = value == "true",
                 SUBTITLE_LANGUAGE => preferences.subtitle_language = text(&value),
                 AUDIO_LANGUAGE => preferences.audio_language = text(&value),
+                SUBTITLE_SCALE => {
+                    preferences.subtitle_scale_percent = percent(
+                        &value,
+                        Preferences::SUBTITLE_SCALE_MIN_PERCENT,
+                        Preferences::SUBTITLE_SCALE_MAX_PERCENT,
+                        SUBTITLE_SCALE_NORMAL,
+                    )
+                }
+                SUBTITLE_POSITION => {
+                    preferences.subtitle_position_percent = percent(
+                        &value,
+                        Preferences::SUBTITLE_POSITION_MIN_PERCENT,
+                        Preferences::SUBTITLE_POSITION_MAX_PERCENT,
+                        SUBTITLE_POSITION_BOTTOM,
+                    )
+                }
                 DEFAULT_PROFILE => preferences.default_profile = text(&value),
                 // A key written by a newer build is preserved, not deleted: this
                 // build does not know what it means, but it belongs to the user.
@@ -98,6 +147,23 @@ impl Library {
     pub fn set_preferences(&self, preferences: &Preferences) -> Result<()> {
         let subtitle = language(preferences.subtitle_language.as_deref())?;
         let audio = language(preferences.audio_language.as_deref())?;
+        // Rejected rather than clamped on the way in: a caller that asks to store
+        // an impossible size has a bug, and silently storing something else would
+        // hide it behind a preference that looks saved.
+        let scale = within(
+            preferences.subtitle_scale_percent,
+            Preferences::SUBTITLE_SCALE_MIN_PERCENT,
+            Preferences::SUBTITLE_SCALE_MAX_PERCENT,
+            "subtitle_scale_out_of_range",
+            "Subtitle size must be between 50% and 300%.",
+        )?;
+        let position = within(
+            preferences.subtitle_position_percent,
+            Preferences::SUBTITLE_POSITION_MIN_PERCENT,
+            Preferences::SUBTITLE_POSITION_MAX_PERCENT,
+            "subtitle_position_out_of_range",
+            "Subtitle position must be between 0% and 100% of the screen height.",
+        )?;
         let default_profile = preferences
             .default_profile
             .as_deref()
@@ -131,6 +197,8 @@ impl Library {
         )?;
         write_optional(&tx, SUBTITLE_LANGUAGE, subtitle.as_deref())?;
         write_optional(&tx, AUDIO_LANGUAGE, audio.as_deref())?;
+        write(&tx, SUBTITLE_SCALE, &scale.to_string())?;
+        write(&tx, SUBTITLE_POSITION, &position.to_string())?;
         write_optional(&tx, DEFAULT_PROFILE, default_profile.as_deref())?;
         tx.commit()?;
         Ok(())
@@ -159,6 +227,27 @@ impl Library {
         )?;
         Ok(())
     }
+}
+
+/// Reads a stored whole percentage, clamped into `min..=max`.
+///
+/// Clamped rather than rejected, and falling back when it is not a number at all:
+/// this direction is a read, and a library written by a build with a wider range —
+/// or corrupted — must still open. The write direction is where a bad value is
+/// refused.
+fn percent(value: &str, min: u16, max: u16, fallback: u16) -> u16 {
+    match value.trim().parse::<u16>() {
+        Ok(parsed) => parsed.clamp(min, max),
+        Err(_) => fallback,
+    }
+}
+
+/// Rejects a value outside `min..=max` with a stable code.
+fn within(value: u16, min: u16, max: u16, code: &'static str, message: &str) -> Result<u16> {
+    if (min..=max).contains(&value) {
+        return Ok(value);
+    }
+    Err(CoreError::library(code, message))
 }
 
 /// Treats an empty stored value as "no preference" rather than an empty language.
