@@ -19,21 +19,21 @@
 | Filename matching (F04) | core (filename only) | host | — |
 | Whole-library enrichment (F05) | — | — | — |
 | Offline artwork bytes (F06) | — | — | — |
-| Player (F07) | state machine | host: real frames in the window, correct aspect, play/pause/seek/resume, **30 fps at 1080p measured**; audible output and a/v sync still unverified (G3b) | — |
+| Player (F07) | state machine | host: real frames in the window, correct aspect, play/pause/seek/resume, **30 fps at 1080p measured**; audio clock 0.982× real time and `avsync` 0.0 ms, but not yet heard (G3b) | — |
 | Profiles and progress (F08) | core | host (durable checkpoints, resume, watched) | — |
 | Home/Continue Watching (F09) | core query | host | — |
-| Next episode rule (F10) | core (`next_episode`) | — (rule not exposed yet) | — |
+| Next episode rule (F10) | core (`next_episode`) | host (autoplay chain; a gap stops it, an unreadable episode is refused with its reason) | — |
 | Search/filter/sort (F11) | core | host (search field, kind/genre/list filters, 4 sorts, paging) | — |
 | Favourites/watchlist (F12) | core | host (toggle keys and filters) | — |
-| Tracks and subtitles (F13) | — | — | — |
+| Tracks and subtitles (F13) | track choice stored as a preference | host (audio and subtitle pickers from libmpv's own list, explicit “Off”; styling open) | — |
 | Skip intro/credits (F14) | domain type only | — | — |
 | Subtitle provider (F15) | — | — | — |
 | Local recommendations (F16) | domain type only | — | — |
 | Browse previews (F17) | — | — | — |
 | PiP / mini-player (F18) | — | — | — |
 | Casting / DLNA (F19) | — | — | — |
-| Backup and recovery (F20) | version constant reserved | — | — |
-| Settings and secrets (F21) | — | — | — |
+| Backup and recovery (F20) | core (staged `VACUUM INTO`, validated restore, previous library kept) | host (backup/restore in Settings, both asking before acting) | — |
+| Settings and secrets (F21) | core (typed preferences, BCP-47 validation) | host (profiles, autoplay, language, folders) | — |
 | Failure/availability states (F22) | core codes | host (refuses an unreadable file and names the recovery) | — |
 | Source directory (F23) | — | — | — |
 | Acquisition handoff (F24) | — | — | — |
@@ -47,7 +47,7 @@ operate today, and only on macOS.
 
 | Target | Source in repo | Build | Device |
 | --- | --- | --- | --- |
-| MacBook Air M4 (macOS ARM64) | `apps/desktop` | builds and runs; `cargo test --workspace` green (106 tests) | **running application verified**: playback at 30 fps, resume, library UI (see `IMPLEMENTATION_STATUS.md`) |
+| MacBook Air M4 (macOS ARM64) | `apps/desktop` | builds and runs; `cargo test --workspace` green (149 tests); `scripts/package-macos.sh` produces a runnable `dist/Screenroom.app` | **running application verified**: playback at 30 fps, resume, tracks, library and Settings UI, bundle launched outside cargo (see `IMPLEMENTATION_STATUS.md`) |
 | Windows desktop, Intel Arc B580 | `apps/desktop` (same crate) | not compiled on Windows; no D3D11/shared-texture bridge yet | **BLOCKED** — no access to the machine from this session |
 | Samsung UA50AU8000RXER (Tizen 6.0) | `apps/tv` (not started) | not started; Tizen Studio CLI present | **BLOCKED** — no device access and no local signing profile |
 | Linux, LG webOS, Android TV, iOS, Android | — | **retired** by ADR-003/ADR-004 | not applicable |

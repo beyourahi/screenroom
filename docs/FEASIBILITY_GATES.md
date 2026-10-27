@@ -18,13 +18,13 @@ Current summary:
 | G1 Rust workspace builds and tests on the dev host | **PASSED** (macOS ARM64) |
 | G2 libmpv client API (load, command, event, property) | **PASSED** (macOS ARM64, libmpv API 2.5) |
 | G3 libmpv frame presented through wgpu in an iced window | **PASSED on macOS** (30 fps, correct aspect, transport and resume verified in the window); Windows path **BLOCKED** |
-| G3b Audio output and audio/video sync | **NOT RUN** (not heard; no measured tolerance) |
+| G3b Audio output and audio/video sync | **PARTIAL** — audio clock and `avsync` measured (0.982× real time, 0.0 ms); not heard by a person |
 | G4 Desktop playback quality on owner hardware | **BLOCKED** (no Windows hardware) |
 | G5 Samsung Tizen physical device | **BLOCKED** (Tizen device and signing profile unavailable) |
 | G6 Other TV platforms | **RETIRED** (LG webOS / Android TV out of scope, ADR-004) |
 | G7 iOS | **RETIRED** (out of scope, ADR-003) |
 | G8 Android TV + Media3 | **RETIRED** (out of scope, ADR-004) |
-| G9 Durability, interruption and low-storage behaviour | **NOT RUN** |
+| G9 Durability, interruption and low-storage behaviour | **PARTIAL on the host** (crash-state and damaged-database recovery tested); no device run, no power cut, no full disk |
 
 ---
 
@@ -37,8 +37,24 @@ cargo fmt --all --check
 ```
 
 Pass condition: all tests green, no first-party lint warnings, formatting clean.
-Recorded: **106 tests, 0 failures**, `clippy -D warnings` clean, `fmt --check` clean
-(2026-10-27, after the presentation fix and the M3 desktop UI work).
+Recorded: **149 tests, 0 failures**, `clippy -D warnings` clean, `fmt --check` clean
+(2026-10-28, after the tracks/audio, settings/backup, recovery, scale and packaging
+work). The suite includes real libmpv decode, audio and track switching, a 10,000-item
+query budget, and SQLite crash/damage recovery.
+
+### Local installation (supporting check, not a gate)
+
+```bash
+scripts/package-macos.sh
+open dist/Screenroom.app
+```
+
+The bundle was built, launched outside cargo and driven through library, playback
+and Settings with its own bundled libmpv. This proves the app is an installed local
+application rather than a development harness. It does **not** prove distribution:
+the bundle is unsigned and its libmpv still resolves Homebrew dependencies by
+absolute paths. Signing is **BLOCKED** (Command Line Tools only, no Xcode) and is
+not required for a personal install.
 
 ## G2 — libmpv client API
 
@@ -85,21 +101,32 @@ Steps:
 Pass condition: ≥ 30 fps sustained on the target device with correct aspect, no
 tearing or colour inversion, and audio/video sync within a documented tolerance.
 **macOS software bridge: 30.0 fps at 1080p with correct aspect — met, in both debug
-and release.** Audio and audio/video sync are tracked separately as G3b, because
-nothing has been heard and no sync tolerance has been measured. The Windows D3D11
+and release.** Audio and audio/video sync are tracked separately as G3b: sync is now
+measured (0.0 ms `avsync`) but nothing has been heard. The Windows D3D11
 path is **BLOCKED** until that hardware exists, and is not inferred from macOS.
 **Compiling is not passing.**
 
 ## G3b — Audio output and audio/video sync
 
-The player initialises a CoreAudio client (`audio-client-name`, `video-sync=audio`)
-and the process holds the CoreAudio/AudioDSP components. That is configuration
-evidence only. The gate needs: (1) a human listening to a file with a known audio
-track, and (2) a documented sync tolerance — how far audio may lead or lag video
-before it is audible, and how that was measured.
+Two halves, and only one is done.
 
-Until both exist this gate is **NOT RUN**. It is the honest continuation of G3, not
-a replacement for it.
+**Measured (2026-10-28), by a test rather than by assumption:**
+
+```bash
+cargo test -p screenroom-player --test worker audio_is_consumed -- --nocapture
+```
+
+- The fixture really has audio (`volumedetect` mean −24.1 dB).
+- The audio clock advanced 8.87 s against 9.13 s of video in a 9 s wall window:
+  **0.982× real time**, i.e. audio is being consumed, not stalled.
+- libmpv `avsync` **0.0 ms** with a 12 ms cumulative adjustment and no mistimed
+  frames. The assertion fails above 100 ms.
+- `audio-pts` is **not** a sync figure: it drifts to −262 ms on the same file, so it
+  is printed as an observation and never asserted on.
+
+**Still open:** nobody has *listened*. The gate needs a person hearing a known audio
+track through speakers, and a documented tolerance for what is audible. Instrument
+numbers are not a listening test, so G3b stays **PARTIAL**, not passed.
 
 ## G4 — Desktop playback quality (owner hardware)
 
@@ -148,7 +175,20 @@ number so old receipts stay unambiguous; no Android TV work is planned.
 On each real device: kill the process during playback, cut power, unplug the media
 drive, fill the disk, revoke permission, and corrupt the database copy. Expected:
 the last bounded checkpoint survives, the library remains browsable, nothing is
-deleted, and the recovery path is offered. Proven per platform or BLOCKED.
+deleted, and the recovery path is offered.
+
+**Host coverage (2026-10-28), `core/tests/recovery.rs` — 7 tests:** a session left
+`active` by a killed process is closed on reopen, a job left `running` is requeued,
+progress survives the whole sequence, an unsupported or future schema is refused
+without resetting data, a damaged database is reported rather than replaced, and an
+empty file is initialised.
+
+**Additional host observation:** closing the app's window runs the graceful path and
+stores the exact position (52.0 s, session closed); ⌘Q terminates below the event
+loop, losing under a second, and the next launch's recovery pass closes the row.
+
+**Still open:** power loss, a pulled USB drive, a full disk and a revoked grant on
+real hardware. Those are device runs, not database tests, and this stays PARTIAL.
 
 ---
 

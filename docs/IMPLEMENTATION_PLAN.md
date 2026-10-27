@@ -74,16 +74,21 @@ Measured at 1080p: **30.0 fps published with zero drops** (the media's own rate)
 at a 3440×1440 window. See
 [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md#m2--desktop-playback-slice).
 
+**Audio and tracks (2026-10-28):** audio is now measured rather than assumed —
+the audio clock advances at 0.982× wall time on a generated fixture, libmpv reports
+`avsync` at **0.0 ms** with a 12 ms cumulative adjustment, and the source's own
+volume is −24.1 dB. Audio and subtitle tracks are enumerated with their language and
+title, switched through libmpv, and the selection is read back from the snapshot so
+a refused switch is visible. See
+[`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md#audio-and-sync-measured-2026-10-28).
+
 **Outstanding, named rather than implied:**
 
-- Audible output has not been confirmed *by ear*. The player opens a CoreAudio
-  client (`audio-client-name`, `video-sync=audio`) and the process holds the
-  CoreAudio/AudioDSP components; that is configuration evidence, not hearing.
-- Audio/video sync has no measured tolerance yet (gate G3b).
+- Nobody has yet *heard* the output. The measurement above is instrument evidence;
+  gate G3b still needs a listening pass (the owner's, on real speakers).
 - The offline run was proven by holding zero network sockets rather than by
   disabling the machine's networking; an airplane-mode run is still owed.
-- CPU and memory figures are from the debug build. A release measurement is
-  pending; the release configuration is what will ship.
+- Windows and 4K/HDR remain BLOCKED on hardware.
 
 **Depends on** M1.
 
@@ -115,39 +120,49 @@ of the player, previews, PiP.
 
 ---
 
-## M3 — Desktop core UI and design-system mapping ⏳ foundations delivered
+## M3 — Desktop core UI and design-system mapping ⏳ essential surface delivered
 
 **Goal:** the desktop app is usable as a real library, not a test harness.
 
-**State 2026-10-27:** the first five bullets are delivered on macOS — Home with
-Continue Watching and folder granting, a paged library grid with search, kind and
-list filters, sorts and paging, the detail page with resume/restart and the flag
-actions, keyboard (arrows, Enter, Esc, ⌘1/⌘2, f/w/m) and mouse navigation, the
-empty/loading/error surfaces, and the private Dropout Design System adapter with
-its Git-ignored pin. Still open: next-episode advance, tracks and subtitles,
-profiles UI, settings, backup/restore, and the 10,000-item budget run.
+**State 2026-10-28:** delivered on macOS — Home with Continue Watching and folder
+granting; the paged library with search, kind and list filters, sorts and paging; the
+detail page with resume/restart and the flag actions; the player with audio and
+subtitle pickers and next-episode autoplay; keyboard and mouse navigation; the
+empty/loading/error surfaces; viewer profiles; a Settings screen covering
+preferences, folders (rescan, relink, remove) and backup/restore; and the private
+Dropout Design System adapter with its Git-ignored pin. The 10,000-item **store**
+budget is measured (slowest page 43.5 ms, ingest 825 ms).
+
+Still open: subtitle styling (size/offset), browse previews, and a measured
+rendering/input budget at 10,000 items.
 
 **Depends on** M2 (satisfied).
 
 **Contents**
-- Dropout Design System mapping for iced: semantic colour roles, type scale,
-  spacing, pill actions, focus treatment, motion rules — behind a trait so a
-  public build without the private pin still compiles.
-- Home: Continue Watching first, then library; empty and partially-scanned states.
-- Library: paged grid/list, search, kind/genre/season filters, sorts, virtualised
-  rendering with a bounded page window.
-- Detail: work/series/season structure, editions, progress, mark watched,
-  favourite, watchlist, resume/restart.
-- Next episode: verified sequence, cancelable countdown, checkpoint before
-  advancing, no gap skipping.
-- Tracks and subtitles: embedded/external, language preference, size/offset where
-  the engine supports it, explicit limitation copy.
-- Profiles: create/rename/remove with a last-profile guard; per-profile progress.
-- Settings: playback, language, reduced motion, preview opt-in, provider consent,
-  backup/restore entry points.
-- Backup and recovery: versioned JSON export/import with validation and
-  transactional merge (port of the previous candidate's validated format).
-- Error surfaces for every `CoreError` code the UI can reach.
+- ✅ Dropout Design System mapping for iced: semantic colour roles, type scale,
+  spacing, pill actions, focus treatment — behind a build-time include so a clean
+  checkout without the private pin still compiles.
+- ✅ Home: Continue Watching first, then library; empty and partially-scanned states.
+- ✅ Library: paged grid, search, kind/list filters, sorts, bounded page window.
+- ✅ Detail: work/season structure, editions, progress, mark watched, favourite,
+  watchlist, resume/restart.
+- ✅ Next episode: verified sequence from the core, gap stops the chain, unreadable
+  next episode refused with its reason. No cancelable countdown — it advances.
+- ✅ Tracks and subtitles: enumerated from libmpv with language/title, an explicit
+  “Off” for subtitles, preference stored. ⏳ size/offset styling.
+- ✅ Profiles: create/rename/remove with the last-profile guard; per-profile progress.
+- ✅ Settings: autoplay, language, folders (rescan/relink/remove), backup/restore.
+  ⏳ reduced-motion and preview opt-in (they belong with previews).
+- ✅ Backup and recovery: SQLite `VACUUM INTO` through a staging file, validated
+  restore that keeps the previous library beside the new one.
+- ✅ Error surfaces for the `CoreError` codes the UI can reach, each naming a
+  recovery action.
+
+**Deliberate change of format:** the archived candidate used versioned JSON for
+backup. This build uses a validated SQLite copy instead, because the whole product
+state already *is* SQLite and a JSON round-trip would have to re-derive every
+foreign key. The invariants that mattered — validation before writing, no partial
+file, transactional swap, refuse a foreign or newer file — are all tested.
 
 **Done when** a 10,000-item generated library browses, searches and resumes within
 recorded frame/input budgets, and a kill-during-playback relaunch loses at most the
@@ -252,18 +267,18 @@ a truthful reason and a recovery path.
 | F07 | Player | M2 (desktop), M5 (TV) | **desktop verified on macOS** (30 fps, aspect, transport, resume); no audio-by-ear or a/v-sync figure yet |
 | F08 | Profiles and progress | M1 (store), M3 (UI) | store + desktop UI: durable progress, resume, watched |
 | F09 | Home and resume | M1 (query), M3 (UI) | delivered on desktop |
-| F10 | Next episode | M1 (rule), M3 (countdown UI) | rule done, not exposed in the UI |
+| F10 | Next episode | M1 (rule), M3 (countdown UI) | rule + desktop autoplay chain (gap-safe, refusable) |
 | F11 | Search/filter/sort | M1 (query), M3 (UI) | delivered on desktop |
 | F12 | Watchlists/favourites | M1 (store), M3/M5 (UI) | delivered on desktop |
-| F13 | Tracks and subtitles | M3 (desktop), M5 (TV) | not started |
+| F13 | Tracks and subtitles | M3 (desktop), M5 (TV) | desktop: enumerate and switch both, “Off” for subtitles; styling open |
 | F14 | Skip intro/credits | M6 | not started |
 | F15 | Subtitle search | M6 | not started |
 | F16 | Local recommendations | M6 | not started |
 | F17 | Browse previews | M6 | not started |
 | F18 | PiP / mini-player | M6 | not started |
 | F19 | Casting | M6 | not started |
-| F20 | Backup and recovery | M3 (port of validated format) | not started in Rust |
-| F21 | Settings and secrets | M3 | not started |
+| F20 | Backup and recovery | M3 (port of validated format) | delivered: VACUUM-into staging, validated restore, previous library kept |
+| F21 | Settings and secrets | M3 | delivered: typed preferences, profiles, folders, backup entry points |
 | F22 | Failure states | M2/M3 (desktop), M5 (TV) | core codes done |
 | F23 | Source directory | M6 | not started |
 | F24 | Acquisition handoff | M6 | not started |

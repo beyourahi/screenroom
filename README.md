@@ -34,17 +34,26 @@ platform. License: MIT for first-party code.
   restarts from the beginning and says so in the UI.
 - The desktop application's screens: Home with Continue Watching, library browse
   with paging, search, filters, sorting, a detail page and the player, driven by
-  keyboard and mouse, with empty/loading/error states.
+  keyboard and mouse, with empty/loading/error states; audio and subtitle track
+  pickers; next-episode autoplay; viewer profiles and a Settings screen for
+  preferences, folders and backup/restore.
+- An installable macOS bundle: `scripts/package-macos.sh` produces
+  `dist/Screenroom.app` carrying its own libmpv, and it was launched and driven
+  outside cargo.
 - **Measured:** the software bridge sustains **30.0 fps at 1080p with the playhead
   at 1.00×**, in both debug and the release build that ships. Release cost at
   1080p: ~66–76 % of one core and a flat ~255 MB RSS during playback, falling to
   ~3 % CPU and 108 MB once it ends. The process holds no network sockets.
 
+**Measured rather than assumed:** the audio clock runs at **0.982× real time** on a
+known audio track and libmpv reports **0.0 ms `avsync`** (12 ms cumulative
+adjustment, no mistimed frames); audio and subtitle tracks are enumerated and
+switched, with the selection read back from the player.
+
 **Not yet verified:**
 
-- Audible output has not been confirmed by ear (the player opens a CoreAudio
-  client and is configured for it; that is not the same as hearing it), and no
-  audio/video sync tolerance has been measured (gate G3b).
+- Nobody has *heard* the output through speakers. The instrument evidence above is
+  not a listening test, so gate G3b stays partial.
 - The offline run was proven by holding zero network sockets, not by disabling
   this machine's networking.
 - 4K and hardware decode are neither claimed nor measured: the software bridge is
@@ -58,11 +67,23 @@ Full detail, receipts and blockers:
 ## Run it
 
 ```bash
-cargo test --workspace          # 106 tests, 0 failures on the dev host
+cargo test --workspace          # 149 tests, 0 failures on the dev host
 cargo clippy --workspace --all-targets
 cargo run -p screenroom-desktop                    # the application
 cargo run -p screenroom-player --example capability # libmpv on this device
 ```
+
+To install it as a real macOS application:
+
+```bash
+scripts/package-macos.sh                 # -> dist/Screenroom.app
+scripts/package-macos.sh /Applications    # install a copy too
+open dist/Screenroom.app
+```
+
+The bundle carries its own libmpv but still resolves its Homebrew dependencies by
+absolute path, and it is unsigned — correct for a personal install, not for
+distribution. The script prints what it found rather than assuming.
 
 The application opens the durable library at
 `~/Library/Application Support/Screenroom/library.db`. Point it elsewhere with
@@ -119,7 +140,7 @@ crates/screenroom-core/     # domain, SQLite library, scanner, fingerprints
 crates/screenroom-player/   # libmpv runtime boundary, player state machine
 apps/desktop/               # iced + wgpu client, libmpv -> wgpu bridge
 apps/tv/                    # Samsung Tizen client (not started)
-scripts/                    # local evidence helpers (capture, drive)
+scripts/                    # local evidence helpers (capture, drive), macOS packager
 docs/                       # ADRs, architecture, roadmap, ledger, gates
 reference/                  # historical Svelte/Tauri prototype and handoff
 .worktrees/                 # archived agent worktrees (Git-ignored, recoverable)

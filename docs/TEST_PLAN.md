@@ -4,7 +4,29 @@
 
 **Mandatory correction (2026-10-25):** test actual installed packages with browsers closed and no network/server; measure resource budgets rather than assuming a thin frontend equals a fast application. Adopt the private Dropout Design System by approved vendoring, enforce component/tokens parity, generated CSS M76 support, visual dark-theme parity, borderless focus and couch-distance D-pad usability. See `NATIVE_APP_STRATEGY.md`, `DROPOUT_DESIGN_INTEGRATION.md`.
 
-**Current state:** planning only. Archived v0.1 reported 6 unit tests/browser Chromium smoke/mocked TV methods; it did **not** run on actual Windows/Samsung hardware. Do not count source review as passed tests. Specific performance budgets must be measured and agreed after baseline gates.
+**Current state (2026-10-28):** the desktop application and its shared core are
+built and tested; no physical-device test has been run. The archived v0.1 reported
+6 unit tests/browser Chromium smoke/mocked TV methods and did **not** run on actual
+Windows/Samsung hardware. Do not count source review as passed tests.
+
+What runs today (`cargo test --workspace`, **149 tests, 0 failures** on macOS ARM64):
+
+| Suite | Proves |
+| --- | --- |
+| `screenroom-core` unit | filename interpretation, fingerprints |
+| `core/tests/library.rs` | sources, scanning, ingestion, paging, playback invariants, lists |
+| `core/tests/storage.rs` | typed preferences, backup round-trip, restore validation and its refusals |
+| `core/tests/scanner.rs` | bounded scan, cancellation, symlinks, settle window |
+| `core/tests/recovery.rs` | crash-state normalisation, damaged and future databases, progress across recovery |
+| `core/tests/scale.rs` | 10,000-item paging, search and count inside a budget |
+| `screenroom-player` unit | state machine, options, property mapping |
+| `player/tests/worker.rs` | real libmpv decode, frame rate, audio clock and `avsync`, track switching, failure states, long session |
+| `player/tests/libmpv_smoke.rs` | client API on this host |
+| `screenroom-desktop` unit | navigation, filters, autoplay decision, resume copy, close-path state |
+| `desktop/tests/playback.rs` | checkpoint policy against a real SQLite library and a real clip |
+
+Everything below about Windows/TV tiers, browser tiers and the Svelte UI is
+historical planning; the platforms it names were narrowed by ADR-004.
 
 ## 1. Test tiers and ownership
 

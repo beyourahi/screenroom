@@ -3,7 +3,7 @@
 Live record of what exists, what was actually verified, and what is blocked.
 Future sessions resume from here instead of repeating completed work.
 
-Last updated: **2026-10-27**, host **macOS ARM64 (Apple silicon), Command Line
+Last updated: **2026-10-28**, host **macOS ARM64 (Apple silicon), Command Line
 Tools only, no full Xcode**.
 
 **Scope (2026-10-26, [ADR-003](ADR-003_DESKTOP_AND_TV_SCOPE.md)):** desktop/laptop
@@ -84,10 +84,38 @@ Implemented in `crates/screenroom-core`:
 | Library | `items`, `count`, `item`, `continue_watching`, `seasons_for_work`, `known_genres`, `next_episode` | paging bounds, literal search escaping, work grouping, season filter/sort, gap-safe next episode |
 | Playback | `start_session`, `begin_seek`, `checkpoint`, `end_session` | monotonic sequence, stale session, seek generation, impossible values, ended semantics |
 | Lists | `set_favorite`, `set_watchlisted`, `mark_watched`, `hide_continue` | lists survive disconnect, Continue Watching ordering |
+| Preferences | `preferences`, `save_preferences` | defaults, survive a reopen, BCP-47 validation rejects an injected tag and saves nothing, unknown keys preserved |
+| Backup | `export_backup`, `inspect_backup`, `import_backup` | every table round-trips into a fresh library, the restore stamp is stripped, the previous library is kept beside the new one, refuses to overwrite the live database, refuses a non-Screenroom SQLite file and a newer format, a failed backup leaves no partial file |
 | Schema | `open`, `open_in_memory` | future schema fails closed without data loss; integrity check; crash normalisation |
+| Recovery | reopening after a crash | an open session is closed, a running job is requeued, progress survives the whole recovery sequence, a damaged database is reported rather than replaced |
 
 Test totals: 13 unit (`filename`, `fingerprint`), 21 store (`tests/library.rs`),
-7 scanner (`tests/scanner.rs`).
+7 scanner (`tests/scanner.rs`), 17 storage (`tests/storage.rs`), 7 recovery
+(`tests/recovery.rs`), 2 scale (`tests/scale.rs`).
+
+### 10,000-item budget run (2026-10-28)
+
+```bash
+cargo run --release -p screenroom-core --example library_bench
+cargo test -p screenroom-core --test scale
+```
+
+Generated 10,000-entry library, release build, page size 24:
+
+| Operation | Time |
+| --- | --- |
+| Ingest 10,000 entries | 825 ms (12,118 entries/s) |
+| First page | 18.4 ms |
+| **Last page** (worst case for an OFFSET scan) | **43.5 ms** |
+| Added ordering | 34.4 ms |
+| Year ordering | 16.6 ms |
+| Progress ordering | 15.5 ms |
+| Literal search (1 hit / no hit) | 16.4 ms / 16.6 ms |
+| `count` | 14–18 ms |
+
+The slowest paged query is 43.5 ms, well inside a frame at 30 fps for a UI that
+pages rather than scans. This is the M3 budget run for the store layer; it measures
+queries, not rendering.
 
 Design choice worth keeping: the Rust schema is byte-compatible with the layout the
 Flutter candidate wrote (`user_version = 2`), so an existing on-device library opens
@@ -118,15 +146,39 @@ Everything below ran on this macOS host against libmpv 0.41 / client API 2.5.
 
 | Area | What exists | Verification |
 | --- | --- | --- |
-| Player worker (`screenroom-player/src/worker.rs`) | One thread owns libmpv; commands in, immutable `PlayerSnapshot` out; lifecycle mapped onto `PlayerState` | `tests/worker.rs` — 5 tests |
+| Player worker (`screenroom-player/src/worker.rs`) | One thread owns libmpv; commands in, immutable `PlayerSnapshot` out; lifecycle mapped onto `PlayerState` | `tests/worker.rs` — 10 tests |
 | Software render bridge (`src/render.rs`) | mpv `sw` renderer → packed RGBA `Frame`, 64-byte aligned stride, bounded to 1920 px | real frames asserted non-blank with colour; `target_size`/stride unit tests; frame-rate assertion |
 | Seek / pause / resume-at-load | `seek`, `set_paused`, `load_at(path, Some(seconds))` | position moves after seek, holds while paused, resumes after load |
-| Failure states | `file_missing`, `load_failed`, `decode_failed`, `render_failed`, `seek_failed`, `pause_failed` with libmpv's own message | missing file test; end-file error path mapped |
-| Durable resume (`apps/desktop/src/playback.rs`) | Session open → throttled checkpoints → seek generations → close; finished media resumes from the start | `tests/playback.rs` — 5 tests, including one that decodes a real clip, checkpoints, reopens the SQLite library and gets the same position back |
-| Player screen (`apps/desktop/src/app.rs`) | Library list with progress, Back/Play-Pause/scrub/commit, resume label, failure text, Escape and Space keys | `clock` unit tests; open/refuse-to-open tests; window observation (below) |
+| Audio and A/V sync | `audio-pts`, mpv's own `avsync` and `total-avsync-change` in `PlayerSnapshot` | source volume measured, the audio clock advances in real time (0.982× wall), libmpv `avsync` 0.0 ms with a 12 ms cumulative adjustment |
+| Tracks | track list with language/title/selected read from libmpv; `set_audio_track`, `set_subtitle_track` | two audio and two subtitle tracks enumerated and switched; selection read back rather than assumed |
+| Failure states | `file_missing`, `load_failed`, `decode_failed`, `render_failed`, `seek_failed`, `pause_failed` with libmpv's own message | missing file test; malformed file reported rather than shown as an empty player; end-file error path mapped |
+| Durable resume (`apps/desktop/src/playback.rs`) | Session open → throttled checkpoints → seek generations → close; finished media resumes from the start | `tests/playback.rs` — 6 tests, including one that decodes a real clip, checkpoints, reopens the SQLite library and gets the same position back |
+| Player screen (`apps/desktop/src/app.rs`) | Library list with progress, Back/Play-Pause/scrub/commit, resume label, failure text, Escape and Space keys, audio/subtitle pickers, next-episode autoplay | `clock` unit tests; open/refuse-to-open tests; window observation (below) |
 
 Totals after M2: **106 workspace tests, 0 failures**; `clippy --workspace --all-targets
 -- -D warnings` clean; `fmt --all --check` clean.
+### Audio and sync measured (2026-10-28)
+
+Hearing a file was never going to be repeatable, so the player now reads libmpv's
+own instrumentation and a test asserts on it. Measured on this host, generated
+fixture with a known audio track:
+
+| Measurement | Observed |
+| --- | --- |
+| Source has real audio | `volumedetect` mean −24.1 dB |
+| Audio clock over a 9 s window | 8.87 s of audio against 9.13 s of video, **0.982× wall clock** |
+| libmpv `avsync` | **0.0 ms**, cumulative adjustment 12 ms |
+| Mistimed frames | none reported |
+| Audio output buffer vs video playhead | −262 ms, moving −267 ms across the window |
+
+That last row is the one worth remembering: `audio-pts` is a **buffer position,
+not a lip-sync indicator**. It drifts to −262 ms on a file that libmpv reports as
+perfectly in sync, so asserting on it would have been a permanent false failure.
+The sync assertion uses `avsync`; the buffer gap is printed as an observation only.
+
+This does not close gate G3b on its own: nobody has yet listened to output through
+speakers. It does turn "audio probably works" into a measured 0.982× real-time audio
+clock and a 0.0 ms sync error, which is the evidence a listening pass would confirm.
 
 ### On-screen presentation measured (2026-10-27)
 
@@ -163,9 +215,8 @@ assumed by the presentation shader.
 
 ### What M2 has **not** proven
 
-- **Audio output** is initialised by libmpv (a CoreAudio client is opened,
-  `video-sync=audio`) and the process holds the CoreAudio/AudioDSP components, but
-  nothing has been **heard**.
+- **Audible output** has not been *heard*: the audio clock, volume and `avsync` are
+  now measured (above), which is instrument evidence rather than a listening test.
 - **Audio/video sync** has no measured tolerance (gate G3b).
 - **Offline behaviour** was proven by holding zero network sockets during playback,
   not by disabling this machine's networking.
@@ -204,17 +255,103 @@ the process.
 
 ## M3 — Desktop core UI and design-system mapping
 
-**Status: foundations delivered on macOS; not complete.**
+**Status: the essential desktop surface is delivered and exercised on macOS; a few
+M3 items are still absent, and they are named below rather than implied.**
 
-Delivered: Home with Continue Watching and folder granting; a paged library grid
-with search, kind and list filters, sorts and paging; the detail page with
-resume/restart and the flag actions (watched, favourite, watchlist); keyboard
-(arrows, Enter, Esc, ⌘1/⌘2, f/w/m) and mouse navigation; empty/loading/error
-surfaces; and the Dropout Design System adapter with its private, commit-pinned,
-Git-ignored token export (`apps/desktop/examples/export_ds_tokens.rs`).
+Delivered and observable in the running app:
 
-Not delivered: next-episode advance, tracks and subtitles, profiles UI, settings,
-backup/restore, and the 10,000-item budget run.
+| Area | What exists |
+| --- | --- |
+| Home | Continue Watching first, then recent items; folder granting; scan status |
+| Library | Paged grid (24/page) with search, kind and list filters, four sorts and paging |
+| Detail | Work/season structure, editions, progress, resume/restart, watched, favourite, watchlist |
+| Player | Play/pause, ±10 s seek, scrub, resume label, **audio and subtitle pickers** (with a real “Off” for subtitles), failure copy |
+| Next episode | Autoplay driven by the stored preference and the core's gap-safe ordering; a gap stops the chain instead of skipping it; an unreadable next episode is refused with its reason |
+| Keyboard | Arrows, Enter, Esc, ⌘1/⌘2/⌘3 (Home/Browse/Settings), f/w/m, Space, ←/→ seek in the player |
+| Settings | Viewer profiles with per-profile progress, lists and Continue Watching; autoplay and language preferences; folders with availability, distinct recovery copy, rescan, relink and remove; backup and restore |
+| Design | Dropout adapter with the private, commit-pinned, Git-ignored token export (`apps/desktop/examples/export_ds_tokens.rs`); the running app names the pin that produced its theme |
+
+Still absent from M3: subtitle **styling** (size/offset), previews, and the
+10,000-item **rendering** budget. The store budget run is done (see M1).
+
+Two behaviours were corrected while exercising the finished surface, both from
+watching the real app rather than the tests:
+
+- The subtitle picker was inert when a file had no subtitle tracks. It now says
+  “none in this file” and is not offered as a control that does nothing.
+- “resumed from 0:33” stayed on screen next to “Ended”. Resume copy is now only
+  shown while there is something to resume.
+
+### Closing the window now ends the viewing (2026-10-28)
+
+A quit used to leave the session row `active` and lose up to a second of progress.
+The cause was that neither ⌘Q nor the window close box reached the update loop at
+all — the app exited underneath it. iced's `window::close_requests()` subscription
+is the hook that fires before teardown, and it now runs the same graceful close as
+Back: final checkpoint, then `end_session`.
+
+Measured in the packaged app against the real database:
+
+| Exit path | Final progress | Session |
+| --- | --- | --- |
+| Window close box | **52.0 s, exact** | `active = 0` |
+| ⌘Q | loses < 1 s | row left `active`, closed by the next launch's recovery pass |
+
+⌘Q bypasses the app's own event loop at the platform level, so it cannot run the
+handler; the crash-recovery normalisation from M1 covers it, which is why the next
+launch is clean rather than stuck. The close box is the graceful path.
+
+## macOS application bundle (2026-10-28)
+
+```bash
+scripts/package-macos.sh                  # -> dist/Screenroom.app
+scripts/package-macos.sh /Applications     # install into a folder as well
+```
+
+The bundle carries its own copy of libmpv in `Contents/Frameworks`, and the player
+looks there after the system paths (`packaged_candidates` in
+`crates/screenroom-player`), so an installed app keeps working when the Homebrew
+prefix changes or a development copy is removed.
+
+| Observation | Result |
+| --- | --- |
+| Bundle assembles, `Info.plist` valid, Gatekeeper quarantine cleared for a locally built copy | yes |
+| Runs **outside cargo**, from `dist/Screenroom.app` | yes — library, playback, Settings all exercised |
+| libmpv loaded from the bundle, client API 2.5 | yes |
+| Private DS pin in the bundled theme | `dropout-design-system@c000425 semantic-dark` |
+| Progress written while playing | yes, 10.4 s → 16.8 s in the live database |
+
+**What the bundle does not do:** libmpv's own dependencies (FFmpeg, libass,
+libplacebo) still resolve by absolute Homebrew install names, so the app runs on a
+machine with the same `mpv` installed. Vendoring FFmpeg is a licensing decision
+(FFmpeg's build options decide which codecs may be redistributed) and is not
+implied by a personal install; the script reports the dependency list instead of
+hiding it. There is **no signing and no notarization**, which is correct for a
+personally built app and is recorded as a blocked gate for distribution.
+
+### Test totals after the M3 work (2026-10-28)
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+```
+
+**149 tests, 0 failures**, clippy clean, formatting clean:
+
+| Suite | Tests |
+| --- | --- |
+| `screenroom-core` unit (filename, fingerprint) | 13 |
+| `core/tests/library.rs` | 21 |
+| `core/tests/storage.rs` (preferences, backup) | 17 |
+| `core/tests/scanner.rs` | 7 |
+| `core/tests/recovery.rs` | 7 |
+| `core/tests/scale.rs` (10,000 items) | 2 |
+| `screenroom-player` unit | 15 |
+| `player/tests/worker.rs` (real decode, audio, tracks) | 10 |
+| `player/tests/libmpv_smoke.rs` | 2 |
+| `screenroom-desktop` unit | 49 |
+| `desktop/tests/playback.rs` | 6 |
 
 ---
 
@@ -226,8 +363,8 @@ backup/restore, and the 10,000-item budget run.
 | Windows 4K/HDR/hardware decode | BLOCKED | same |
 | Physical Samsung UA50AU8000RXER (install, USB, AVPlay, durability) | BLOCKED | device and Tizen signing profile not available |
 | Lightning 3 on the Tizen 6.0 engine | NOT YET RUN | needs the TV client and the device |
-| Audible output and audio/video sync | NOT YET VERIFIED | not listened to; no tolerance measured |
-| macOS application bundle signing | BLOCKED | Command Line Tools only, no full Xcode |
+| Audible output heard by a person | NOT YET VERIFIED | the audio clock and `avsync` are measured; nobody has listened |
+| macOS bundle signing and notarization for distribution | BLOCKED | Command Line Tools only, no full Xcode; not required for a personal install |
 
 LG webOS and Android TV were retired by [ADR-004](ADR-004_PERSONAL_EDITION_SCOPE.md);
 their former rows are kept in Git history, not as live work.
@@ -239,29 +376,37 @@ receipt.
 
 ## Open risks
 
-1. **libmpv → wgpu bridge.** Compiles; presentation unproven. The software bridge
-   costs one full-frame CPU copy per frame; 4K performance is unknown. Zero-copy
-   D3D11 (Windows) / OpenGL (macOS) paths are designed but unbuilt.
+1. **libmpv → wgpu bridge.** Presentation is proven on macOS at 1080p. The software
+   bridge costs one full-frame CPU copy per frame, so 4K performance is unknown and
+   expected to be insufficient. Zero-copy D3D11 (Windows) / OpenGL (macOS) paths are
+   designed but unbuilt.
 2. **TV storage adapter.** Tizen may not allow SQLite; the fallback adapter and its
    durability are unproven on device.
 3. **Lightning 3 frame budget** on a 2021 Tizen engine is unmeasured.
 4. **Private design system boundary.** Mapping is implemented with the token export
    kept out of Git; a fully public build (no private pin at all) still has to be
    built once and proven to compile and run.
-6. **Windows path semantics.** Case-insensitive overlap checks are implemented via
+5. **Windows path semantics.** Case-insensitive overlap checks are implemented via
    `cfg!(windows)` folding but never executed on Windows.
+6. **Packaged binary vs development tree.** The `.app` bundles libmpv but not its
+   transitive Homebrew dependencies, and it is unsigned. That is deliberate for a
+   personal install; making it portable is a separate licensing and signing task.
+7. **⌘Q is ungraceful.** The platform terminates the process outside the app's
+   event loop, so the final sub-second checkpoint is lost and the next launch's
+   recovery pass closes the row. The close box is the graceful path.
 
 ---
 
 ## Next milestone
 
-**M3, plus the named M2 gaps.** In order:
+**Finish M3's remainder, then the two honesty gaps that only the owner can close.**
 
-1. Close the remaining M2 honesty gaps that matter to the owner: confirm audio by
-   ear and record an a/v-sync tolerance, and repeat the offline check with
-   networking actually disabled (gate G3b).
-2. Then continue M3: next-episode advance, tracks/subtitles, profiles, settings,
-   backup/restore, and the 10,000-item budget run.
+1. Remaining M3: subtitle styling (size/offset), browse previews, and a measured
+   rendering/input budget at 10,000 items (the store half is done).
+2. Listening pass for gate G3b: hear a known audio track, and confirm the measured
+   0.0 ms `avsync` figure matches what is heard.
+3. Repeat the offline check with networking actually disabled rather than by
+   observing zero sockets.
 
 See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the full definitions of
 done.

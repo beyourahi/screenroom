@@ -42,12 +42,13 @@ screenroom/
   crates/
     screenroom-core/             # domain, SQLite, scanner, filename, fingerprint
       src/{domain,error,filename,fingerprint,scanner,schema}.rs
-      src/library/{mod,sources,catalog,playback,lists}.rs
-      tests/{library,scanner}.rs
+      src/library/{mod,sources,catalog,playback,lists,settings,backup}.rs
+      tests/{library,storage,scanner,recovery,scale}.rs
     screenroom-player/           # libmpv runtime boundary + player state machine
   apps/
     desktop/                     # iced + wgpu client, video_surface.rs bridge
     tv/                          # (M5) LightningJS 3 + Blits (Samsung Tizen only)
+  scripts/                       # evidence helpers + the macOS .app packager
   docs/  reference/  .worktrees/ #  .worktrees is Git-ignored, archive branches
 ```
 
@@ -89,6 +90,17 @@ enforced by its dependency list, not by convention: it has no UI or HTTP crate.
 - **Errors:** stable `code()` strings (`duplicate_source`, `scan_running`,
   `stale_session`, `future_database`, …) plus a human message that is not a
   stable contract.
+- **Preferences:** typed over the existing `settings` key/value table, so no
+  physical layout changed. A value that reaches libmpv as an argument (a language
+  tag) is validated first, and a rejected save writes nothing at all.
+- **Backup:** a validated SQLite copy, not a JSON export. It is written by
+  `VACUUM INTO` through a same-directory staging file and a rename, so an
+  interrupted backup leaves no partial file. Restore validates format, schema range
+  and integrity, copies the current library aside, then swaps in one transaction —
+  an interrupted restore leaves the previous library intact.
+- **Track choice:** the core stores a preference; the actual track list comes from
+  libmpv and the selection is read back from the player snapshot. The UI never keeps
+  a second copy of the truth.
 
 ## SQLite and migrations
 
@@ -201,6 +213,20 @@ binaries (libmpv/FFmpeg builds) are not committed; their license, hash, build
 options and notices are a release-time obligation recorded in
 [`LICENSING.md`](LICENSING.md). TV signing material, certificates and DUIDs never
 enter Git. No store submission is automated.
+
+**Desktop installation.** `scripts/package-macos.sh` assembles `dist/Screenroom.app`
+with the release binary, an `Info.plist` and its own copy of libmpv in
+`Contents/Frameworks`. The player searches the bundle after the system paths
+(`packaged_candidates` in `crates/screenroom-player`), so an installed app keeps
+playing when the Homebrew prefix changes or a development copy disappears. libmpv's
+transitive dependencies still resolve by absolute Homebrew path and the bundle is
+unsigned: both are deliberate for a personal install and are reported by the script
+rather than papered over.
+
+**Exit is a state transition.** The window's close request runs the same graceful
+path as Back — final checkpoint, then `end_session`. ⌘Q terminates the process
+below the event loop and cannot be intercepted, which is exactly why the next
+launch's recovery normalisation (closing dangling sessions) exists.
 
 ## Revisit criteria
 
