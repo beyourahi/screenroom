@@ -117,6 +117,35 @@ The slowest paged query is 43.5 ms, well inside a frame at 30 fps for a UI that
 pages rather than scans. This is the M3 budget run for the store layer; it measures
 queries, not rendering.
 
+#### Repeat run and scaling (2026-10-28, later the same day)
+
+Re-run on the same machine to check the numbers above were not a single lucky
+sample, and extended to larger libraries to find where it stops feeling instant:
+
+| Library | First page | Last page | `count` | Literal search |
+| --- | --- | --- | --- | --- |
+| 100 | 0.37 ms | 0.36 ms | 0.11 ms | 0.21 ms |
+| 1,000 | 0.75 ms | 1.38 ms | 0.44 ms | 0.57 ms |
+| **10,000** | **6.4 ms** | **15.3 ms** | **5.3 ms** | **6.1 ms** |
+| 50,000 | 48.3 ms | 146.1 ms | 44.7 ms | 71.5 ms |
+
+Two things this settles, and one it does not:
+
+- The cost is genuinely **proportional to library size**, not a fixed overhead: it
+  rises ~17× from 1,000 to 10,000 and ~8× again from 10,000 to 50,000 entries. An
+  earlier reading of an identical ~10 ms across every query suggested a constant
+  setup cost; measuring across sizes showed that was sampling noise, not the shape.
+- **10,000 entries is comfortably inside a frame.** A page plus its count — what
+  the Browse screen runs per keystroke — is ~11.7 ms against 16.7 ms at 60 fps.
+- **50,000 is not**, at ~93 ms together, so a very large personal library would need
+  keyset paging instead of `OFFSET`. That is recorded as a risk rather than fixed
+  ahead of a library that size existing.
+
+Run-to-run variance is real and is not hidden: the first ledger run measured
+18.4 ms / 43.5 ms for first/last page where this one measured 6.4 ms / 15.3 ms on
+the same machine and input. Both are recorded; neither supersedes the other. Any
+future comparison should re-run `library_bench` rather than quote a memory of it.
+
 Design choice worth keeping: the Rust schema is byte-compatible with the layout the
 Flutter candidate wrote (`user_version = 2`), so an existing on-device library opens
 instead of being reset.
@@ -271,8 +300,87 @@ Delivered and observable in the running app:
 | Settings | Viewer profiles with per-profile progress, lists and Continue Watching; autoplay and language preferences; folders with availability, distinct recovery copy, rescan, relink and remove; backup and restore |
 | Design | Dropout adapter with the private, commit-pinned, Git-ignored token export (`apps/desktop/examples/export_ds_tokens.rs`); the running app names the pin that produced its theme |
 
-Still absent from M3: subtitle **styling** (size/offset), previews, and the
-10,000-item **rendering** budget. The store budget run is done (see M1).
+Still absent from M3: previews, and the **on-screen** rendering/input budget. The
+store half is done (see M1) and the offscreen half is measured below; what remains
+is the iced window itself, which needs a visible window and is therefore pending.
+
+### Subtitle styling delivered (2026-10-28)
+
+Size and vertical position are now preferences, applied as libmpv's own `sub-scale`
+and `sub-pos`. Both are stored as whole percentages and offered as sliders in
+Settings (50–300% size, 0–100% position, where 100% is the bottom of the picture).
+
+The player **reads both properties back** after setting them rather than echoing the
+request, so `PlayerSnapshot::subtitle_scale`/`subtitle_position` are evidence of what
+libmpv accepted. Verified against a real clip:
+
+| Check | Result |
+| --- | --- |
+| Style reaches libmpv (1.75×, 88%) | read back as requested, within 1e-2 |
+| Style survives a file change | unchanged across `load` |
+| Impossible style (−5.0, 9000) | clamped to `SUB_SCALE_RANGE.0` / `SUB_POSITION_RANGE.1` |
+| Non-finite style (`NaN`, `inf`) | skipped; last good value stands; player not failed |
+| Stored value outside range | refused on write (`subtitle_scale_out_of_range`) |
+| Unusable stored value | clamped on read; the library still opens |
+
+Measured along the way: libmpv holds `sub-scale` in **single precision**, so 0.1
+reads back as `0.10000000149`. That is why the interface shows a whole percentage and
+why the assertions are tolerances rather than equalities.
+
+Honest limitation, carried into the UI copy: a subtitle script that positions its own
+lines — a styled ASS release — keeps that positioning, because Screenroom leaves
+`sub-ass-override` alone. Size still applies; placement may not.
+
+### Offscreen render and command latency measured (2026-10-28)
+
+A window was previously the only way to answer “can this machine keep a 1080p file
+moving”. `crates/screenroom-player/examples/render_bench.rs` answers it with no
+window at all: it builds its own moving fixture with FFmpeg, drives the real decode →
+libmpv render → CPU frame path, and counts **distinct** frames by libmpv's monotonic
+`generation` so a repeated snapshot cannot inflate the rate.
+
+```bash
+cargo run --release -p screenroom-player --example render_bench
+cargo run --release -p screenroom-player --example render_bench -- 1920x1080 12
+```
+
+MacBook Air M4, release build, libmpv 2.5 (OpenGL bridge, software frame target):
+
+| Source | Time to first frame | Sustained delivery | Worst frame gap |
+| --- | --- | --- | --- |
+| 1280×720 | 283 ms | 24.0 fps of a 24 fps source | 47.7 ms |
+| **1920×1080** | **95–278 ms** | **24.0–24.1 fps of a 24 fps source** | **47.9–54.0 ms** |
+| 3840×2160 | 132 ms | 24.1 fps | 53.8 ms |
+
+| Command | Round trip to the playhead arriving |
+| --- | --- |
+| 1080p seek to 2.0 s / 5.0 s / 1.0 s | 72.7 ms / 60.0 ms / 58.7 ms |
+| 4K-source seek (see caveat) | 62.3 ms / 111.7 ms / 205.6 ms |
+
+`avsync` held at **+0.0000 s** across every run, and the playhead stayed at 1.00×
+wall clock (9.04 s of playhead in 9.00 s of wall).
+
+Three things this does **not** prove, stated because the numbers look better than
+they are:
+
+- **It is not an on-screen frame rate.** iced, the wgpu upload and the compositor
+  add cost this measurement cannot see. These are a ceiling on what the display can
+  reach, not a substitute for measuring the window. The on-screen budget at 10,000
+  items is recorded as **PENDING** in `docs/TEST_PLAN.md`.
+- **The 4K row is not 4K presentation.** `render::MAX_DIMENSION` is 1920 and the
+  software bridge downscales larger sources, so the 4K fixture was decoded at 4K but
+  **rendered at 1920×1080** — the run reports `frame size: 1920x1080`. Native 4K
+  presentation is unmeasured and stays behind gate G2.
+- **Time to first frame has a wide spread** (95 ms to 278 ms across runs on the same
+  input). It is the least stable number here and should not be quoted to three
+  significant figures.
+
+The seek figures are also worth reading carefully: an earlier version of this example
+reported **sub-microsecond** seek latency, which was a broken measurement — the check
+was “playhead is past the target”, and a playhead already 11 s in satisfied it before
+the seek took effect. The condition is now “arrived at the target *and* moved”, which
+a backwards seek cannot satisfy early. The first number was wrong and is recorded here
+so the correction is visible rather than silently replaced.
 
 Two behaviours were corrected while exercising the finished surface, both from
 watching the real app rather than the tests:
@@ -295,11 +403,31 @@ Measured in the packaged app against the real database:
 | Exit path | Final progress | Session |
 | --- | --- | --- |
 | Window close box | **52.0 s, exact** | `active = 0` |
-| ⌘Q | loses < 1 s | row left `active`, closed by the next launch's recovery pass |
+| ⌘Q (**after** routing, below) | **as the close box: both paths identical** | `active = 0` |
 
-⌘Q bypasses the app's own event loop at the platform level, so it cannot run the
-handler; the crash-recovery normalisation from M1 covers it, which is why the next
-launch is clean rather than stuck. The close box is the graceful path.
+⌘Q initially lost under a second and left the row `active`: the Quit item AppKit
+installs sends `terminate:`, which ends the process *below* iced, so no close request
+is ever delivered and nobody finalises the viewing. The crash-recovery normalisation
+from M1 covered it — the next launch was clean rather than stuck — but "recovered on
+the next launch" is not "stored".
+
+`apps/desktop/src/quit.rs` now finds the application menu's Quit item **by selector,
+never by title** (the title is localised and carries the app's name), and re-points it
+at `performClose:` — the exact action the close button performs. The menu item and the
+close button are therefore one operation and cannot disagree about whether the open
+file was stored. A menu whose Quit item cannot be identified is left untouched, because
+a half-rewritten menu bar is worse than the behaviour it replaces.
+
+The first attempt at this reported `Routed` and still exited via `terminate:`: the
+guard treated the initial `Unsupported` value as "already graceful", so routing never
+ran. Both the routing and the two dismissal paths were then re-verified, and
+`scripts/verify-quit.sh` keeps it reproducible.
+
+**Verification status of this one, stated plainly:** the two dismissal paths were
+confirmed with a visible window and real key presses, which is now gated behind
+`SCREENROOM_ALLOW_FOREGROUND=1` (2026-10-28 policy). The evidence stands as recorded,
+but it has **not** been re-run under the background-first regime. `scripts/check-quit-routing.sh`
+re-checks the routing half headlessly, with a hidden window, on every run.
 
 ## macOS application bundle (2026-10-28)
 
@@ -401,12 +529,17 @@ receipt.
 
 **Finish M3's remainder, then the two honesty gaps that only the owner can close.**
 
-1. Remaining M3: subtitle styling (size/offset), browse previews, and a measured
-   rendering/input budget at 10,000 items (the store half is done).
+1. Remaining M3: browse previews, and the **on-screen** rendering/input budget at
+   10,000 items. Subtitle styling is delivered (above); the store and offscreen
+   halves of the budget are measured (M1 and the render section above). The on-screen
+   half needs a visible window, so it is **PENDING** an owner-approved session.
 2. Listening pass for gate G3b: hear a known audio track, and confirm the measured
    0.0 ms `avsync` figure matches what is heard.
 3. Repeat the offline check with networking actually disabled rather than by
    observing zero sockets.
+4. Native 4K presentation. The offscreen 4K row above measures a **1920×1080**
+   render target because `render::MAX_DIMENSION` caps it, so gate G2's 4K half is
+   untouched by it.
 
 See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the full definitions of
 done.

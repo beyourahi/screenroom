@@ -212,8 +212,13 @@ cargo test --workspace          # core + player + desktop logic tests
 cargo clippy --workspace --all-targets
 cargo fmt --all --check
 cargo run -p screenroom-player --example capability   # libmpv on this device
-cargo run -p screenroom-desktop                       # desktop shell
+cargo run --release -p screenroom-core --example library_bench      # paging budget
+cargo run --release -p screenroom-player --example render_bench     # offscreen frame budget
+cargo run --release -p screenroom-desktop                           # desktop shell
 ```
+
+Prefer the `--example` measurements over opening the app: they report real numbers
+and need no window, so they never interrupt the owner.
 
 Evidence helpers (`scripts/`, all local, nothing published):
 
