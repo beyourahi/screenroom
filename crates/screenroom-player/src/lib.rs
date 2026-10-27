@@ -359,28 +359,54 @@ fn missing(path: &Path, symbol: &str, error: libloading::Error) -> PlayerError {
 /// Reports whether libmpv can be used, without panicking or throwing.
 pub fn capability() -> PlayerCapability {
     match LibMpv::load() {
-        Ok(library) => {
-            // A library that loads but cannot create a core is not usable.
-            match Mpv::new(&library) {
-                Ok(_core) => PlayerCapability {
-                    available: true,
-                    reason: format!("libmpv {} loaded", library.api_version()),
-                    library_path: Some(library.path().to_string()),
-                    api_version: Some(library.api_version()),
-                },
-                Err(error) => PlayerCapability {
-                    available: false,
-                    reason: format!("libmpv loaded but could not initialise: {error}"),
-                    library_path: Some(library.path().to_string()),
-                    api_version: Some(library.api_version()),
-                },
-            }
-        }
+        Ok(library) => describe(&library),
         Err(error) => PlayerCapability {
             available: false,
             reason: error.to_string(),
             library_path: None,
             api_version: None,
+        },
+    }
+}
+
+/// Reports whether one specific libmpv build can be used.
+///
+/// This exists so a packaged application's own copy can be checked on the machine
+/// that built it. `capability()` prefers the system paths, so on a development
+/// machine it will always find Homebrew's libmpv and never exercise the copy inside
+/// the bundle — which is exactly the copy that has to work on a machine without
+/// Homebrew. Naming the path removes the ambiguity.
+pub fn capability_at(path: impl AsRef<Path>) -> PlayerCapability {
+    match LibMpv::load_path(path) {
+        Ok(library) => describe(&Arc::new(library)),
+        Err(error) => PlayerCapability {
+            available: false,
+            reason: error.to_string(),
+            library_path: None,
+            api_version: None,
+        },
+    }
+}
+
+/// Turns a loaded library into a capability report.
+///
+/// A library that loads but cannot create a core is not usable, so that case is
+/// reported as unavailable with the library's own path, rather than as available.
+fn describe(library: &Arc<LibMpv>) -> PlayerCapability {
+    let version = library.api_version();
+    let path = library.path().to_string();
+    match Mpv::new(library) {
+        Ok(_core) => PlayerCapability {
+            available: true,
+            reason: format!("libmpv {version} loaded"),
+            library_path: Some(path),
+            api_version: Some(version),
+        },
+        Err(error) => PlayerCapability {
+            available: false,
+            reason: format!("libmpv loaded but could not initialise: {error}"),
+            library_path: Some(path),
+            api_version: Some(version),
         },
     }
 }

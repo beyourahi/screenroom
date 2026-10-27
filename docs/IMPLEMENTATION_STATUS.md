@@ -457,6 +457,64 @@ implied by a personal install; the script reports the dependency list instead of
 hiding it. There is **no signing and no notarization**, which is correct for a
 personally built app and is recorded as a blocked gate for distribution.
 
+#### Runtime dependencies, named (2026-10-28)
+
+Rebuilt and re-verified headlessly with `scripts/verify-bundle.sh`, which takes no
+focus and opens nothing. The bundle is 17 MB and the binary is arm64.
+
+The bundled `libmpv.2.dylib` (4.3 MB, a **real file** — `cp -L` follows Homebrew's
+symlink so an in-place upgrade cannot dangle it) declares **20 absolute
+dependencies**. All 20 must exist on the machine that runs the app:
+
+| Dependency | Homebrew formula |
+| --- | --- |
+| `libmpv.2.dylib` | `mpv` |
+| `libavcodec.63`, `libavfilter.12`, `libavformat.63`, `libavutil.61`, `libswresample.7`, `libswscale.10`, `libavdevice.63` | `ffmpeg` |
+| `libass.9` | `libass` |
+| `libplacebo.387` | `libplacebo` |
+| `libmujs` | `mujs` |
+| `liblcms2.2` | `little-cms2` |
+| `libarchive.13` | `libarchive` |
+| `libbluray.4` | `libbluray` |
+| `libluajit-5.1.2` | `luajit` |
+| `librubberband.3` | `rubberband` |
+| `libuchardet.0` | `uchardet` |
+| `libzimg.2` | `zimg` |
+| `libjpeg.8` | `jpeg-turbo` |
+| `libvulkan.1` | `vulkan-loader` |
+
+All 20 resolved on this host. `brew install mpv` pulls the whole set, which is why
+the packaging script can check them and report before anything is installed.
+
+`scripts/verify-bundle.sh` checks, and each one can actually fail:
+
+| Check | Result |
+| --- | --- |
+| Structure: `Info.plist` and an executable `Contents/MacOS/Screenroom` | pass |
+| `Info.plist` parses; `CFBundleExecutable` and `CFBundleIdentifier` are set | pass (`com.screenroom.desktop`) |
+| Bundled libmpv is a real file, not a symlink | pass |
+| Bundled libmpv is a Mach-O arm64 library | pass |
+| Every absolute dependency resolves | pass (20/20) |
+| **libmpv from inside the bundle loads and creates a core** | pass — API 2.5, path reported as the bundle's own |
+
+The last row is the one worth having. `capability()` prefers the system paths, so on
+a development machine it always finds Homebrew's copy and never touches the bundle's
+— which is exactly the copy that has to work on a machine *without* Homebrew. The
+check therefore names the path explicitly (`capability_at`), which is what makes it
+evidence about the bundle rather than about the host.
+
+Negative tests were run too, because a check that cannot fail proves nothing:
+
+| Input | Exit | Result |
+| --- | --- | --- |
+| No bundle at the given path | `2` | refuses to guess |
+| A bundle with no executable and an unparsable plist | `1` | reports 3 failed checks |
+| `/bin/ls` named as libmpv | `1` | `does not export mpv_create: dlsym failed` |
+| The real bundle | `0` | all checks pass |
+
+**Still not proven, by design:** that a frame reaches the screen, or that the window
+opens at all. Both need a visible window and an owner-approved session.
+
 ### Test totals after the M3 work (2026-10-28)
 
 ```bash
@@ -465,21 +523,29 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-**149 tests, 0 failures**, clippy clean, formatting clean:
+**164 tests, 0 failures**, clippy clean, formatting clean:
 
 | Suite | Tests |
 | --- | --- |
 | `screenroom-core` unit (filename, fingerprint) | 13 |
-| `core/tests/library.rs` | 21 |
-| `core/tests/storage.rs` (preferences, backup) | 17 |
-| `core/tests/scanner.rs` | 7 |
+| `core/tests/library.rs` (incl. per-viewer isolation) | 22 |
+| `core/tests/storage.rs` (preferences, subtitle style, backup) | 19 |
+| `core/tests/scanner.rs` (incl. an unplugged drive) | 9 |
 | `core/tests/recovery.rs` | 7 |
 | `core/tests/scale.rs` (10,000 items) | 2 |
 | `screenroom-player` unit | 15 |
-| `player/tests/worker.rs` (real decode, audio, tracks) | 10 |
+| `player/tests/worker.rs` (real decode, audio, tracks, subtitle style) | 12 |
 | `player/tests/libmpv_smoke.rs` | 2 |
-| `screenroom-desktop` unit | 49 |
+| `screenroom-desktop` unit | 57 |
 | `desktop/tests/playback.rs` | 6 |
+
+Headless scripts, which are not part of `cargo test`:
+
+| Script | What it proves |
+| --- | --- |
+| `scripts/check-quit-routing.sh` | the running app re-pointed the menu bar's Quit — hidden window, no focus taken |
+| `scripts/verify-bundle.sh` | the packaged bundle's structure, plist, bundled libmpv and all 20 of its dependencies |
+| `scripts/foreground-guard.sh` | sourced by every foreground script; refuses without `SCREENROOM_ALLOW_FOREGROUND=1` |
 
 ---
 
@@ -519,9 +585,15 @@ receipt.
 6. **Packaged binary vs development tree.** The `.app` bundles libmpv but not its
    transitive Homebrew dependencies, and it is unsigned. That is deliberate for a
    personal install; making it portable is a separate licensing and signing task.
-7. **⌘Q is ungraceful.** The platform terminates the process outside the app's
-   event loop, so the final sub-second checkpoint is lost and the next launch's
-   recovery pass closes the row. The close box is the graceful path.
+7. ~~**⌘Q is ungraceful.**~~ **Fixed** — `apps/desktop/src/quit.rs` re-points the
+   menu bar's Quit at `performClose:`, so the menu item and the close box are one
+   operation. The two dismissal paths were confirmed identical with real key presses;
+   that confirmation predates the background-first policy and has not been re-run
+   under it, while `scripts/check-quit-routing.sh` re-checks the routing headlessly.
+8. **Keyset paging for very large libraries.** The query budget is inside a frame at
+   10,000 entries but not at 50,000 (~93 ms for a page plus count), where `OFFSET`
+   must be replaced with keyset paging. Not fixed ahead of a library that size
+   existing; measured in M1 above.
 
 ---
 
