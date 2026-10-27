@@ -142,14 +142,14 @@ fn a_zero_duration_is_never_written() {
     assert_eq!(stored_position(&database, &file_id).0, 0);
 }
 
-/// A real decode that stores progress, then proves a fresh library instance
-/// restores it. This is the automated half of the M2 resume acceptance.
-#[test]
-fn a_real_playback_session_resumes_after_the_library_is_reopened() {
-    let directory = TempDir::new().expect("temp dir");
-    let media_root = directory.path().join("media");
-    fs::create_dir_all(&media_root).expect("media root");
-    let clip = media_root.join("Clip.mkv");
+/// Writes a real, rights-clear clip with FFmpeg and returns its path.
+///
+/// `testsrc2` is generated inside this process's control and carries a burnt-in
+/// timecode, so nothing here depends on the machine's own media.
+fn generated_clip(media_root: &Path, name: &str, seconds: u32) -> PathBuf {
+    let clip = media_root.join(name);
+    let video = format!("testsrc2=size=320x240:rate=25:duration={seconds}");
+    let audio = format!("sine=frequency=440:duration={seconds}");
     let status = Command::new("ffmpeg")
         .args([
             "-nostdin",
@@ -159,11 +159,11 @@ fn a_real_playback_session_resumes_after_the_library_is_reopened() {
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=size=320x240:rate=25:duration=2",
+            &video,
             "-f",
             "lavfi",
             "-i",
-            "sine=frequency=440:duration=2",
+            &audio,
             "-c:v",
             "libx264",
             "-pix_fmt",
@@ -174,8 +174,42 @@ fn a_real_playback_session_resumes_after_the_library_is_reopened() {
         ])
         .arg(&clip)
         .status()
-        .expect("ffmpeg");
-    assert!(status.success());
+        .expect("ffmpeg is required by the decode tests");
+    assert!(
+        status.success(),
+        "ffmpeg could not write {}",
+        clip.display()
+    );
+    clip
+}
+
+/// Waits until decoded frames are running past `seconds`.
+///
+/// A player that loads but never advances is the failure this reports, so the
+/// last snapshot is part of the panic message.
+fn wait_for_position(player: &Player, seconds: f64) -> screenroom_player::PlayerSnapshot {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let snapshot = player.snapshot();
+        if snapshot.loaded && snapshot.position > seconds {
+            return snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "playback did not advance: {snapshot:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A real decode that stores progress, then proves a fresh library instance
+/// restores it. This is the automated half of the M2 resume acceptance.
+#[test]
+fn a_real_playback_session_resumes_after_the_library_is_reopened() {
+    let directory = TempDir::new().expect("temp dir");
+    let media_root = directory.path().join("media");
+    fs::create_dir_all(&media_root).expect("media root");
+    let clip = generated_clip(&media_root, "Clip.mkv", 2);
 
     let database = directory.path().join("library.db");
     let library = Library::open(&database).expect("library");
@@ -208,20 +242,7 @@ fn a_real_playback_session_resumes_after_the_library_is_reopened() {
     let mut tracker = opened.tracker;
     player.load_at(&clip, Some(opened.resume_from_ms as f64 / 1000.0));
 
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let snapshot = player.snapshot();
-        if snapshot.loaded && snapshot.position > 0.4 {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "playback did not advance: {snapshot:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-
-    let snapshot = player.snapshot();
+    let snapshot = wait_for_position(&player, 0.4);
     tracker
         .record(
             &library,
@@ -244,4 +265,50 @@ fn a_real_playback_session_resumes_after_the_library_is_reopened() {
     let library = Library::open(&database).expect("library");
     let opened = PlaybackTracker::open(&library, &profile(&library), &file_id).expect("open");
     assert_eq!(opened.resume_from_ms, position);
+}
+
+/// The app's Replay control reopens a finished file on the same player.
+///
+/// `PlayerState::Ended` is terminal, so "play the finished file again" is a
+/// *second load on one `Player` instance*, not a state change. A player that
+/// loads twice but only ever decodes once would leave Replay looking broken and
+/// this is the test that catches it.
+#[test]
+fn a_finished_file_plays_again_on_the_same_player() {
+    let directory = TempDir::new().expect("temp dir");
+    let media_root = directory.path().join("media");
+    fs::create_dir_all(&media_root).expect("media root");
+    // Long enough that reaching 1s on the second run is not a race with the end.
+    let clip = generated_clip(&media_root, "Replay.mkv", 6);
+
+    let player = match Player::start() {
+        Ok(player) => player,
+        Err(error) => {
+            eprintln!("skipped the decode half: {error}");
+            return;
+        }
+    };
+
+    player.load_at(&clip, Some(0.0));
+    let first = wait_for_position(&player, 0.4);
+    player.stop();
+
+    // The replay: the same file, loaded again, from the beginning.
+    player.load_at(&clip, Some(0.0));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while player.snapshot().position > 0.5 {
+        assert!(
+            Instant::now() < deadline,
+            "reloading did not reset the playhead: {:?}",
+            player.snapshot()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let second = wait_for_position(&player, 1.0);
+    assert!(
+        second.position > 1.0,
+        "the replay stalled at {} s (first run reached {} s)",
+        second.position,
+        first.position
+    );
 }
