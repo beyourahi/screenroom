@@ -20,14 +20,21 @@ action="${1:?usage: drive-app.sh <key|capture> [name]}"
 
 # macOS occasionally reports "window 1 ... Invalid index" while the previous
 # raise is still settling, so every action is retried before it is called failed.
+# Activating the process is what actually delivers the key, and it is also what
+# brings a window back from another Space. `AXRaise` is the icing — but it throws
+# while the window is on a Space the accessibility API cannot see, and that used
+# to abort the whole block before the key was sent, so it is best-effort for the
+# same reason the capture helper treats it that way.
 raise_block() {
   local script
   script=$(cat <<APPLESCRIPT
 tell application "System Events"
   tell process "$process"
     set frontmost to true
-    perform action "AXRaise" of window 1
-    delay 0.35
+    try
+      perform action "AXRaise" of window 1
+    end try
+    delay 0.45
 $1
   end tell
 end tell

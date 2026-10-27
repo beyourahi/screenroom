@@ -57,6 +57,15 @@ const RAIL: i64 = 8;
 /// How long a forward seek jumps.
 const SEEK_STEP: f64 = 10.0;
 
+/// Update cycles in which a launch may try to point the menu bar's Quit at the
+/// window's close action.
+///
+/// AppKit builds the default menu bar after the application object exists, so the
+/// attempt made while starting can legitimately find no menu. A budget rather than
+/// one try: the attempt is cheap, it stops the moment it succeeds, and it gives up
+/// after a few seconds instead of every update forever.
+const QUIT_ROUTING_BUDGET: u8 = 40;
+
 /// Starts the desktop application.
 pub fn run() -> iced::Result {
     iced::application(App::new, App::update, App::view)
@@ -337,6 +346,15 @@ pub struct App {
     scan_events: Option<Receiver<ScanEvent>>,
     status: Option<String>,
     error: Option<String>,
+
+    /// Update cycles left in which to point the menu bar's Quit at the window's
+    /// close action, and what the attempt settled on.
+    ///
+    /// Zero means this `App` will never do it. A launch starts with the full
+    /// budget; an `App` a test built starts at zero, because a test process has
+    /// no menu bar to route and AppKit must not be reached off the main thread.
+    quit_routing_budget: u8,
+    quit_routing: crate::quit::QuitRouting,
 }
 
 /// User intent.
@@ -499,6 +517,15 @@ fn ticks(interval: Duration) -> Subscription<Message> {
 
 impl App {
     fn new() -> (Self, Task<Message>) {
+        // A launch is what gives the menu bar's Quit its budget to be re-pointed at
+        // the window's close action; see `route_quit` for why that happens in the
+        // update loop rather than here.
+        let (mut app, task) = Self::launch();
+        app.quit_routing_budget = QUIT_ROUTING_BUDGET;
+        (app, task)
+    }
+
+    fn launch() -> (Self, Task<Message>) {
         let (path, label) = match std::env::var_os("SCREENROOM_LIBRARY") {
             Some(path) => (PathBuf::from(path), String::from("SCREENROOM_LIBRARY")),
             None => match default_library_path() {
@@ -582,6 +609,9 @@ impl App {
             scan_events: None,
             status: None,
             error,
+            // Only a launch arms this; see the field's own note.
+            quit_routing_budget: 0,
+            quit_routing: crate::quit::QuitRouting::Unsupported,
         };
         // The language fields start from what is stored, so the screen never
         // shows an empty box for a preference that is actually set.
@@ -709,6 +739,41 @@ impl App {
     /// Records a core error with its stable code, so the message is diagnosable.
     fn report(&mut self, error: &CoreError) {
         self.error = Some(format!("{}: {}", error.code(), error));
+    }
+
+    /// Points the menu bar's Quit at the window's close action, once it can.
+    ///
+    /// On macOS the Quit item AppKit installs ends the process below the event
+    /// loop, so a viewing in progress is finalised by nobody. Re-pointing it at
+    /// the action the close button performs makes the two the same operation, and
+    /// this is where that happens because the menu bar only exists once the
+    /// application has finished starting.
+    ///
+    /// Best-effort and reported, never fatal: if it never succeeds, quitting still
+    /// works — it simply cannot store the position it is at, and a user reading the
+    /// log should be able to find out that is why.
+    fn route_quit(&mut self) {
+        // The budget is the whole guard. It is not enough to check whether the last
+        // outcome was graceful, because the starting value answers that before
+        // anything has been tried.
+        if self.quit_routing_budget == 0 {
+            return;
+        }
+        let routing = crate::quit::route_quit_through_close();
+        self.quit_routing = routing;
+        if routing.is_graceful() {
+            // Done. Spending the budget is what stops every later update from
+            // asking the window server again.
+            self.quit_routing_budget = 0;
+            return;
+        }
+        self.quit_routing_budget -= 1;
+        if self.quit_routing_budget == 0 {
+            eprintln!(
+                "screenroom: the menu bar's Quit could not be routed through the window \
+                 close ({routing}); quitting may not store the position it is at."
+            );
+        }
     }
 
     // ------------------------------------------------------------ navigation
@@ -1504,6 +1569,9 @@ impl App {
     // ---------------------------------------------------------------- update
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        // Done here rather than while starting, because the menu bar this changes
+        // does not exist until the application has finished starting.
+        self.route_quit();
         match message {
             Message::GoHome => {
                 self.screen = Screen::Home;
@@ -3171,6 +3239,19 @@ mod tests {
         app.screen = Screen::Browse;
         app.reload_browse();
         (app, directory)
+    }
+
+    #[test]
+    fn a_test_built_app_never_reaches_for_the_menu_bar() {
+        // Routing ⌘Q talks to AppKit, which is only legal on the main thread. A
+        // library is built here, not launched, so the budget must stay at zero: if
+        // it did not, the first `update` in any of these tests would call into the
+        // window server from a test thread.
+        let (mut app, _directory) = app_with(1);
+        assert_eq!(app.quit_routing_budget, 0, "not armed by construction");
+        let _ = app.update(Message::Refresh);
+        assert_eq!(app.quit_routing_budget, 0, "and never armed by an update");
+        assert_eq!(app.quit_routing, crate::quit::QuitRouting::Unsupported);
     }
 
     #[test]

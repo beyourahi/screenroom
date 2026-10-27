@@ -2619,6 +2619,7 @@ name = "screenroom-desktop"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "objc2 0.6.5",
  "screenroom-core",
  "screenroom-player",
  "serde_json",

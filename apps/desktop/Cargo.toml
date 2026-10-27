@@ -14,6 +14,13 @@ iced = { version = "0.14", features = ["wgpu"] }
 # Must match the wgpu version iced 0.14 renders with; verify with `cargo tree -i wgpu`.
 wgpu = "27"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Used only by `src/quit.rs`, to re-point the application menu's Quit item at the
+# window's close action. Already in the lock file through iced's own macOS
+# backend, so this resolves to a version that is built anyway rather than adding
+# a crate to the graph.
+objc2 = "0.6"
+
 [dev-dependencies]
 tempfile.workspace = true
 # Only the design-system token exporter uses JSON; the app itself never parses it.
