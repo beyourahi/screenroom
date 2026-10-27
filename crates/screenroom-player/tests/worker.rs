@@ -718,3 +718,95 @@ fn a_missing_file_is_reported_honestly() {
     assert_eq!(failure.code, "file_missing");
     assert!(failure.message.contains("no longer on disk"));
 }
+
+#[test]
+fn a_malformed_media_file_is_reported_rather_than_shown_as_empty() {
+    let directory = TempDir::new().expect("temp dir");
+    // A file that claims to be Matroska and is not: the case a truncated download
+    // or a partly-copied file produces.
+    let path = directory.path().join("broken.mkv");
+    std::fs::write(&path, b"\x1aE\xdf\xa3this is not actually matroska").expect("write");
+    let Some(player) = player() else { return };
+    player.load(&path);
+
+    let settled = wait_for(&player, Duration::from_secs(10), |snapshot| {
+        snapshot.state == PlayerState::Failed || snapshot.failure.is_some()
+    });
+    let failure = settled.failure.expect("a reason the file cannot play");
+    assert!(
+        !failure.code.is_empty() && !failure.message.is_empty(),
+        "the failure must name a code and say something: {failure:?}"
+    );
+    assert!(
+        settled.frame.is_none(),
+        "a file that cannot be decoded must not present a frame"
+    );
+}
+
+#[test]
+fn a_long_session_keeps_one_frame_and_advances_monotonically() {
+    let directory = TempDir::new().expect("temp dir");
+    // Long enough that a leak of decoded frames or a drifting clock would show.
+    let path = thirty_second_clip(&directory);
+    let Some(player) = player() else { return };
+    player.load(&path);
+    wait_for(&player, Duration::from_secs(30), |snapshot| {
+        snapshot.position > 1.0
+    });
+
+    // Sample across the run: the snapshot holds exactly one frame at a time, and
+    // the playhead only ever moves forward without a seek.
+    let mut last = 0.0_f64;
+    let mut samples = 0;
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while Instant::now() < deadline {
+        let snapshot = player.snapshot();
+        assert!(
+            snapshot.position >= last - 0.5,
+            "the playhead went backwards without a seek: {last} then {}",
+            snapshot.position
+        );
+        assert!(
+            snapshot.frame.as_ref().is_none_or(|frame| frame.width > 0),
+            "a retained frame must be a real frame"
+        );
+        last = snapshot.position;
+        samples += 1;
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    assert!(samples > 20, "the session ran for {samples} samples");
+    assert!(last > 1.0, "the playhead advanced: {last}");
+}
+
+/// Builds a thirty-second clip, for observing a session rather than its start.
+fn thirty_second_clip(directory: &TempDir) -> PathBuf {
+    let path = directory.path().join("long.mp4");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-nostdin",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=25:duration=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=30",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-t",
+            "30",
+        ])
+        .arg(&path)
+        .status()
+        .expect("ffmpeg should be installed");
+    assert!(status.success(), "ffmpeg could not build the long clip");
+    path
+}
