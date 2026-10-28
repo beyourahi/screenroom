@@ -113,6 +113,12 @@ impl Primitive for VideoPrimitive {
         let Some(frame) = self.frame.as_ref().filter(|frame| frame.is_well_formed()) else {
             return;
         };
+        let (fit_x, fit_y) = fit_factors(frame.width, frame.height, self.bounds);
+        queue.write_buffer(
+            &pipeline.fit_buffer,
+            0,
+            bytemuck_f32(&[fit_x, fit_y, 0.0, 0.0]),
+        );
         if pipeline.uploaded_generation == Some(frame.generation)
             && pipeline.texture_size == (frame.width, frame.height)
         {
@@ -179,12 +185,6 @@ impl Primitive for VideoPrimitive {
             );
         }
 
-        let (fit_x, fit_y) = fit_factors(frame.width, frame.height, self.bounds);
-        queue.write_buffer(
-            &pipeline.fit_buffer,
-            0,
-            bytemuck_f32(&[fit_x, fit_y, 0.0, 0.0]),
-        );
         pipeline.uploaded_generation = Some(frame.generation);
     }
 
@@ -444,6 +444,15 @@ mod tests {
         assert!(source_uv((1.0 - margin, 0.5), fit).is_some());
         assert!(source_uv((margin - 0.01, 0.5), fit).is_none());
         assert!(source_uv((1.0 - margin + 0.01, 0.5), fit).is_none());
+    }
+
+    #[test]
+    fn fit_changes_when_the_widget_resizes_without_a_new_frame() {
+        let wide = fit_factors(1920, 1080, bounds(1280.0, 720.0));
+        let ultrawide = fit_factors(1920, 1080, bounds(1920.0, 720.0));
+        assert_ne!(wide, ultrawide);
+        assert_eq!(wide, (1.0, 1.0));
+        assert!(ultrawide.0 < 1.0);
     }
 
     #[test]
