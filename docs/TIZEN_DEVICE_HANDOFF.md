@@ -288,6 +288,32 @@ reports `canvases=1 size=1920x1080 mounted=1` with no JS errors, and the **owner
 the home screen with readable text and cards**. Items **3–12 are open** and every one of
 them needs the remote in a hand, because this firmware accepts no synthetic key press.
 
+### 4a. What the set showed on 2026-10-29, after the library and navigation fixes
+
+The package in §1b was pushed, installed with `vd_appinstall` (`install completed`) and
+launched with `was_execute` (`launched`). The owner then walked the set with the remote
+and reported back. **These are the owner's observations, quoted as observations** — this
+firmware has no screenshot channel, so nothing here is a measurement.
+
+| Item | On the set |
+| --- | --- |
+| 1 | **Passes.** The app opens on the rail with the library drawn — cards with titles in a grid — and the owner reports it readable from where they sit. |
+| 3, 4 | **Pass.** The 1,200 files catalogued by the previous build are still there and still listed from `removable1`; the reinstall preserved the widget's storage again. |
+| 10, 10b | **Pass.** Six or seven presses of Down scroll the grid a row at a time with the counter advancing and no freeze; every rail destination — Movies, TV Shows, Search, Media Sources, Settings — opens with Down and OK; Search types; Left returns to the rail and Return comes back. **No Info, colour or media key was pressed.** |
+| 6 | **Fails, on the first attempt.** OK on *Play from the beginning* produced a **black screen with no text**. The player draws nothing until a key is pressed (`overlayAlpha` starts at 0), so the set showed neither a picture nor a reason. |
+| 5, 7, 8, 9, 11, 12 | **Still open.** Step 3 of the walk opened the control menu and *Forward 10 seconds* was reachable, but with no picture there was nothing to verify against. |
+
+What item 6's failure does **not** tell us yet: whether AVPlay refused the URI, opened the
+file and rendered into a surface the app's own opaque background covers, or never received
+a frame. The app's evidence record is the channel that settles it, and the player writes
+none of these yet — which is the first thing to fix on this platform when TV work resumes
+(see the next paragraph).
+
+**Work on this platform is paused by the owner's direction of 2026-10-29:** Screenroom is
+to be finished end-to-end for macOS first, and only then adapted to other devices. The
+findings above are recorded so the next TV session starts from them rather than from a
+blank page.
+
 The owner's USB drive holds **movies and shows in nested folders**, not loose files at the
 drive root. That is what the walker is built for: it is breadth-first and descends to 16
 levels (`MAX_DEPTH` in `core/scan.ts`), skips hidden folders, and `folderHintOf` strips a

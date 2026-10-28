@@ -252,6 +252,14 @@ whole catalogue with a persistent rail and a D-pad-only path to every screen, co
 items 3 and 4's *display* half on the Mac — but the gate items stay open, because
 nothing in this session ran on the television.
 
+**The fixes were then installed and walked on the set (2026-10-29).** The library draws,
+the rail reaches every screen with arrows and OK, and the grid scrolls — the owner's own
+observations, recorded in the handoff's §4a. **Item 6 failed on its first attempt:** OK on
+*Play from the beginning* gave a black screen with no text, and because the player hides
+its overlay until a key is pressed, the set said nothing about why. That is a real defect
+and it is now the first thing TV work resumes with. G5 stays PARTIAL: 1, 3, 4, 10 and 10b
+have receipts; 6 has a failing receipt; 5, 7, 8, 9, 11 and 12 are untouched.
+
 What this client now does off-device, and therefore does not have to be discovered on
 the television: it walks a mounted drive, parses film and episode identities from
 filenames, stores the catalogue and the scan report in one durable document, keeps
