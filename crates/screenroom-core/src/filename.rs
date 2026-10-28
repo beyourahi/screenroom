@@ -20,6 +20,8 @@ static EPISODIC_AX: LazyLock<Regex> = LazyLock::new(|| {
 });
 static YEAR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(19\d{2}|20\d{2})\b").expect("static year regex is valid"));
+static RESOLUTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b\d{3,4}x\d{3,4}\b").expect("static resolution regex is valid"));
 static QUALITY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(?:2160p|1080p|720p|480p|bluray|brrip|webrip|web-dl|hdtv|dvdrip|x26[45]|h26[45]|hevc|av1)\b",
@@ -69,6 +71,7 @@ pub struct ParsedName {
 pub fn parse_filename(filename: &str, folder: Option<&str>) -> ParsedName {
     let stem = stem_of(filename);
     let mut name = stem.replace('_', ".");
+    name = RESOLUTION.replace_all(&name, " ").into_owned();
 
     let episodic = EPISODIC_SE
         .captures(&name)
@@ -83,11 +86,27 @@ pub fn parse_filename(filename: &str, folder: Option<&str>) -> ParsedName {
                     .and_then(|end| end.as_str().parse::<i64>().ok()),
             })
         });
-    let potential_year = YEAR.find(&name);
-    let year_match = potential_year.filter(|year| match &episodic {
-        Some(episode) => year.start() < episode.start,
-        None => true,
-    });
+    let years: Vec<_> = YEAR
+        .find_iter(&name)
+        .filter(|matched| match &episodic {
+            Some(episode) => matched.start() < episode.start,
+            None => true,
+        })
+        .filter(|matched| !clean(&name[..matched.start()]).is_empty())
+        .collect();
+    let year_match = years
+        .iter()
+        .rev()
+        .find(|matched| {
+            let before = matched
+                .start()
+                .checked_sub(1)
+                .and_then(|i| name.as_bytes().get(i));
+            let after = name.as_bytes().get(matched.end());
+            matches!(before, Some(b'(' | b'[')) && matches!(after, Some(b')' | b']'))
+        })
+        .or_else(|| years.last())
+        .copied();
     let year = year_match
         .and_then(|m| m.as_str().parse::<i64>().ok())
         .filter(|value| (1800..=2200).contains(value));
@@ -114,10 +133,12 @@ pub fn parse_filename(filename: &str, folder: Option<&str>) -> ParsedName {
 
     let cleaned = clean(&name);
     let mut name = cleaned;
+    let mut folder_fallback = false;
     if name.is_empty()
         && let Some(folder) = folder
     {
         let label = clean(&Path::new(folder).file_name_stem());
+        folder_fallback = !SEASON_FOLDER.is_match(&label) && !label.is_empty();
         name = if SEASON_FOLDER.is_match(&label) {
             String::new()
         } else {
@@ -142,6 +163,8 @@ pub fn parse_filename(filename: &str, folder: Option<&str>) -> ParsedName {
     };
     let confidence = if unknown {
         0.1
+    } else if folder_fallback {
+        0.4
     } else if episodic.is_some() {
         0.85
     } else if year.is_some() {
@@ -249,6 +272,35 @@ mod tests {
         assert_eq!(parsed.title, "A Movie");
         assert_eq!(parsed.year, Some(2021));
         assert_eq!(parsed.confidence, 0.75);
+    }
+
+    #[test]
+    fn prefers_release_year_after_numeric_title_years() {
+        for (filename, title, year) in [
+            (
+                "2001 A Space Odyssey (1968).mkv",
+                "2001 A Space Odyssey",
+                1968,
+            ),
+            ("1917 (2019).mkv", "1917", 2019),
+            ("Blade Runner 2049 (2017).mkv", "Blade Runner 2049", 2017),
+            ("2001 Maniacs (2005).mkv", "2001 Maniacs", 2005),
+        ] {
+            let parsed = parse_filename(filename, None);
+            assert_eq!((parsed.title.as_str(), parsed.year), (title, Some(year)));
+        }
+    }
+
+    #[test]
+    fn resolution_is_not_an_episode_or_confident_folder_match() {
+        let parsed = parse_filename("Film.720x480.mkv", Some("Films"));
+        assert_eq!(parsed.kind, MediaKind::Movie);
+        assert_eq!(parsed.title, "Film");
+        assert!(parsed.confidence < 0.75);
+        assert_eq!(
+            parse_filename("Film.640x360.mkv", None).kind,
+            MediaKind::Movie
+        );
     }
 
     #[test]
