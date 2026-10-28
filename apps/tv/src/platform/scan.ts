@@ -24,7 +24,7 @@ import {
   type ScanIssue,
   type ScannedFile,
 } from '../core/scan.ts'
-import { isDirectoryPath, readDirectory } from './media-roots.ts'
+import { isDirectoryPath, readDirectory, type ReadEntry } from './media-roots.ts'
 
 /** What a walk found. */
 export interface WalkOutcome {
@@ -103,7 +103,7 @@ export async function walkRoot(options: WalkOptions): Promise<WalkOutcome> {
 
   const queue: Pending[] = [{ path: options.root, depth: 0 }]
   // The root's own listing is already in hand; the queue is read from afterwards.
-  let rootEntries: readonly string[] | null = first.entries
+  let rootEntries: readonly ReadEntry[] | null = first.entries
   let foldersRead = 0
 
   const stop = (): WalkOutcome => ({
@@ -143,12 +143,15 @@ export async function walkRoot(options: WalkOptions): Promise<WalkOutcome> {
         break
       }
 
-      const path = joinEntry(current.path, entry)
+      const path = joinEntry(current.path, entry.name)
       if (path === current.path) {
         continue
       }
-      const name = entry.split(/[/\\]/).pop() ?? entry
-      const directory = isDirectoryPath(path)
+      const name = entry.name.split(/[/\\]/).pop() ?? entry.name
+      // The listing's own answer first, then one call per entry only when it did not
+      // give one: a `File` object knows what it is, and re-deriving that is a wasted call
+      // on a drive with thousands of entries.
+      const directory = entry.isDirectory ?? isDirectoryPath(path)
       if (directory === null) {
         // The platform would not say what this is. Reported, not guessed: treating it as
         // a file would catalogue a folder, and treating it as a folder would read a file.
@@ -199,7 +202,7 @@ export async function walkRoot(options: WalkOptions): Promise<WalkOutcome> {
 }
 
 /** Lists one folder, recording the reason when it cannot be read. */
-async function readEntries(path: string, issues: Issues): Promise<readonly string[]> {
+async function readEntries(path: string, issues: Issues): Promise<readonly ReadEntry[]> {
   const result = await readDirectory(path)
   if (result.ok) {
     return result.entries

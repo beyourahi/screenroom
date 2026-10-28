@@ -51,15 +51,41 @@ export interface TizenStorage {
  * could modify the owner's media, and a missing declaration is the strongest form of
  * that promise this file can make.
  */
+/** A folder handle, as `resolve` yields it: the thing that can list its own contents. */
+export interface TizenFileHandle {
+  readonly name?: string
+  readonly isDirectory?: boolean
+  readonly path?: string
+  /** Lists this folder's children as `File` objects, per the API reference. */
+  listFiles?(onSuccess: (files: unknown) => void, onError?: (error: unknown) => void): void
+}
+
 export interface TizenFilesystem {
   listStorages(
     onSuccess: (storages: TizenStorage[]) => void,
     onError: (error: unknown) => void,
   ): void
-  /** Lists one folder. The callback receives entry names (and, on some firmware, paths). */
-  listDirectory(
+  /**
+   * Turns a virtual location — which is what a storage label is — into a folder handle.
+   *
+   * The documented first step of listing (W3C Filesystem API, implemented by Tizen); the
+   * handle it yields has `listFiles`. Optional because the reader keeps a fallback.
+   */
+  resolve?(
+    location: string,
+    onSuccess: (file: TizenFileHandle) => void,
+    onError?: (error: unknown) => void,
+    mode?: string,
+  ): void
+  /**
+   * Lists one folder, on firmware that ships the device-API spelling.
+   *
+   * The callback receives an array of `File` objects per the API reference; a name-only
+   * array is accepted too, and `readEntriesFrom` normalizes whichever arrives.
+   */
+  listDirectory?(
     path: string,
-    onSuccess: (entries: string[], path?: string) => void,
+    onSuccess: (entries: unknown, path?: string) => void,
     onError?: (error: unknown) => void,
     filter?: unknown,
   ): void

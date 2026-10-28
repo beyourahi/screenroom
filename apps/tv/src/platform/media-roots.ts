@@ -44,9 +44,23 @@ export type RootsResult =
   | { readonly ok: true; readonly roots: readonly MediaRoot[] }
   | { readonly ok: false; readonly reason: string }
 
+/**
+ * One entry a directory listing produced.
+ *
+ * `isDirectory` is the platform's own answer when it gave one, and `null` when it did
+ * not. That distinction is load-bearing: `null` means "ask again", `false` means "this is
+ * a file", and treating the second as the first would catalogue a folder as a video.
+ */
+export interface ReadEntry {
+  /** The entry's own name, or the full path when the platform only gave that. */
+  readonly name: string
+  /** What the platform said this is, or `null` when it would not say. */
+  readonly isDirectory: boolean | null
+}
+
 /** What listing one directory produced. */
 export type DirectoryResult =
-  | { readonly ok: true; readonly entries: readonly string[] }
+  | { readonly ok: true; readonly entries: readonly ReadEntry[] }
   | { readonly ok: false; readonly reason: string }
 
 /** What turning a location into something the decoder accepts produced. */
@@ -98,11 +112,64 @@ export async function listMediaRoots(): Promise<RootsResult> {
 }
 
 /**
+ * Normalizes whatever a listing callback handed back into entries.
+ *
+ * The W3C Filesystem API — the one Tizen implements, and the one Samsung's TV reference
+ * points at — calls back with an array of **`File` objects**, not names: each has `name`,
+ * `isFile`, `isDirectory`, `path` and `toURI()`. A previous version of this file filtered
+ * for `typeof === 'string'`, which threw away every `File` and made each folder look
+ * empty — a scan of a full drive would have reported zero files. Both shapes are accepted
+ * here, and a `File`'s own `isDirectory` flag is kept rather than re-derived.
+ *
+ * Anything that is neither a string nor an object with a usable name is dropped: an
+ * unnamed entry cannot be joined to a path, and inventing one would be a false receipt.
+ */
+export function readEntriesFrom(list: unknown): ReadEntry[] {
+  if (!Array.isArray(list)) {
+    return []
+  }
+  const entries: ReadEntry[] = []
+  for (const item of list) {
+    if (typeof item === 'string') {
+      if (item.length > 0) {
+        entries.push({ name: item, isDirectory: null })
+      }
+      continue
+    }
+    if (item === null || typeof item !== 'object') {
+      continue
+    }
+    const record = item as { name?: unknown; fullPath?: unknown; isDirectory?: unknown; isFile?: unknown }
+    const name = typeof record.name === 'string' && record.name.length > 0 ? record.name : null
+    if (name === null) {
+      continue
+    }
+    entries.push({
+      name,
+      isDirectory:
+        typeof record.isDirectory === 'boolean'
+          ? record.isDirectory
+          : record.isFile === true
+            ? false
+            : null,
+    })
+  }
+  return entries
+}
+
+/**
  * Lists one directory's entries.
  *
- * The platform's callback signature is documented as `(names, path)`: names, not paths.
- * The guide next to the same API says the opposite, so both are accepted and
- * `core/scan.ts` joins them on whichever it got.
+ * Two platform calls are tried, in the order the documentation makes authoritative:
+ *
+ * 1. `filesystem.resolve(path, …)` then `File.listFiles(…)` — the documented way to turn
+ *    a virtual location (which is what a storage label is) into a browsable folder.
+ * 2. `filesystem.listDirectory(path, …)` — the Tizen device-API spelling, kept only as a
+ *    fallback because not every firmware ships one, and the walker must not depend on
+ *    the richer of the two existing.
+ *
+ * Which of them was used is not reported to the screen; a failure is. An empty folder and
+ * an unreadable one are different answers and stay different.
  */
 export async function readDirectory(path: string): Promise<DirectoryResult> {
   const filesystem = tizenGlobal()?.filesystem
@@ -113,16 +180,48 @@ export async function readDirectory(path: string): Promise<DirectoryResult> {
     const onError = (error: unknown): void => {
       resolve({ ok: false, reason: describe(error) })
     }
+    const done = (entries: unknown): void => {
+      resolve({ ok: true, entries: readEntriesFrom(entries) })
+    }
+
+    // The fallback keeps the *first* reason when it has nothing of its own to say, so a
+    // firmware that answers neither call reports why `resolve` refused rather than a
+    // generic "no way to list", which would hide a permission error.
+    const legacy = (firstReason?: unknown): void => {
+      if (typeof filesystem.listDirectory !== 'function') {
+        onError(firstReason ?? new Error('the TV has no way to list a folder'))
+        return
+      }
+      try {
+        filesystem.listDirectory(path, done, onError)
+      } catch (error) {
+        onError(error)
+      }
+    }
+
+    if (typeof filesystem.resolve !== 'function') {
+      legacy()
+      return
+    }
     try {
-      filesystem.listDirectory(
+      filesystem.resolve(
         path,
-        (entries: string[]) => {
-          resolve({
-            ok: true,
-            entries: Array.isArray(entries) ? entries.filter((name) => typeof name === 'string') : [],
-          })
+        (folder: { listFiles?: (ok: (files: unknown) => void, fail: (error: unknown) => void) => void }) => {
+          if (typeof folder?.listFiles !== 'function') {
+            legacy()
+            return
+          }
+          try {
+            folder.listFiles(done, onError)
+          } catch (error) {
+            onError(error)
+          }
         },
-        onError,
+        // A storage label is a location `resolve` is documented to accept, but a firmware
+        // that disagrees must not turn a readable drive into "would not list": the other
+        // spelling gets one try, and only then is the refusal reported.
+        (error: unknown) => legacy(error),
+        'r',
       )
     } catch (error) {
       onError(error)
