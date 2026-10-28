@@ -54,6 +54,71 @@ fn scans_media_and_reports_skipped_entries() {
 }
 
 #[test]
+fn apple_double_companions_are_not_media() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    // What macOS writes beside every file on an exFAT USB drive: 4 KiB of
+    // metadata with the same name and the same media extension.
+    write_settled(&root.join("Film.2020.mkv"), b"real film");
+    write_settled(&root.join("._Film.2020.mkv"), b"apple double");
+    write_settled(&root.join("Show/Season 1/Show.S01E01.mkv"), b"real episode");
+    write_settled(
+        &root.join("Show/Season 1/._Show.S01E01.mkv"),
+        b"apple double",
+    );
+
+    let library = Library::open_in_memory().unwrap();
+    let source = library.add_source(root, None).unwrap();
+    let summary = scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+
+    assert_eq!(summary.imported, 2, "only the two real files");
+    assert!(summary.complete, "issues: {:?}", summary.issues);
+    let items = library.items(&LibraryQuery::page(10)).unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(
+        items.iter().all(|item| !item.title.starts_with("._")),
+        "none of {:?} is an AppleDouble companion",
+        items.iter().map(|item| &item.title).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn two_shows_with_one_title_and_different_years_stay_separate() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    // Same title, different shows. Episode filenames carry no year, so the year
+    // can only come from the show folder — and it is what keeps them apart.
+    write_settled(
+        &root.join("The Office (2001)/Season 01/The Office - s01e01.mkv"),
+        b"british",
+    );
+    write_settled(
+        &root.join("The Office (2005)/Season 01/The Office - s01e01.mkv"),
+        b"american",
+    );
+
+    let library = Library::open_in_memory().unwrap();
+    let source = library.add_source(root, None).unwrap();
+    scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+
+    let episodes = library
+        .items(&LibraryQuery {
+            kind: Some("series".into()),
+            ..LibraryQuery::page(10)
+        })
+        .unwrap();
+    assert_eq!(episodes.len(), 2, "two episodes, one per show");
+    assert_ne!(episodes[0].work_id, episodes[1].work_id, "two works");
+    let mut years: Vec<_> = episodes.iter().filter_map(|item| item.year).collect();
+    years.sort();
+    assert_eq!(years, vec![2001, 2005]);
+}
+
+#[test]
 fn young_files_and_download_sidecars_are_not_imported() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();

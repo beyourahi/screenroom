@@ -91,6 +91,18 @@ pub fn parse_filename(filename: &str, folder: Option<&str>) -> ParsedName {
     let year = year_match
         .and_then(|m| m.as_str().parse::<i64>().ok())
         .filter(|value| (1800..=2200).contains(value));
+    // A show's year lives on its folder (`From (2022)`), never in its episode
+    // names, so an episodic file with no year of its own takes the folder's.
+    // Without it every series has a null year and two shows that share a title
+    // in one source merge into a single work. Movies are left alone: a folder
+    // year there is a collection label (`Duology (2009-2011)`), not a release
+    // year, and guessing would be worse than leaving it empty.
+    let year = year.or_else(|| {
+        episodic
+            .is_some()
+            .then(|| folder.and_then(folder_year))
+            .flatten()
+    });
 
     let cut = year_match
         .map(|m| m.start())
@@ -154,6 +166,17 @@ fn stem_of(filename: &str) -> String {
         .file_stem()
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_else(|| filename.to_string())
+}
+
+/// The year in a folder label, if it has one.
+fn folder_year(folder: &str) -> Option<i64> {
+    let label = Path::new(folder)
+        .file_name()?
+        .to_string_lossy()
+        .into_owned();
+    YEAR.find(&label)
+        .and_then(|matched| matched.as_str().parse::<i64>().ok())
+        .filter(|value| (1800..=2200).contains(value))
 }
 
 fn clean(value: &str) -> String {
@@ -235,6 +258,39 @@ mod tests {
         assert_eq!(parsed.title, "Show");
         assert_eq!(parsed.season, Some(1));
         assert_eq!(parsed.episode, Some(4));
+    }
+
+    #[test]
+    fn an_episode_takes_the_show_year_from_its_folder() {
+        // What a real library looks like: the year is on the show folder, and
+        // the episode files carry none at all.
+        let parsed = parse_filename(
+            "From (2022)/Season 02/From - s02e04.mkv",
+            Some("From (2022)"),
+        );
+        assert_eq!(parsed.kind, MediaKind::Series);
+        assert_eq!(parsed.title, "From");
+        assert_eq!(parsed.year, Some(2022));
+        assert_eq!(parsed.season, Some(2));
+        assert_eq!(parsed.episode, Some(4));
+    }
+
+    #[test]
+    fn a_folder_year_does_not_override_the_filename() {
+        let parsed = parse_filename("Show.2021.S01E01.mkv", Some("Show (2019)"));
+        assert_eq!(parsed.year, Some(2021));
+    }
+
+    #[test]
+    fn a_collection_folder_year_is_not_applied_to_a_movie() {
+        // `Duology (2009-2011)` names a range, not a release year. A film whose
+        // name has no year stays without one rather than borrowing 2009.
+        let parsed = parse_filename(
+            "Sherlock Holmes A Game Of Shadows.mkv",
+            Some("Sherlock Holmes Duology (2009-2011)"),
+        );
+        assert_eq!(parsed.kind, MediaKind::Movie);
+        assert_eq!(parsed.year, None);
     }
 
     #[test]

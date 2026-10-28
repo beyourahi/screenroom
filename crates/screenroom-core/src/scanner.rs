@@ -264,13 +264,12 @@ impl<'a> LibraryScanner<'a> {
                         issues.push(&relative, "depth_limit");
                         continue;
                     }
-                    let hidden = entry.file_name().to_string_lossy().starts_with('.');
-                    if !hidden {
+                    if !is_hidden_name(&entry.file_name()) {
                         queue.push_back((path, depth + 1));
                     }
                     continue;
                 }
-                if !file_type.is_file() || !is_media(&path) {
+                if !file_type.is_file() || is_hidden_name(&entry.file_name()) || !is_media(&path) {
                     continue;
                 }
                 if !entry_has_utf8_name(&path) {
@@ -422,6 +421,18 @@ impl Drop for ScanGuard<'_> {
     fn drop(&mut self) {
         self.library.release_scan(&self.source_id);
     }
+}
+
+/// Whether a directory entry is a dot-file or dot-folder.
+///
+/// On a volume that cannot hold resource forks — an exFAT USB drive is the
+/// common case for a media library — macOS writes an AppleDouble companion
+/// (`._Name.mkv`) beside every file. Those companions keep the media extension,
+/// so treating them as media invents titles like `._12 Angry Men - 1957`, counts
+/// every file twice and offers playback of 4 KiB of metadata. They are skipped
+/// silently: they are not a scan problem the viewer can act on.
+fn is_hidden_name(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy().starts_with('.')
 }
 
 fn is_media(path: &Path) -> bool {
