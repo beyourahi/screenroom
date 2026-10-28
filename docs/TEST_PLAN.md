@@ -95,6 +95,8 @@ UI automation is opt-in via `SCREENROOM_ALLOW_FOREGROUND=1` and refuses without 
 | `cargo run -p screenroom-player --example capability` | no | no | Which libmpv this host resolved |
 | `crates/screenroom-player/examples/audio_clock.rs` | no | no | Audio clock against real decoding |
 | `crates/screenroom-player/examples/render_bench.rs` | no | no | Decode → render → frame delivery rate, time to first frame and command latency, entirely offscreen |
+| `crates/screenroom-player/examples/play_file.rs <file>...` | no | no | Real files through the real worker: open or the player's own failure, tracks (including external subtitles), the audio device clock advancing, delivery rate, seek round trip, subtitle read-back, audio switching. Muted; optionally dumps one frame as a PNG for looking at |
+| `scripts/probe-library.sh <root> <out.jsonl>` | no | no | Every file's container, codecs and streams via ffprobe, four reads deep, output outside the media root. Read-only on the drive: no thumbnails, databases or temporary files land there |
 | `scripts/check-quit-routing.sh` | hidden | **no** | That the menu bar's Quit was re-pointed at the window's close action |
 | `scripts/verify-quit.sh` | yes | **yes** — opt-in only | That a real dismissal stores the final position and closes the session |
 | `scripts/drive-app.sh`, `capture-window.sh` raise | yes | **yes** — opt-in only | Screenshots and keyboard journeys |
@@ -116,14 +118,14 @@ and render path with no window, but **not** an on-screen frame rate. iced, the w
 upload and the compositor add cost it cannot see, so its numbers are a ceiling on
 what the display can reach, not a substitute for measuring the display.
 
-What runs today (`cargo test --workspace`, **189 tests, 0 failures** on macOS ARM64):
+What runs today (`cargo test --workspace`, **222 tests, 0 failures** on macOS ARM64):
 
 | Suite | Proves |
 | --- | --- |
 | `screenroom-core` unit | filename interpretation, fingerprints |
 | `core/tests/library.rs` | sources, scanning, ingestion, paging, playback invariants, lists, per-viewer isolation, path case semantics on both branches |
 | `core/tests/storage.rs` | typed preferences including subtitle size/position (refused outside range on write, clamped on read), backup round-trip, restore validation and its refusals |
-| `core/tests/scanner.rs` | bounded scan, cancellation, symlinks, settle window, an unplugged drive, a root replaced by a symlink |
+| `core/tests/scanner.rs` | bounded scan, cancellation, symlinks, settle window, an unplugged drive, a root replaced by a symlink, **AppleDouble `._*` companions skipped**, **two same-titled shows at different years kept apart** |
 | `core/tests/recovery.rs` | crash-state normalisation, damaged and future databases, progress across recovery |
 | `core/tests/scale.rs` | 10,000-item paging, search and count inside a budget |
 | `screenroom-player` unit | state machine, options, property mapping |

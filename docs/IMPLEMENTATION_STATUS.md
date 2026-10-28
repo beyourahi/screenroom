@@ -89,8 +89,8 @@ Implemented in `crates/screenroom-core`:
 | Schema | `open`, `open_in_memory` | future schema fails closed without data loss; integrity check; crash normalisation |
 | Recovery | reopening after a crash | an open session is closed, a running job is requeued, progress survives the whole recovery sequence, a damaged database is reported rather than replaced |
 
-Test totals: 35 unit (`filename`, `fingerprint`, `artwork`, `markers`,
-`recommend`, library migration), 27 store (`tests/library.rs`), 10 scanner
+Test totals: 38 unit (`filename`, `fingerprint`, `artwork`, `markers`,
+`recommend`, library migration), 27 store (`tests/library.rs`), 12 scanner
 (`tests/scanner.rs`), 19 storage (`tests/storage.rs`), 7 recovery
 (`tests/recovery.rs`), 2 scale (`tests/scale.rs`).
 
@@ -175,6 +175,114 @@ unit test in `library/mod.rs` opens a schema 3 library and asserts the four inde
 exist and the profile survives. The ingest cost of maintaining them is real but
 small: 10,000 entries in 394 ms with the indexes against 440 ms without in one
 comparable pair of runs.
+
+### The real library on a USB SSD (2026-10-29)
+
+Everything above was measured on generated fixtures. This is the owner's actual
+movie and TV library on an exFAT USB drive, read-only, scanned into a **separate
+test database** (`SCREENROOM_LIBRARY`), with the real library's checksum taken before
+and after and unchanged. The drive was never written to: no thumbnails, databases,
+logs or temporary files, and no mount, permission or repair operation.
+
+**Inventory, built from the mounted filesystem rather than from the earlier tree
+snapshot:** 830 media files (729 `.mkv`, 101 `.mp4`), 941.1 GiB, mean 1,161 MiB;
+19 show folders, 291 films; 539 files with an `SxxEyy` name; 21 sidecar `.srt`; two
+filenames with non-ASCII characters, 20 with apostrophes, 3 with colons; two files at
+depth 6 inside a `Duology` folder. `AppleDouble` `._*` companions, `Auto Data Backup`
+and the hidden directories were excluded from the inventory by rule.
+
+**Scan (release build, metadata only — no media content read):**
+
+| Run | Visited | Imported | Issues | Wall | Peak RSS |
+| --- | --- | --- | --- | --- | --- |
+| First scan | 1,002 | 830 | 0 | 3.59 s | 8.2 MB |
+| Rescan of the same library | 1,002 | 830 | 0 | 2.31 s | — |
+
+Resulting catalogue: 830 files, 291 films, 18 series, 53 seasons, 539 episodes,
+539 file↔episode links, **zero** files whose stored season/episode disagrees with
+its episode row, and 830 editions after the rescan (no duplicates). Every episode
+count per show matches an independent count of the folder: 149/149 The Mentalist,
+72/72 Suits, 40/40 From, 30/30 Jack Ryan, 26/26 What If, 26/26 House of the Dragon,
+and so on for all 18.
+
+`scripts/probe-library.sh` then read every file's container, codecs and streams with
+ffprobe (bounded to four concurrent reads, output outside the media root):
+
+| | Count |
+| --- | --- |
+| Probed | 830 |
+| Readable | 827 |
+| **Unreadable (truncated MP4, `moov atom not found`)** | **3** |
+| Video — HEVC Main 10 / HEVC Main | 396 / 251 |
+| Video — H.264 High / Main / High 10 | 119 / 16 / 1 |
+| Video — AV1 Main 10 / MPEG-4 Simple | 43 / 1 |
+| Files with embedded subtitle streams | 646 (3,785 SubRip, 375 PGS, 210 ASS, 164 DVD, 9 mov_text) |
+| Audio tracks per file — 1 / 2 / 3 / 4 | 659 / 160 / 7 / 1 |
+| Audio codecs | AAC, AC-3, E-AC-3, Opus, DTS, Vorbis, MP3 |
+| Anamorphic (SAR ≠ 1:1) / ≥ 3840 px wide | 8 / 8 |
+| Files with embedded cover art | 115 (68 JPEG, 47 PNG) |
+
+The three unreadable files are the Cloverfield trilogy. They are catalogued (the
+scanner sees a file and records it) and the player reports the failure honestly:
+`decode_failed — unrecognized file format`. They are not silently skipped, and the
+scan is not treated as incomplete because of them.
+
+**Playback, offscreen, through the real worker** (`examples/play_file.rs`, muted,
+four-second windows):
+
+| File | Codec / container | First frame | Delivery | Audio clock | Seek |
+| --- | --- | --- | --- | --- | --- |
+| Superman (2025) | HEVC 10-bit, PGS + 7 SubRip | 4.5 s | 23.7 fps, worst gap 51 ms | 4.01 s / 4.00 s | 88 ms |
+| Avengers Infinity War | HEVC 4K → 1920×800 target | 2.1 s | 24.0 fps | 3.96 s / 4.00 s | 116 ms |
+| Suits S07E02 | AV1 10-bit, Opus 5.1 | 0.4 s | 24.0 fps | 3.86 s / 4.00 s | 90 ms |
+| Tulsa King S01E01 | HEVC, external `.srt` picked up | 1.5 s | 24.0 fps | 4.00 s / 4.00 s | 88 ms |
+| The Shining | H.264 High 10, DTS 5.1 | 3.6 s | 24.0 fps | 3.00 s / 3.00 s | — |
+| Predators | H.264, 4 audio tracks | 0.2 s | 24.3 fps | 3.00 s / 3.00 s | — |
+| The Hitman's Bodyguard | MPEG-4 Simple, 1280×536 | 1.4 s | 24.0 fps | 3.02 s / 3.00 s | — |
+| Terrifier (2016) | H.264 High, AC-3 | 2.2 s | 23.7 fps | 4.00 s / 4.00 s | 76 ms |
+| Cloverfield (2008) | broken MP4 | **failed** — `decode_failed` | — | — | — |
+
+Audio track switching (to the last of four) and subtitle `sub-scale`/`sub-pos`
+read-back were confirmed on every file that has them, and external sidecar SRTs are
+loaded by libmpv itself and appear as an `external=true` subtitle track. Anamorphic
+content arrives letterboxed inside the frame (Tulsa King: 1920×1080 with 60 px bars),
+not stretched.
+
+**Posters.** The hidden-window application ran against the test database and wrote
+21 JPEG posters (400 px wide, 180 KB total) for the works on screen, from the real
+files through ffmpeg. Sampled by hand, one is a real frame rather than a card.
+
+#### Defects found by the real library, and fixed
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| 21 extra entries with titles like `._12 Angry Men - 1957`, and 3 phantom episodes | macOS AppleDouble companions keep the media extension; the walk skipped hidden **directories** but not hidden **files** | skip dot-files in the walk, silently (`scanner.rs`); regression test `apple_double_companions_are_not_media` |
+| All 18 series had a null year | the year only came from the episode filename, and episode names never carry it — the show folder does | an episodic file with no year of its own takes the show folder's (`filename.rs`); a film in a collection folder does not, because `Duology (2009-2011)` is a range, not a release year. Test: two `The Office` shows at different years stay two works |
+| A cover-art JPEG appeared as a selectable **video** track | `track-list` reports embedded artwork as video; it was listed like a second angle | skip video tracks with `image=yes` (`worker.rs`); `Predators` now lists one video track, not two |
+| Only the first 16 posters of a 24-card page were ever extracted; the rest stayed blank until a key was pressed | the queue is 16 deep and nothing refilled it when an extraction finished | refill the freed slot on the next poll, for works on screen only — not a library-wide marathon (`app.rs`) |
+
+Measured after the fixes: 830 imported (was 851), 18 series with years (was 0), one
+video track on a file with cover art (was two), 21 posters for the visible works
+(was 16).
+
+#### What the real library still does not do
+
+- **No stored durations.** `editions.duration_ms` is `0` for all 830 files until each
+  one is played, so the catalogue cannot show runtimes or a progress bar for an
+  unwatched film, and `mark_segment` answers `duration_unknown` before first play.
+  Deliberate so far (the player reports the truth when it opens the file), but on a
+  real library it is visible as a missing runtime on every card.
+- **Posters are film frames, not cover art.** 115 files carry an embedded cover
+  image which would be a better poster for those; the extractor samples 10% into
+  the video instead.
+- **Anamorphic content is letterboxed twice**: the frame already carries 60 px bars,
+  and the window fits the 1920×1080 frame as 16:9, so a 2:1 film is drawn smaller
+  than it needs to be. Not stretched, just not optimal.
+- **Hardware decoding is still off** (`hwdec=no` by design for the CPU bridge), which
+  is why a 4K HEVC film takes ~2 s to first frame and decodes in software.
+- **On-screen behaviour is unverified.** Every number above is offscreen: no window,
+  no GPU surface, nothing heard. Resume-after-quit, full-screen, the D-pad-free
+  keyboard journey and the on-screen frame budget still need a permissioned session.
 
 Design choice worth keeping: the Rust schema is byte-compatible with the layout the
 Flutter candidate wrote (`user_version = 2`), so an existing on-device library opens
