@@ -70,7 +70,8 @@ emulator only.
 | `pnpm build` | typecheck + Vite + the Tizen staging step, one `main.js` of **541,802 bytes** (sha256 `3e46079b…4d85`), no code splitting |
 | `apps/tv/build/widget/` | staged: `config.xml`, `icon.png`, `index.html`, `main.js`, and the project metadata |
 | Browser preview (`vite`, 1920×1080) | Home draws the catalogue (`1200 files in the library`, `Row 3 of 240` after two presses of Down); the rail is focusable and opens every destination; Movies shows 600 of them; Search types a query and lists matches; Media Sources and Settings draw and scroll; Detail opens the chosen card; Play reaches the player and reports honestly that this host cannot convert a drive location into a file address |
-| Signed package | **not rebuilt in this session.** The `.wgt` on the set is the older one; packaging is the next step and its hash must be recorded here when it exists |
+| Signed package | **built, not installed.** `build/ScreenroomTV-0.1.0.wgt`, **171,894 bytes**, sha256 `c30ee97ffbe837dc09fd000c4ec20534ae8e9c4f43b77d4963563590ef6240a7`, produced by the `tizen-build-project` runner with **no warnings** (so not the SDK's default test certificates). Its `main.js` is byte-identical to `dist/main.js` (`3e46079b…4d85`), and the package holds exactly `author-signature.xml`, `config.xml`, `icon.png`, `index.html`, `main.js`, `signature1.xml` |
+| The set is reachable | `remote-device-cli connect 192.168.0.172:26101` → `status: connected` on the first attempt (2026-10-29). **Nothing was installed or launched**; the owner's background-first policy makes installing a separate, explicit step |
 
 **This is not a TV receipt.** The preview has no AVPlay, no USB storage, no remote, and
 no Tizen engine. It proves layout, the navigation arithmetic and that failure copy is
