@@ -29,6 +29,7 @@ const AUDIO_LANGUAGE: &str = "audioLanguage";
 const SUBTITLE_SCALE: &str = "subtitleScalePercent";
 const SUBTITLE_POSITION: &str = "subtitlePositionPercent";
 const DEFAULT_PROFILE: &str = "defaultProfileId";
+const VOLUME_PERCENT: &str = "volumePercent";
 
 /// Normal subtitle text size, as a percentage.
 const SUBTITLE_SCALE_NORMAL: u16 = 100;
@@ -76,6 +77,11 @@ pub struct Preferences {
     /// a preference that means something different from the property it sets is
     /// how a setting and its effect drift apart.
     pub subtitle_position_percent: u16,
+    /// Output volume, in percent of libmpv's 0-100 scale.
+    ///
+    /// Stored because a viewer who turned the film down should not be shouted at
+    /// by the next one. 100 is libmpv's own default and the honest starting point.
+    pub volume_percent: u16,
     /// Profile the app opens with.
     ///
     /// `None` means "first profile", which is what a single-viewer device wants.
@@ -102,6 +108,7 @@ impl Default for Preferences {
             audio_language: None,
             subtitle_scale_percent: SUBTITLE_SCALE_NORMAL,
             subtitle_position_percent: SUBTITLE_POSITION_BOTTOM,
+            volume_percent: 100,
             default_profile: None,
         }
     }
@@ -140,6 +147,9 @@ impl Library {
                         SUBTITLE_POSITION_BOTTOM,
                     )
                 }
+                VOLUME_PERCENT => {
+                    preferences.volume_percent = percent(&value, 0, 100, 100);
+                }
                 DEFAULT_PROFILE => preferences.default_profile = text(&value),
                 // A key written by a newer build is preserved, not deleted: this
                 // build does not know what it means, but it belongs to the user.
@@ -174,6 +184,13 @@ impl Library {
             Preferences::SUBTITLE_POSITION_MAX_PERCENT,
             "subtitle_position_out_of_range",
             "Subtitle position must be between 0% and 100% of the screen height.",
+        )?;
+        let volume = within(
+            preferences.volume_percent,
+            0,
+            100,
+            "volume_out_of_range",
+            "Volume must be between 0% and 100%.",
         )?;
         let default_profile = preferences
             .default_profile
@@ -219,6 +236,7 @@ impl Library {
         write_optional(&tx, AUDIO_LANGUAGE, audio.as_deref())?;
         write(&tx, SUBTITLE_SCALE, &scale.to_string())?;
         write(&tx, SUBTITLE_POSITION, &position.to_string())?;
+        write(&tx, VOLUME_PERCENT, &volume.to_string())?;
         write_optional(&tx, DEFAULT_PROFILE, default_profile.as_deref())?;
         tx.commit()?;
         Ok(())

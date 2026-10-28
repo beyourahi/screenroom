@@ -404,6 +404,12 @@ pub struct App {
     frame: Option<Frame>,
     active: Option<Active>,
     scrub: Option<f64>,
+    /// Volume the viewer is dragging right now, in percent.
+    ///
+    /// Held only while a drag is in flight so the knob follows the pointer
+    /// instead of the player, whose read-back arrives a frame or two later. Cleared
+    /// on release, after which the player's own value is what is drawn.
+    volume_drag: Option<f64>,
 
     /// Intro and credits markers stored for the file now open.
     markers: Vec<SegmentMarker>,
@@ -446,6 +452,11 @@ pub struct App {
     new_root: String,
     scan_token: Option<ScanToken>,
     scan_events: Option<Receiver<ScanEvent>>,
+    /// Entries walked and files imported by the running scan, for its progress row.
+    scan_visited: u64,
+    scan_imported: u64,
+    /// When the running scan started, in Unix milliseconds.
+    scan_started_ms: Option<i64>,
     status: Option<String>,
     error: Option<String>,
 
@@ -515,6 +526,14 @@ pub enum Message {
     NewRootChanged(String),
     /// Grant and scan the folder in the text field.
     AddFolder,
+    /// Choose a folder with the platform's own dialog and add it.
+    ChooseFolder,
+    /// Choose the new location for the folder being relinked.
+    ChooseRelinkFolder,
+    /// Choose where a backup is written.
+    ChooseBackupPath,
+    /// Choose a backup file to restore or inspect.
+    ChooseRestoreFile,
     /// Cancel a running scan.
     CancelScan,
     /// Rescan one folder the library already holds.
@@ -579,6 +598,12 @@ pub enum Message {
     Scrub(f64),
     /// Commit the scrubbed position.
     SeekCommit,
+    /// The volume control moved, in percent; the player follows immediately.
+    Volume(f64),
+    /// The volume drag ended, so the value is stored.
+    VolumeCommit,
+    /// Mute or unmute the output.
+    ToggleMute,
     /// Seek by a fixed step, positive forwards.
     SeekStep(f64),
     /// Choose a track, or turn a kind off with [`NO_TRACK`].
@@ -723,6 +748,7 @@ impl App {
             frame: None,
             active: None,
             scrub: None,
+            volume_drag: None,
             markers: Vec::new(),
             mark_pending: None,
             auto_skipped: None,
@@ -742,6 +768,9 @@ impl App {
             new_root: String::new(),
             scan_token: None,
             scan_events: None,
+            scan_visited: 0,
+            scan_imported: 0,
+            scan_started_ms: None,
             status: None,
             error,
             // Only a launch arms this; see the field's own note.
@@ -1182,6 +1211,9 @@ impl App {
             f64::from(self.preferences.subtitle_scale_percent) / 100.0,
             f64::from(self.preferences.subtitle_position_percent),
         );
+        // Likewise the level: a viewer who turned the last film down should not be
+        // greeted by full volume on the next one.
+        player.set_volume(f64::from(self.preferences.volume_percent));
         player.load_at(&path, Some(resume as f64 / 1_000.0));
         self.active = Some(Active {
             tracker: opened.tracker,
@@ -1702,6 +1734,63 @@ impl App {
         }
     }
 
+    /// How loud the output is, as the volume control should draw it.
+    ///
+    /// The drag wins while it is in flight so the knob follows the pointer; then
+    /// the player's own read-back, so the control shows what is really happening;
+    /// then the stored preference, because a player that has not reported `volume`
+    /// yet must still start at the viewer's setting rather than at an empty control.
+    fn volume_percent(&self) -> f64 {
+        self.volume_drag
+            .or(self.snapshot.volume)
+            .unwrap_or(f64::from(self.preferences.volume_percent))
+            .clamp(0.0, 100.0)
+    }
+
+    /// Sends a dragged volume to the player without storing it yet.
+    ///
+    /// Storing on every step of a drag would write the database on each pixel of
+    /// travel; the value is stored once, when the drag ends.
+    fn drag_volume(&mut self, percent: f64) {
+        if !percent.is_finite() {
+            return;
+        }
+        let percent = percent.clamp(0.0, 100.0);
+        self.volume_drag = Some(percent);
+        if let Some(player) = &self.player {
+            player.set_volume(percent);
+        }
+    }
+
+    /// Stores the volume the drag ended on.
+    fn commit_volume(&mut self) {
+        let Some(percent) = self.volume_drag.take() else {
+            return;
+        };
+        let stored = round_percent(percent, 0, 100);
+        if stored == self.preferences.volume_percent {
+            return;
+        }
+        let preferences = Preferences {
+            volume_percent: stored,
+            ..self.preferences.clone()
+        };
+        self.save_preferences(preferences);
+    }
+
+    /// Mutes or unmutes the output.
+    ///
+    /// Not stored: mute is a momentary decision about this viewing, while the
+    /// volume beside it is the level the viewer wants next time.
+    fn toggle_mute(&mut self) {
+        let Some(player) = &self.player else {
+            return;
+        };
+        let muted = !self.snapshot.muted.unwrap_or(false);
+        player.set_muted(muted);
+        self.status = Some(if muted { "Muted." } else { "Sound on." }.to_string());
+    }
+
     /// Stores a subtitle style and shows it on any subtitle already on screen.
     ///
     /// Both halves matter: the stored value is what the next viewing inherits, and
@@ -1929,16 +2018,93 @@ impl App {
         }
     }
 
-    /// Grants the typed folder and scans it on a worker thread.
+    /// Opens the platform folder chooser and adds what it returns.
     ///
-    /// Scanning never blocks the UI, and a second scan of one source is refused
-    /// by the core rather than racing the first.
+    /// The dialog is modal, so the app is unresponsive until it closes; that is
+    /// the platform's own behaviour for a folder chooser and is preferable to a
+    /// hand-built browser that cannot see every mounted volume.
+    fn choose_folder(&mut self) {
+        let start = self
+            .sources
+            .first()
+            .map(|source| PathBuf::from(&source.root_path));
+        match crate::picker::choose_folder(start.as_deref()) {
+            crate::picker::Picked::Path(folder) => {
+                self.new_root = folder.to_string_lossy().to_string();
+                self.add_root(folder.to_string_lossy().to_string());
+            }
+            crate::picker::Picked::Cancelled => {}
+            crate::picker::Picked::Unavailable(reason) => {
+                self.status = Some(reason.to_string());
+            }
+        }
+    }
+
+    /// Opens the chooser for the new location of the folder being relinked.
+    fn choose_relink_folder(&mut self) {
+        if self.relink_target.is_none() {
+            self.status = Some("Choose the folder to relink first.".to_string());
+            return;
+        }
+        match crate::picker::choose_folder(None) {
+            crate::picker::Picked::Path(folder) => {
+                self.relink_path = folder.to_string_lossy().to_string();
+                self.relink_source();
+            }
+            crate::picker::Picked::Cancelled => {}
+            crate::picker::Picked::Unavailable(reason) => {
+                self.status = Some(reason.to_string());
+            }
+        }
+    }
+
+    /// Suggests the dated backup name in the platform save panel.
+    fn choose_backup_path(&mut self) {
+        let name = self
+            .backup_path
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("screenroom-backup.db")
+            .to_string();
+        let start = Path::new(&self.backup_path).parent().map(Path::to_path_buf);
+        match crate::picker::choose_backup_path(start.as_deref(), &name) {
+            crate::picker::Picked::Path(path) => {
+                self.backup_path = path.to_string_lossy().to_string();
+            }
+            crate::picker::Picked::Cancelled => {}
+            crate::picker::Picked::Unavailable(reason) => self.status = Some(reason.to_string()),
+        }
+    }
+
+    fn choose_restore_file(&mut self) {
+        let start = Path::new(&self.restore_path)
+            .parent()
+            .map(Path::to_path_buf);
+        match crate::picker::choose_restore_file(start.as_deref()) {
+            crate::picker::Picked::Path(path) => {
+                self.restore_path = path.to_string_lossy().to_string();
+                self.armed_restore = None;
+            }
+            crate::picker::Picked::Cancelled => {}
+            crate::picker::Picked::Unavailable(reason) => self.status = Some(reason.to_string()),
+        }
+    }
+
     fn add_folder(&mut self) {
         let raw = self.new_root.trim().to_string();
         if raw.is_empty() {
             self.error = Some("Type or paste an absolute folder path first.".to_string());
             return;
         }
+        self.add_root(raw);
+    }
+
+    /// Grants one canonical root and scans it.
+    ///
+    /// A root that is already granted is reused rather than refused: the whole
+    /// point of choosing the same folder again is to rescan it.
+    fn add_root(&mut self, raw: String) {
         let root = PathBuf::from(&raw);
         if !root.is_absolute() {
             self.error = Some("Choose an absolute folder path.".to_string());
@@ -1968,6 +2134,9 @@ impl App {
     fn start_scan(&mut self, source_id: String) {
         let token = ScanToken::new();
         self.scan_token = Some(token.clone());
+        self.scan_visited = 0;
+        self.scan_imported = 0;
+        self.scan_started_ms = Some(now_ms());
         self.status = Some("Scanning…".to_string());
         let (sender, receiver) = std::sync::mpsc::channel();
         self.scan_events = Some(receiver);
@@ -2019,6 +2188,8 @@ impl App {
                     done,
                     complete,
                 }) => {
+                    self.scan_visited = visited;
+                    self.scan_imported = imported;
                     if done {
                         finished = true;
                         status = Some(if complete {
@@ -2053,8 +2224,50 @@ impl App {
         if finished {
             self.scan_events = None;
             self.scan_token = None;
+            self.scan_started_ms = None;
             self.reload();
         }
+    }
+
+    /// The progress row shown while a scan is running.
+    ///
+    /// A walk cannot know how many files a folder holds before it has counted
+    /// them, so this reports what it has actually done — entries visited, files
+    /// imported, how long it has run — instead of a bar that would have to invent
+    /// a percentage.
+    fn scan_strip(&self) -> Option<Element<'_, Message>> {
+        // No scan, no strip: the row exists only while there is something to
+        // report and a scan to cancel.
+        self.scan_token.as_ref()?;
+        let tokens = design::tokens();
+        let elapsed = self
+            .scan_started_ms
+            .map(|started| (now_ms() - started).max(0) / 1_000)
+            .unwrap_or(0);
+        Some(
+            container(
+                row![
+                    text("Scanning").size(tokens.type_scale.label),
+                    text(format!(
+                        "{} entries · {} imported · {}s",
+                        self.scan_visited, self.scan_imported, elapsed
+                    ))
+                    .size(tokens.type_scale.caption)
+                    .color(tokens.palette.ink_muted),
+                    Space::new().width(Length::Fill),
+                    button(text("Cancel scan").size(tokens.type_scale.caption))
+                        .on_press(Message::CancelScan)
+                        .style(design::quiet_style(false))
+                        .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+                ]
+                .spacing(tokens.spacing.field_x)
+                .align_y(Alignment::Center),
+            )
+            .style(|_theme| design::container_style(Level::Panel, false))
+            .padding(tokens.spacing.field_y)
+            .width(Length::Fill)
+            .into(),
+        )
     }
 
     // ---------------------------------------------------------------- update
@@ -2170,6 +2383,10 @@ impl App {
 
             Message::NewRootChanged(value) => self.new_root = value,
             Message::AddFolder => self.add_folder(),
+            Message::ChooseFolder => self.choose_folder(),
+            Message::ChooseRelinkFolder => self.choose_relink_folder(),
+            Message::ChooseBackupPath => self.choose_backup_path(),
+            Message::ChooseRestoreFile => self.choose_restore_file(),
             Message::RescanSource(source_id) => self.rescan_source(source_id),
             Message::RemoveSource(source_id) => self.remove_source(source_id),
             Message::CancelArmed => {
@@ -2260,6 +2477,9 @@ impl App {
 
             Message::BackFromPlayer => self.leave_player(),
             Message::TogglePlay => self.toggle_play(),
+            Message::Volume(percent) => self.drag_volume(percent),
+            Message::VolumeCommit => self.commit_volume(),
+            Message::ToggleMute => self.toggle_mute(),
             Message::Scrub(seconds) => self.scrub = Some(seconds),
             Message::SeekCommit => self.commit_seek(),
             Message::SeekStep(delta) => self.seek_step(delta),
@@ -2505,15 +2725,17 @@ impl App {
             Screen::Player => self.player_view(),
             Screen::Settings => self.settings_view(),
         };
-        container(
-            column![self.header(), body, self.footer()]
-                .spacing(design::tokens().spacing.content_pad),
-        )
-        .style(|_theme| design::page_style())
-        .padding(design::tokens().spacing.shell_pad)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        let mut shell = column![self.header()];
+        if let Some(strip) = self.scan_strip() {
+            shell = shell.push(strip);
+        }
+        shell = shell.push(body).push(self.footer());
+        container(shell.spacing(design::tokens().spacing.content_pad))
+            .style(|_theme| design::page_style())
+            .padding(design::tokens().spacing.shell_pad)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     /// The persistent top bar: where you are, what is playing locally, and the
@@ -2681,11 +2903,21 @@ impl App {
     /// The folder-granting control. Without it an empty library has no way out.
     fn add_folder_row(&self) -> Element<'_, Message> {
         let tokens = design::tokens();
+        let first_run = self.sources.is_empty();
         container(
             column![
-                text("Add a folder of your own media").size(tokens.type_scale.label),
+                text(if first_run {
+                    "Choose a folder of your own media"
+                } else {
+                    "Add another folder"
+                })
+                .size(tokens.type_scale.label),
                 row![
-                    text_input("Absolute folder path", &self.new_root)
+                    button(text("Choose a folder…").size(tokens.type_scale.label))
+                        .on_press(Message::ChooseFolder)
+                        .style(design::action_style(true))
+                        .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+                    text_input("…or type an absolute path", &self.new_root)
                         .on_input(Message::NewRootChanged)
                         .on_submit(Message::AddFolder)
                         .style(design::input_style())
@@ -2693,14 +2925,19 @@ impl App {
                         .width(Length::Fill),
                     button(text("Add and scan").size(tokens.type_scale.label))
                         .on_press(Message::AddFolder)
-                        .style(design::action_style(false))
+                        .style(design::quiet_style(false))
                         .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
                 ]
                 .spacing(tokens.spacing.field_x)
                 .align_y(Alignment::Center),
-                text("Files are read in place and never moved, renamed or deleted.")
-                    .size(tokens.type_scale.micro)
-                    .color(tokens.palette.ink_muted),
+                text(if first_run {
+                    "Movies and episodes stay where they are. Screenroom reads them in place, \
+                     keeps posters and positions in its own library, and needs no network."
+                } else {
+                    "Files are read in place and never moved, renamed or deleted."
+                })
+                .size(tokens.type_scale.micro)
+                .color(tokens.palette.ink_muted),
                 if self.artwork_failures > 0 {
                     text(format!(
                         "{} title(s) had no readable frame, so they keep a title-only card.",
@@ -3359,6 +3596,11 @@ impl App {
                             .size(tokens.type_scale.micro)
                             .color(tokens.palette.ink_muted),
                         note(source_state_label(source.state)),
+                        if source.last_scan_ms.is_none() {
+                            note("This folder has not finished a scan yet.")
+                        } else {
+                            note("Last scan completed.")
+                        },
                     ]
                     .spacing(tokens.spacing.field_y / 2.0),
                 )
@@ -3414,6 +3656,10 @@ impl App {
                         // is chosen, which reads as a broken control rather than
                         // as one waiting for a choice.
                         .placeholder("Choose a folder"),
+                        button(text("Choose…").size(tokens.type_scale.label))
+                            .on_press(Message::ChooseRelinkFolder)
+                            .style(design::quiet_style(false))
+                            .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
                         text_input("New location, for example /Volumes/Media", &self.relink_path)
                             .on_input(Message::RelinkPathChanged)
                             .on_submit(Message::RelinkSource)
@@ -3438,6 +3684,10 @@ impl App {
         let data = column![
             text("Back up".to_string()).size(tokens.type_scale.label),
             row![
+                button(text("Choose…").size(tokens.type_scale.label))
+                    .on_press(Message::ChooseBackupPath)
+                    .style(design::quiet_style(false))
+                    .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
                 text_input("Backup file path", &self.backup_path)
                     .on_input(Message::BackupPathChanged)
                     .on_submit(Message::BackupNow)
@@ -3454,6 +3704,10 @@ impl App {
             Space::new().height(tokens.spacing.field_y),
             text("Restore".to_string()).size(tokens.type_scale.label),
             row![
+                button(text("Choose…").size(tokens.type_scale.label))
+                    .on_press(Message::ChooseRestoreFile)
+                    .style(design::quiet_style(false))
+                    .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
                 text_input("Backup file to restore from", &self.restore_path)
                     .on_input(Message::RestorePathChanged)
                     .on_submit(Message::InspectRestore)
@@ -3556,6 +3810,8 @@ impl App {
 
         let duration = self.snapshot.duration.max(0.0);
         let position = self.scrub.unwrap_or(self.snapshot.position);
+        let muted = self.snapshot.muted.unwrap_or(false);
+        let volume = self.volume_percent();
         let controls = row![
             button(text(play_action(self.snapshot.state).label()).size(tokens.type_scale.label))
                 .on_press(Message::TogglePlay)
@@ -3567,6 +3823,24 @@ impl App {
                 .step(0.1)
                 .width(Length::Fill),
             text(clock(duration)).size(tokens.type_scale.caption),
+        ]
+        .spacing(tokens.spacing.field_x)
+        .align_y(Alignment::Center);
+        // Volume sits with the transport rather than on a separate screen: it is
+        // the one thing a viewer reaches for without leaving the film. The label
+        // reads the player's own level, so "50%" never sits beside silence.
+        let volume_row = row![
+            button(text(if muted { "Unmute" } else { "Mute" }).size(tokens.type_scale.label))
+                .on_press(Message::ToggleMute)
+                .style(design::quiet_style(muted))
+                .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+            slider(0.0..=100.0, volume, Message::Volume)
+                .on_release(Message::VolumeCommit)
+                .step(1.0)
+                .width(160.0),
+            text(format!("{:.0}%", volume))
+                .size(tokens.type_scale.caption)
+                .color(tokens.palette.ink_muted),
         ]
         .spacing(tokens.spacing.field_x)
         .align_y(Alignment::Center);
@@ -3722,8 +3996,10 @@ impl App {
         .spacing(tokens.spacing.field_x);
 
         container(
-            column![header, surface, controls, segments, track_row, footer]
-                .spacing(tokens.spacing.content_pad),
+            column![
+                header, surface, controls, volume_row, segments, track_row, footer
+            ]
+            .spacing(tokens.spacing.content_pad),
         )
         .padding(tokens.spacing.content_pad)
         .width(Length::Fill)
@@ -3971,6 +4247,17 @@ fn truncate(value: &str, max: usize) -> String {
     out
 }
 
+/// Current Unix time in milliseconds.
+///
+/// Used only for elapsed-time copy (how long a scan has run, a dated backup
+/// name); the library's own timestamps are the store's business.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
+}
+
 /// Formats seconds as `m:ss` or `h:mm:ss`.
 pub fn clock(seconds: f64) -> String {
     if !seconds.is_finite() || seconds < 0.0 {
@@ -4177,6 +4464,61 @@ mod tests {
         let (position_low, position_high) = screenroom_player::SUB_POSITION_RANGE;
         assert!(position_low <= f64::from(Preferences::SUBTITLE_POSITION_MIN_PERCENT));
         assert!(position_high >= f64::from(Preferences::SUBTITLE_POSITION_MAX_PERCENT));
+    }
+
+    #[test]
+    fn the_volume_control_shows_the_player_then_the_stored_level() {
+        // Three sources, in the order they become true: the drag in flight, the
+        // player's own read-back, and the stored preference before a player exists.
+        let (mut app, _directory) = app_with(2);
+        app.preferences.volume_percent = 40;
+        assert_eq!(
+            app.volume_percent(),
+            40.0,
+            "a player that has not reported a volume must still start at the stored one"
+        );
+
+        app.snapshot.volume = Some(62.0);
+        assert_eq!(
+            app.volume_percent(),
+            62.0,
+            "the control must follow the player rather than the request"
+        );
+
+        app.drag_volume(77.0);
+        assert_eq!(
+            app.volume_percent(),
+            77.0,
+            "the drag wins while it is in flight"
+        );
+        // A report arriving mid-drag must not yank the knob out from under the
+        // pointer; the drag is only cleared on release.
+        app.snapshot.volume = Some(62.0);
+        assert_eq!(app.volume_percent(), 77.0);
+    }
+
+    #[test]
+    fn a_volume_drag_is_stored_once_when_it_ends() {
+        let (mut app, _directory) = app_with(2);
+        app.drag_volume(55.6);
+        assert_eq!(
+            app.library.preferences().unwrap().volume_percent,
+            Preferences::default().volume_percent,
+            "a drag must not write the database on every step"
+        );
+
+        app.commit_volume();
+        assert_eq!(app.library.preferences().unwrap().volume_percent, 56);
+        assert_eq!(app.volume_drag, None, "the drag is over");
+        assert_eq!(app.volume_percent(), 56.0);
+
+        // Nonsense from a slider cannot reach the store: it is clamped first, and
+        // the core would refuse anything outside 0-100.
+        app.drag_volume(-30.0);
+        app.commit_volume();
+        assert_eq!(app.library.preferences().unwrap().volume_percent, 0);
+        app.drag_volume(f64::NAN);
+        assert_eq!(app.volume_percent(), 0.0, "a non-finite drag is ignored");
     }
 
     #[test]

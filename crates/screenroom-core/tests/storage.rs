@@ -79,6 +79,10 @@ fn preferences_start_with_defensible_defaults() {
     assert!(preferences.subtitle_language.is_none());
     assert_eq!(preferences.subtitle_scale_percent, 100);
     assert_eq!(preferences.subtitle_position_percent, 100);
+    assert_eq!(
+        preferences.volume_percent, 100,
+        "libmpv's own default, so a fresh library is not silently quiet"
+    );
 }
 
 #[test]
@@ -107,6 +111,13 @@ fn a_subtitle_style_outside_the_offered_range_is_refused() {
             },
             "subtitle_position_out_of_range",
         ),
+        (
+            Preferences {
+                volume_percent: 101,
+                ..Preferences::default()
+            },
+            "volume_out_of_range",
+        ),
     ] {
         let error = library.set_preferences(&preferences).unwrap_err();
         assert_eq!(error.code(), code);
@@ -127,6 +138,9 @@ fn an_unusable_stored_subtitle_style_still_lets_the_library_open() {
     library
         .set_setting("subtitlePositionPercent", "not a number")
         .expect("inject a corrupt value");
+    library
+        .set_setting("volumePercent", "9000")
+        .expect("inject a wide volume");
 
     let preferences = library.preferences().expect("preferences");
     assert_eq!(
@@ -137,6 +151,7 @@ fn an_unusable_stored_subtitle_style_still_lets_the_library_open() {
         preferences.subtitle_position_percent,
         Preferences::default().subtitle_position_percent
     );
+    assert_eq!(preferences.volume_percent, 100);
 }
 
 #[test]
@@ -153,6 +168,9 @@ fn preferences_survive_a_reopen() {
         audio_language: Some("en".to_string()),
         subtitle_scale_percent: 175,
         subtitle_position_percent: 92,
+        // Volume is the setting a viewer is most likely to change and least
+        // likely to want reset on the next launch.
+        volume_percent: 35,
         default_profile: Some(profile.id.clone()),
     };
     library.set_preferences(&chosen).expect("save");

@@ -903,3 +903,39 @@ fn thirty_second_clip(directory: &TempDir) -> PathBuf {
     assert!(status.success(), "ffmpeg could not build the long clip");
     path
 }
+
+#[test]
+fn volume_and_mute_are_read_back_from_the_player() {
+    // The interface must show what the player holds, not what it last asked for:
+    // a slider that echoes its own request can sit at 50% while the output is
+    // silent, and nothing on screen would say so.
+    let Some(player) = player() else {
+        return;
+    };
+
+    player.set_volume(42.0);
+    let snapshot = wait_for(&player, Duration::from_secs(5), |snapshot| {
+        snapshot
+            .volume
+            .is_some_and(|volume| (volume - 42.0).abs() < 0.5)
+    });
+    assert!(!snapshot.muted.unwrap_or(false), "not muted yet");
+
+    player.set_muted(true);
+    let snapshot = wait_for(&player, Duration::from_secs(5), |snapshot| {
+        snapshot.muted == Some(true)
+    });
+    assert!(snapshot.muted.expect("reported"), "mute was accepted");
+
+    player.set_muted(false);
+    wait_for(&player, Duration::from_secs(5), |snapshot| {
+        snapshot.muted == Some(false)
+    });
+
+    // Out-of-range requests are clamped by the handle rather than passed on.
+    player.set_volume(500.0);
+    let snapshot = wait_for(&player, Duration::from_secs(5), |snapshot| {
+        snapshot.volume.is_some_and(|volume| volume <= 100.0)
+    });
+    assert!(snapshot.volume.expect("reported") <= 100.0);
+}

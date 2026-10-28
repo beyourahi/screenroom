@@ -51,6 +51,8 @@ const ID_AUDIO_PTS: u64 = 5;
 const ID_AVSYNC: u64 = 6;
 const ID_TOTAL_AVSYNC_CHANGE: u64 = 7;
 const ID_MISTIMED_FRAMES: u64 = 8;
+const ID_VOLUME: u64 = 9;
+const ID_MUTE: u64 = 10;
 
 /// `mpv_format` values used when observing properties (`mpv/client.h`).
 const FORMAT_FLAG: i32 = 3;
@@ -132,6 +134,13 @@ pub struct PlayerSnapshot {
     ///
     /// Read back from `sub-pos`, for the same reason as `subtitle_scale`.
     pub subtitle_position: Option<f64>,
+    /// Output volume libmpv is actually using, 0-100.
+    ///
+    /// Read back from `volume`, so the slider follows the player rather than the
+    /// other way round. `None` until the player reports it.
+    pub volume: Option<f64>,
+    /// Whether output is muted, read back from libmpv's `mute`.
+    pub muted: Option<bool>,
 }
 
 impl Default for PlayerSnapshot {
@@ -151,6 +160,8 @@ impl Default for PlayerSnapshot {
             mistimed_frames: None,
             subtitle_scale: None,
             subtitle_position: None,
+            volume: None,
+            muted: None,
         }
     }
 }
@@ -271,6 +282,10 @@ pub enum PlayerCommand {
         /// Vertical position in percent of the screen height, matching `sub-pos`.
         position: f64,
     },
+    /// Set the output volume, 0-100.
+    SetVolume(f64),
+    /// Mute or unmute the output.
+    SetMuted(bool),
     /// Ask the worker to exit.
     Shutdown,
 }
@@ -392,6 +407,19 @@ impl Player {
         self.send(PlayerCommand::SetSubtitleStyle { scale, position });
     }
 
+    /// Sets the output volume in percent, clamped to libmpv's own 0-100 scale.
+    pub fn set_volume(&self, percent: f64) {
+        if !percent.is_finite() {
+            return;
+        }
+        self.send(PlayerCommand::SetVolume(percent.clamp(0.0, 100.0)));
+    }
+
+    /// Mutes or unmutes the output.
+    pub fn set_muted(&self, muted: bool) {
+        self.send(PlayerCommand::SetMuted(muted));
+    }
+
     /// Stops playback.
     pub fn stop(&self) {
         self.send(PlayerCommand::Stop);
@@ -475,6 +503,10 @@ struct Runner {
     subtitle_scale: Option<f64>,
     /// Subtitle position libmpv last reported, in percent from the top.
     subtitle_position: Option<f64>,
+    /// Output volume libmpv last reported, 0-100.
+    volume: Option<f64>,
+    /// Whether output is muted, as libmpv reports it.
+    muted: Option<bool>,
 }
 
 impl Runner {
@@ -521,6 +553,10 @@ impl Runner {
         core.observe("avsync", FORMAT_DOUBLE, ID_AVSYNC)?;
         core.observe("total-avsync-change", FORMAT_DOUBLE, ID_TOTAL_AVSYNC_CHANGE)?;
         core.observe("mistimed-frame-count", FORMAT_INT64, ID_MISTIMED_FRAMES)?;
+        // Output level, so the interface shows what the player is doing rather
+        // than what it last asked for.
+        core.observe("volume", FORMAT_DOUBLE, ID_VOLUME)?;
+        core.observe("mute", FORMAT_FLAG, ID_MUTE)?;
 
         Ok(Self {
             renderer,
@@ -539,6 +575,8 @@ impl Runner {
             mistimed_frames: None,
             subtitle_scale: None,
             subtitle_position: None,
+            volume: None,
+            muted: None,
         })
     }
 
@@ -577,6 +615,8 @@ impl Runner {
             PlayerCommand::SetSubtitleStyle { scale, position } => {
                 self.set_subtitle_style(scale, position, shared)
             }
+            PlayerCommand::SetVolume(percent) => self.set_volume(percent, shared),
+            PlayerCommand::SetMuted(muted) => self.set_muted(muted, shared),
             PlayerCommand::Stop => self.stop(shared),
             PlayerCommand::Shutdown => {}
         }
@@ -827,8 +867,37 @@ impl Runner {
                 let value = unsafe { *(property.data as *const i64) };
                 self.mistimed_frames = Some(value);
             }
+            ID_VOLUME => {
+                let value = unsafe { *(property.data as *const f64) };
+                self.volume = value.is_finite().then_some(value);
+            }
+            ID_MUTE => {
+                self.muted = Some(unsafe { *(property.data as *const i32) } != 0);
+            }
             _ => {}
         }
+        self.publish_snapshot(shared);
+    }
+
+    /// Sets the output volume, then reports what libmpv actually holds.
+    fn set_volume(&mut self, percent: f64, shared: &Arc<Mutex<PlayerSnapshot>>) {
+        let value = percent.clamp(0.0, 100.0).to_string();
+        if let Err(error) = self.core.command(&["set", "volume", &value]) {
+            self.fail("volume_failed", error.to_string(), shared);
+            return;
+        }
+        self.volume = self.core.get_f64("volume").ok().filter(|v| v.is_finite());
+        self.publish_snapshot(shared);
+    }
+
+    /// Mutes or unmutes, then reports libmpv's own flag.
+    fn set_muted(&mut self, muted: bool, shared: &Arc<Mutex<PlayerSnapshot>>) {
+        let value = if muted { "yes" } else { "no" };
+        if let Err(error) = self.core.command(&["set", "mute", value]) {
+            self.fail("mute_failed", error.to_string(), shared);
+            return;
+        }
+        self.muted = self.core.get_flag("mute").ok();
         self.publish_snapshot(shared);
     }
 
@@ -950,6 +1019,7 @@ impl Runner {
         let (avsync, total_avsync_change, mistimed_frames) =
             (self.avsync, self.total_avsync_change, self.mistimed_frames);
         let (subtitle_scale, subtitle_position) = (self.subtitle_scale, self.subtitle_position);
+        let (volume, muted) = (self.volume, self.muted);
         publish(shared, |snapshot| {
             snapshot.position = position;
             snapshot.duration = duration;
@@ -962,6 +1032,8 @@ impl Runner {
             snapshot.mistimed_frames = mistimed_frames;
             snapshot.subtitle_scale = subtitle_scale;
             snapshot.subtitle_position = subtitle_position;
+            snapshot.volume = volume;
+            snapshot.muted = muted;
         });
     }
 }

@@ -17,6 +17,11 @@ iced = { version = "0.14", features = ["wgpu", "image"] }
 wgpu = "27"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# The native folder picker (NSOpenPanel). A media root has to be chosen the way
+# the platform chooses one — typing an absolute path is a developer affordance,
+# not a first-run flow. Kept to macOS because that is the only platform this
+# build targets today; `src/picker.rs` reports the typed-path fallback elsewhere.
+rfd = "0.15"
 # Used only by `src/quit.rs`, to re-point the application menu's Quit item at the
 # window's close action. Already in the lock file through iced's own macOS
 # backend, so this resolves to a version that is built anyway rather than adding

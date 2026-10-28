@@ -37,6 +37,13 @@ dist/
 
 # Agent tooling state (LSP caches, per-machine project config), not project source.
 .serena/
+# Chromium profile directories left in the repository root by browser tooling.
+# Local machine state, never project source.
+/Code Cache/
+/GPUCache/
+/Local Storage/
+/Session Storage/
+/Network Persistent State
 
 # OS / editors
 .idea/
