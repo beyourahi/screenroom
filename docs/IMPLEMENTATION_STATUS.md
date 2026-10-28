@@ -535,7 +535,7 @@ own storage adapter. What was written, and what each part rests on:
 ```bash
 cd apps/tv
 pnpm typecheck    # clean; application source sees no ambient Node types at all
-pnpm test         # 161 tests, 0 failures
+pnpm test         # 180 tests, 0 failures
 pnpm build        # 462,142-byte main.js + the staging step
 ```
 
@@ -588,7 +588,7 @@ profile exists and is active (`screenroom`); no certificate material was inspect
   recoverable from here and the next step needs the set switched on and in developer
   mode.
 
-Gate G5 is **BLOCKED on the device**; the checklist and the three questions only the
+Gate G5 is **PARTIAL** — see `TIZEN_DEVICE_HANDOFF.md` for what the set itself reported; the checklist and the questions only the
 TV can settle are in [`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md).
 
 ### Test totals after the M3 work (2026-10-28)
@@ -636,8 +636,9 @@ Headless scripts, which are not part of `cargo test`:
 | --- | --- | --- |
 | Desktop frame presentation on real Windows GPU | BLOCKED | no Windows hardware/Visual Studio on this host; every `cfg!(windows)` branch is unbuilt as well as unrun. The exact handoff — commands, expectations, acceptance checks and named falsifications — is `WINDOWS_VALIDATION.md` |
 | Windows 4K/HDR/hardware decode | BLOCKED | same |
-| Physical Samsung UA50AU8000RXER (install, USB, AVPlay, durability) | BLOCKED | no device. Checked twice on 2026-10-28 rather than assumed: `tizen` CLI 2.5.25 and `sdb` 4.2.36 are on `PATH`, `sdb devices` reports `List of devices attached` with nothing under it, and a network sweep of `192.168.0.0/24` on SDB port 26101 found 0 devices, with 0 saved remote devices to retry. `tz` is not on `PATH`. A signing profile was not inspected, to avoid printing certificate or DUID material into a log |
-| Lightning 3 on the Tizen 6.0 engine | NOT YET RUN | the client now exists, typechecks, passes 161 off-device tests and packages into a signed `.wgt` — but nothing has executed on a Tizen engine, so this needs the TV and is unchanged by any of that |
+| Physical Samsung UA50AU8000RXER — install | **PASS** (2026-10-28) | connected at `192.168.0.172:26101`; `sdb capability` reports `vendor_name:Samsung`, `profile_name:tv`, `platform_version:6.0`, `cpu_arch:armv7`. The distributor chain is Samsung-issued with exactly one `deviceid` binding, and the DUID the set reports matches it (compared by hash; neither value printed). `vd_appinstall` reached `install completed` and `vd_applist` lists `PlYByk3psw.ScreenroomTV` 0.1.0 |
+| Physical Samsung UA50AU8000RXER — playback, USB, durability | NOT YET RUN | needs a person with the remote: this firmware accepts no synthetic key press, exposes no screenshot, no `dlog` over TCP and no inspector port. Items 3–7 of G5 |
+| Lightning 3 on the Tizen 6.0 engine | **PARTIAL** (2026-10-28) | the set's own record: `host=tizen avplay=1 filesystem=1 inputdevice=1 storage=1 keys=9/refused=0 model=UAU8000 firmware=T-NKLAUABC-2310.0` and `canvases=1 size=1920x1080 mounted=1`, no `error` or `rejection` entries, engine `76.0.3809.146`. The bundle executes and Lightning mounts a correctly sized surface. Nobody has seen the screen, and WebGL capability and frame pacing are not measured |
 | Audible output heard by a person | NOT YET VERIFIED | the audio clock and `avsync` are measured; nobody has listened |
 | macOS bundle signing and notarization for distribution | BLOCKED | Command Line Tools only, no full Xcode; not required for a personal install |
 

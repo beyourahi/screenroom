@@ -42,8 +42,11 @@
 A `core` cell means the rule exists and is tested in Rust: it does **not** mean a
 user interface exposes it. The `host` cells are the ones a person can actually
 operate today, and only on macOS. A `client` cell is the TV client's TypeScript,
-which is typechecked and covered by 161 off-device tests — **none of it has executed
-on a television.** A `client` cell never means "verified on the TV".
+which is typechecked and covered by 180 off-device tests. Since 2026-10-28 the
+client's bundle *does* execute on the television (the set reports a mounted
+1920×1080 canvas and `avplay=1`), but executing is not the same as verified: no
+frame has been seen, no drive walked and no media played there. A `client` cell
+still never means "verified on the TV".
 
 ## Target build status
 
@@ -51,7 +54,7 @@ on a television.** A `client` cell never means "verified on the TV".
 | --- | --- | --- | --- |
 | MacBook Air M4 (macOS ARM64) | `apps/desktop` | builds and runs; `cargo test --workspace` green (189 tests); `scripts/package-macos.sh` produces a runnable `dist/Screenroom.app`, and `scripts/verify-bundle.sh` checks it plus the bundle's own libmpv and all 20 of its dependencies | **running application verified**: playback at 30 fps, resume, tracks, subtitle size/position, library and Settings UI, bundle launched outside cargo (see `IMPLEMENTATION_STATUS.md`) |
 | Windows desktop, Intel Arc B580 | `apps/desktop` (same crate) | not compiled on Windows; no D3D11/shared-texture bridge yet. Three Windows-only defects were found by reasoning and fixed from macOS on 2026-10-28 — verbatim-prefix path identity, the libmpv search consulting the working directory, and four fixed grid columns at 3440×1440 — each asserted with Windows-shaped inputs, none observed on Windows | **BLOCKED** — no access to the machine from this session. `WINDOWS_VALIDATION.md` is the exact handoff: prerequisites, commands, per-area acceptance checks, and the check that would falsify each fix |
-| Samsung UA50AU8000RXER (Tizen 6.0) | `apps/tv` — LightningJS 3 + Blits + TypeScript: 5 screens (Home, Browse, Detail, Settings, Player), the AVPlay playback port, remote-key registration, the bounded scan walk and a storage port | **builds and packages on macOS**: `pnpm test` 161/161, `pnpm typecheck` clean, `pnpm build` produces a single 462,142-byte bundle, and the signed `.wgt` (157,202 bytes, sha256 `b7d82c49…`) carries a byte-identical `main.js`. `tizen` CLI 2.5.25 and `sdb` 4.2.36 are present; one signing profile (`screenroom`) exists and is active | **BLOCKED** — no device: `sdb devices` lists nothing attached and a sweep of `192.168.0.0/24` on port 26101 found no TV (checked 2026-10-28). Nothing in this client has run on a Tizen engine, no frame has been rendered, no drive has been walked by the set, and no media has reached AVPlay. `TIZEN_DEVICE_HANDOFF.md` is the step-by-step handoff |
+| Samsung UA50AU8000RXER (Tizen 6.0) | `apps/tv` — LightningJS 3 + Blits + TypeScript: 5 screens (Home, Browse, Detail, Settings, Player), the AVPlay playback port, remote-key registration, the bounded scan walk and a storage port | **runs on the set (2026-10-28)**: `pnpm test` 180/180, typecheck clean, and the signed `.wgt` installs and launches on the television. The set's own record reads `host=tizen avplay=1 filesystem=1 inputdevice=1 keys=9/refused=0 model=UAU8000 firmware=T-NKLAUABC-2310.0` and `canvases=1 size=1920x1080 mounted=1`, with no JS errors. Three device-only defects were found and fixed there: a `type="module"` bundle a `file://` widget cannot load, AVPlay read from `tizen.webapis` instead of `window.webapis`, and `productinfo` read without its privilege | **PARTIAL** — installed and executing, but no frame has been *seen* by a person, no drive walked by the set, and no media reached AVPlay: items 1 (visual half), 3–7 of G5 remain. `TIZEN_DEVICE_HANDOFF.md` carries the checklist and the exact commands |
 | Linux, LG webOS, Android TV, iOS, Android | — | **retired** by ADR-003/ADR-004 | not applicable |
 
 ## Per-device capabilities that must never be assumed
