@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use iced::widget::shader;
 use iced::widget::{
-    Space, button, checkbox, column, container, image, pick_list, row, scrollable, slider, text,
-    text_input,
+    Space, button, checkbox, column, container, image, pick_list, row, scrollable, slider, stack,
+    text, text_input,
 };
 use iced::{Alignment, ContentFit, Element, Length, Subscription, Task, keyboard};
 use screenroom_core::{
@@ -385,6 +385,12 @@ pub struct App {
     /// Retained posters, keyed by work. The bytes live in the library; this is
     /// the decoded handle the image widget draws, and nothing is fetched.
     artwork: HashMap<String, image::Handle>,
+    /// Width divided by height of each retained poster.
+    ///
+    /// Kept because the Detail screen draws the poster at its own aspect ratio.
+    /// Extracted artwork is a frame from the film, which is usually wide, while a
+    /// hand-made poster is tall; a fixed 2:3 box crops one of them to a slice.
+    artwork_aspect: HashMap<String, f32>,
     /// Works already handed to the extractor, so one work is not queued twice.
     artwork_queued: HashSet<String>,
     /// Works whose frame could not be read, so a reload does not retry forever.
@@ -749,6 +755,7 @@ impl App {
             browse: Browse::new(),
             detail: None,
             artwork: HashMap::new(),
+            artwork_aspect: HashMap::new(),
             artwork_queued: HashSet::new(),
             artwork_failed: HashSet::new(),
             artwork_failures: 0,
@@ -955,6 +962,13 @@ impl App {
             match self.library.artworks_for(&missing) {
                 Ok(found) => {
                     for art in found {
+                        // The aspect is recorded whether or not the handle was new:
+                        // a poster loaded from a previous launch has to be drawn at
+                        // its own shape too, and only this path sees it.
+                        if art.width > 0 && art.height > 0 {
+                            self.artwork_aspect
+                                .insert(art.work_id.clone(), art.width as f32 / art.height as f32);
+                        }
                         self.artwork
                             .entry(art.work_id)
                             .or_insert_with(|| image::Handle::from_bytes(art.bytes));
@@ -1012,8 +1026,16 @@ impl App {
                 ArtworkEvent::Stored { work_id } => {
                     self.artwork_queued.remove(&work_id);
                     if let Ok(Some(art)) = self.library.artwork(&work_id) {
+                        let aspect = if art.width > 0 && art.height > 0 {
+                            art.width as f32 / art.height as f32
+                        } else {
+                            DETAIL_POSTER.0 / DETAIL_POSTER.1
+                        };
                         self.artwork
-                            .insert(work_id, image::Handle::from_bytes(art.bytes));
+                            .insert(work_id.clone(), image::Handle::from_bytes(art.bytes));
+                        if aspect.is_finite() && aspect > 0.0 {
+                            self.artwork_aspect.insert(work_id, aspect);
+                        }
                     }
                 }
                 ArtworkEvent::Failed { work_id, reason } => {
@@ -1041,12 +1063,14 @@ impl App {
     /// The order is the drawing order, so an index means the same card the cursor
     /// highlights and the one Enter opens.
     fn home_item(&self, index: usize) -> Option<&LibraryItem> {
-        if index < self.suggestions.len() {
-            self.suggestions
-                .get(index)
-                .map(|suggestion| &suggestion.item)
+        // The cursor runs down the screen in drawing order: Continue watching,
+        // then the suggestions below it.
+        if index < self.home.len() {
+            self.home.get(index)
         } else {
-            self.home.get(index - self.suggestions.len())
+            self.suggestions
+                .get(index - self.home.len())
+                .map(|suggestion| &suggestion.item)
         }
     }
 
@@ -2821,31 +2845,33 @@ impl App {
         .spacing(tokens.spacing.field_x)
         .align_y(Alignment::Center);
 
-        // The Home button already says where you are; the label only earns its
-        // place when it carries counts the buttons cannot.
-        if self.screen != Screen::Home {
+        // The nav buttons already say where you are; the label only earns its
+        // place when it carries something they cannot, which is a page and a count
+        // on Browse. "Settings Settings" was the other case.
+        let label = self.screen_label();
+        if !matches!(self.screen, Screen::Home | Screen::Settings) {
             nav = nav.push(
-                text(self.screen_label())
+                text(label)
                     .size(tokens.type_scale.caption)
                     .color(tokens.palette.ink_muted),
             );
         }
 
-        if self.scan_token.is_some() {
-            nav = nav.push(
-                button(text("Cancel scan").size(tokens.type_scale.caption))
-                    .on_press(Message::CancelScan)
-                    .style(design::quiet_style(false))
-                    .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+        // A running scan has its own strip with its counts and a Cancel beside
+        // them; a second Cancel in the header would be two controls for one act.
+
+        // The header carries a warning only when something is actually wrong.
+        // Version strings and the resolved libmpv belong in Settings → About; a
+        // watching screen that announces its own build numbers is a development
+        // window, not a product.
+        let mut facts: iced::widget::Row<'_, Message> = row![].spacing(tokens.spacing.field_x);
+        if !self.capability.available {
+            facts = facts.push(
+                text(capability)
+                    .size(tokens.type_scale.micro)
+                    .color(tokens.palette.destructive),
             );
         }
-
-        let facts = column![
-            text(capability).size(tokens.type_scale.micro),
-            text(format!("library {}", self.library_label)).size(tokens.type_scale.micro),
-            text(format!("theme {}", design::provenance())).size(tokens.type_scale.micro),
-        ]
-        .spacing(0.0);
 
         container(
             row![
@@ -2931,21 +2957,23 @@ impl App {
             .spacing(tokens.spacing.content_pad)
             .width(Length::Fill);
 
-        // Suggestions first, because for a new library they are the only thing
-        // there is to do; Continue watching takes the cursor positions after them.
-        if !self.suggestions.is_empty() {
-            body = body.push(text("Suggested for you").size(tokens.type_scale.title_sm));
-            body = body.push(self.suggestion_grid(0));
-        }
-
+        // Continue watching leads when there is anything to continue: resuming a
+        // film is the one action a viewer opens the app to take. Suggestions follow
+        // it, and for a new library they are the only thing there is.
+        let resuming = !self.home.is_empty();
         body = body.push(text("Continue watching").size(tokens.type_scale.title_sm));
-        if self.home.is_empty() {
+        if resuming {
+            body = body.push(self.card_grid(&self.home, 0));
+        } else {
             body = body.push(self.empty_note(
                 "Nothing in progress.",
                 "Start something from the library and its position appears here.",
             ));
-        } else {
-            body = body.push(self.card_grid(&self.home, self.suggestions.len()));
+        }
+
+        if !self.suggestions.is_empty() {
+            body = body.push(text("Suggested for you").size(tokens.type_scale.title_sm));
+            body = body.push(self.suggestion_grid(self.home.len()));
         }
 
         body = body.push(text("Your library").size(tokens.type_scale.subtitle));
@@ -3251,7 +3279,7 @@ impl App {
             Some(handle) => row![
                 image(handle.clone())
                     .width(Length::Fixed(DETAIL_POSTER.0))
-                    .height(Length::Fixed(DETAIL_POSTER.1))
+                    .height(Length::Fixed(self.detail_poster_height(&item.work_id)))
                     .content_fit(ContentFit::Cover),
                 body,
             ]
@@ -3262,6 +3290,21 @@ impl App {
         };
 
         scrollable(details).height(Length::Fill).into()
+    }
+
+    /// Height the Detail poster needs so the artwork is not cropped.
+    ///
+    /// Bounded at both ends: a very wide frame would otherwise be a letterbox
+    /// strip, and a very tall poster would push the title below the fold on a
+    /// short window.
+    fn detail_poster_height(&self, work_id: &str) -> f32 {
+        let aspect = self
+            .artwork_aspect
+            .get(work_id)
+            .copied()
+            .filter(|aspect| aspect.is_finite() && *aspect > 0.0)
+            .unwrap_or(DETAIL_POSTER.0 / DETAIL_POSTER.1);
+        (DETAIL_POSTER.0 / aspect).clamp(140.0, DETAIL_POSTER.1)
     }
 
     /// A compact one-per-line episode list; the arrow keys walk it.
@@ -3314,7 +3357,13 @@ impl App {
             .spacing(tokens.spacing.field_x)
             .width(Length::Fill);
         for (row_index, chunk) in items.chunks(columns).enumerate() {
-            let mut cells = row![].spacing(tokens.spacing.field_x).width(Length::Fill);
+            // Top-aligned, because a card without a poster is genuinely shorter
+            // and stretching it to its neighbours' height would draw an empty
+            // surface that reads as a missing image.
+            let mut cells = row![]
+                .spacing(tokens.spacing.field_x)
+                .width(Length::Fill)
+                .align_y(Alignment::Start);
             for (column_index, item) in chunk.iter().enumerate() {
                 let index = base + row_index * columns + column_index;
                 cells = cells.push(self.card(item, self.focus == index));
@@ -3369,6 +3418,12 @@ impl App {
                 ratio * 100.0,
                 clock(item.position_ms as f64 / 1_000.0)
             )
+        } else if item.position_ms > 0 {
+            // A stored position with no stored duration is a real state: the file
+            // was watched by a build that had not probed it yet. Saying "not
+            // started" beside a card in Continue watching would be a lie about the
+            // one thing the row is for.
+            format!("resume at {}", clock(item.position_ms as f64 / 1_000.0))
         } else if item.watched {
             "watched".to_string()
         } else if !item.available {
@@ -3413,19 +3468,14 @@ impl App {
             );
         }
 
-        let mut height = 132.0;
-        if handle.is_some() {
-            height += CARD_POSTER_HEIGHT + 4.0;
-        }
-        if note.is_some() {
-            height += 18.0;
-        }
-
+        // The card is sized by its own text instead of a hand-summed pixel height.
+        // The sum was 25 px short of what the lines actually take at the pinned
+        // type scale, so the reason line spilled past the card's surface — a bug
+        // that only showed once posters arrived and the extra line was drawn.
         button(content)
             .on_press(Message::OpenDetail(item.id.clone()))
             .style(design::tile_style(focused))
             .width(Length::FillPortion(1))
-            .height(Length::Fixed(height))
             .padding(tokens.spacing.field_y)
             .into()
     }
@@ -3438,7 +3488,10 @@ impl App {
             .spacing(tokens.spacing.field_x)
             .width(Length::Fill);
         for (row_index, chunk) in self.suggestions.chunks(columns).enumerate() {
-            let mut cells = row![].spacing(tokens.spacing.field_x).width(Length::Fill);
+            let mut cells = row![]
+                .spacing(tokens.spacing.field_x)
+                .width(Length::Fill)
+                .align_y(Alignment::Start);
             for (column_index, suggestion) in chunk.iter().enumerate() {
                 let index = base + row_index * columns + column_index;
                 cells = cells.push(self.card_with(
@@ -3793,6 +3846,19 @@ impl App {
         ]
         .spacing(tokens.spacing.field_y);
 
+        // Stated once here rather than in the header: what this build is running on
+        // is useful when something is wrong, not while watching.
+        let playback_fact = if self.capability.available {
+            format!(
+                "Playback: libmpv {}",
+                self.capability.api_version.as_deref().unwrap_or("?")
+            )
+        } else {
+            format!("Playback: unavailable — {}", self.capability.reason)
+        };
+        let library_fact = format!("Library: {}", self.library_label);
+        let tokens_fact = format!("Design tokens: {}", design::provenance());
+
         let body = column![
             heading("Viewer"),
             panel(viewers.into()),
@@ -3802,6 +3868,20 @@ impl App {
             panel(folders.into()),
             heading("Data"),
             panel(data.into()),
+            heading("About this build"),
+            panel(
+                column![
+                    note(&playback_fact),
+                    note(&library_fact),
+                    note(&tokens_fact),
+                    note(
+                        "Folders are read in place. Nothing here needs a network, an account \
+                         or a server.",
+                    ),
+                ]
+                .spacing(tokens.spacing.field_y / 2.0)
+                .into(),
+            ),
             Space::new().height(tokens.spacing.content_pad),
         ]
         .spacing(tokens.spacing.field_x);
@@ -4051,33 +4131,45 @@ impl App {
                 ))
                 .size(tokens.type_scale.micro)
             })
-            .unwrap_or_else(|| text("").size(tokens.type_scale.micro));
+            .unwrap_or_else(|| text("").size(tokens.type_scale.micro)); // Only the resume note; the file's identifier is a library detail, not
+        // something a viewer needs under a film.
+        let footer = row![resume].spacing(tokens.spacing.field_x);
 
-        let footer = row![
-            resume,
-            Space::new().width(Length::Fill),
-            text(format!(
-                "file {}",
-                self.active
-                    .as_ref()
-                    .map(|active| active.file_id.as_str())
-                    .unwrap_or("-")
-            ))
-            .size(tokens.type_scale.micro)
-            .color(tokens.palette.ink_muted),
-        ]
-        .spacing(tokens.spacing.field_x);
-
-        container(
-            column![
-                header, surface, controls, volume_row, segments, track_row, footer
-            ]
-            .spacing(tokens.spacing.content_pad),
+        // The picture takes the whole body and the controls float over its lower
+        // edge, rather than the film being squeezed into whatever a column of
+        // control rows leaves behind. A player that shrinks the picture to make
+        // room for its own buttons has the priorities backwards.
+        let chrome = container(
+            column![controls, volume_row, segments, track_row, footer]
+                .spacing(tokens.spacing.field_y),
         )
+        .style(|_theme| design::container_style(Level::Panel, false))
         .padding(tokens.spacing.content_pad)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        .width(Length::Fill);
+
+        // Only the transport floats over the picture. The title row stays above it:
+        // text drawn over a bright frame is unreadable exactly when the film is
+        // bright, and a scrim behind a title bar is furniture across the image.
+        let overlay = column![Space::new().height(Length::Fill), chrome]
+            .spacing(tokens.spacing.field_y)
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        let mut page = column![].spacing(tokens.spacing.field_y);
+        if !self.fullscreen {
+            page = page.push(header);
+        }
+        page = page.push(
+            container(stack![surface, overlay])
+                .width(Length::Fill)
+                .height(Length::Fill),
+        );
+
+        container(page)
+            .padding(tokens.spacing.content_pad)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 }
 
@@ -4093,7 +4185,7 @@ fn settings_heading(label: &str) -> Element<'_, Message> {
 /// These carry the consequences a control cannot state by itself — that a gap
 /// stops autoplay, that restore copies the current library aside — so the copy is
 /// part of the control's meaning rather than decoration.
-fn settings_note(label: &str) -> Element<'_, Message> {
+fn settings_note(label: &str) -> Element<'static, Message> {
     text(label.to_string())
         .size(design::tokens().type_scale.micro)
         .color(design::tokens().palette.ink_muted)
@@ -4818,7 +4910,10 @@ mod tests {
     }
 
     #[test]
-    fn the_home_cursor_walks_suggestions_before_continue_watching() {
+    fn the_home_cursor_walks_continue_watching_before_suggestions() {
+        // The cursor must run down the page in the order the page is drawn, or
+        // Enter opens whatever card the eye is not on. Continue watching leads now,
+        // so it owns the first index.
         let (mut app, _directory) = app_with(2);
         let all = app.library.items(&LibraryQuery::page(10)).expect("items");
         app.suggestions = vec![Recommendation {
@@ -4832,11 +4927,13 @@ mod tests {
         assert_eq!(app.visible_len(), 2, "both cards are reachable");
         assert_eq!(
             app.home_item(0).map(|item| item.id.clone()),
-            Some(all[0].id.clone())
+            Some(all[1].id.clone()),
+            "the resume card is the first thing on the page"
         );
         assert_eq!(
             app.home_item(1).map(|item| item.id.clone()),
-            Some(all[1].id.clone())
+            Some(all[0].id.clone()),
+            "a suggestion sits below it"
         );
         assert!(app.home_item(2).is_none());
     }
