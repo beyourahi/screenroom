@@ -215,6 +215,14 @@ impl Library {
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")?;
         let version: i64 =
             connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+        let integrity: String =
+            connection.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))?;
+        if integrity != "ok" {
+            return Err(CoreError::library(
+                "corrupt_database",
+                "The library failed its integrity check. Restore a validated backup.",
+            ));
+        }
 
         match version {
             0 => {
@@ -271,15 +279,6 @@ impl Library {
                     ),
                 ));
             }
-        }
-
-        let integrity: String =
-            connection.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))?;
-        if integrity != "ok" {
-            return Err(CoreError::library(
-                "corrupt_database",
-                "The library failed its integrity check. Restore a validated backup.",
-            ));
         }
 
         // A crashed process cannot stay authoritative for progress or jobs.
@@ -437,7 +436,17 @@ impl Library {
                 "Keep at least one profile.",
             ));
         }
-        tx.execute("DELETE FROM profiles WHERE id = ?1", [id])?;
+        let changed = tx.execute("DELETE FROM profiles WHERE id = ?1", [id])?;
+        if changed == 0 {
+            return Err(CoreError::library(
+                "profile_missing",
+                "That profile is no longer in the library.",
+            ));
+        }
+        tx.execute(
+            "DELETE FROM settings WHERE key = 'defaultProfileId' AND value = ?1",
+            [id],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -468,6 +477,28 @@ pub(crate) fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removing_the_default_profile_clears_its_preference_and_unknown_ids_fail() {
+        let library = Library::open_in_memory().unwrap();
+        let profile = library.profiles().unwrap().remove(0);
+        let guest = library.add_profile("Guest").unwrap();
+        let mut preferences = Preferences::default();
+        preferences.default_profile = Some(profile.id.clone());
+        library.set_preferences(&preferences).unwrap();
+
+        let error = library.remove_profile("missing").unwrap_err();
+        assert_eq!(error.code(), "profile_missing");
+        library.remove_profile(&profile.id).unwrap();
+        assert_eq!(library.preferences().unwrap().default_profile, None);
+        assert!(
+            library
+                .profiles()
+                .unwrap()
+                .iter()
+                .any(|item| item.id == guest.id)
+        );
+    }
 
     #[test]
     fn a_schema_three_library_gains_the_join_indexes_and_keeps_its_rows() {

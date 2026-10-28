@@ -60,14 +60,17 @@ impl Library {
         // Re-granting a folder the user previously removed restores the same
         // source identity, so its works, history and lists are visible again
         // instead of being stranded on an orphaned row.
-        let removed: Option<String> = connection
-            .query_row(
-                "SELECT id FROM sources WHERE root_path = ?1 AND state = 'removed'",
-                [&root_path],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(id) = removed {
+        let mut statement =
+            connection.prepare("SELECT id, root_path FROM sources WHERE state = 'removed'")?;
+        let removed = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .find(|(_, old_root)| self.path_key(Path::new(old_root)) == self.path_key(&root));
+        drop(statement);
+        if let Some((id, _)) = removed {
             connection.execute(
                 "UPDATE sources SET label = ?1, state = 'available' WHERE id = ?2",
                 params![label, id],
@@ -205,4 +208,30 @@ fn source_from_row(row: &Row<'_>) -> rusqlite::Result<Source> {
         })?,
         last_scan_ms: row.get(4)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regrant_matches_removed_roots_by_location_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("media");
+        std::fs::create_dir(&root).unwrap();
+        let library = Library::open_in_memory().unwrap();
+        let source = library.add_source(&root, None).unwrap();
+        library.remove_source(&source.id).unwrap();
+        let alternate = format!("{}//media", root.parent().unwrap().display());
+        library
+            .connection()
+            .execute(
+                "UPDATE sources SET root_path = ?1 WHERE id = ?2",
+                rusqlite::params![alternate, source.id],
+            )
+            .unwrap();
+
+        let restored = library.add_source(&root, None).unwrap();
+        assert_eq!(restored.id, source.id);
+    }
 }
