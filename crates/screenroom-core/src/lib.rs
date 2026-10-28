@@ -47,9 +47,10 @@ pub use scanner::{
 /// Schema version of the SQLite library written by this crate.
 ///
 /// Version 2 is the layout the Flutter candidate wrote; version 3 adds the
-/// artwork table and is migrated forward additively, so a library written by
-/// either version opens without a destructive migration.
-pub const SCHEMA_VERSION: i64 = 3;
+/// artwork table; version 4 adds the indexes on the work/edition/file joins the
+/// catalogue runs on every screen. Both steps are additive, so a library from
+/// any of those versions opens without a destructive migration.
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Version of the versioned JSON backup format accepted by [`Library`].
 pub const BACKUP_FORMAT_VERSION: i64 = 2;

@@ -232,8 +232,23 @@ impl Library {
             2 => {
                 // Additive: the artwork table is new, nothing is rewritten. A
                 // library written before posters were retained keeps every row.
+                // Schema 4 is the index batch on top of it; both run in the same
+                // transaction so a schema 2 library is never left half-migrated.
                 let tx = connection.transaction()?;
                 for statement in schema::MIGRATE_2_TO_3 {
+                    tx.execute(statement, [])?;
+                }
+                for statement in schema::MIGRATE_3_TO_4 {
+                    tx.execute(statement, [])?;
+                }
+                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                tx.commit()?;
+            }
+            3 => {
+                // Indexes only. A library written by the build before this one
+                // gains them in place; nothing is rewritten and no row moves.
+                let tx = connection.transaction()?;
+                for statement in schema::MIGRATE_3_TO_4 {
                     tx.execute(statement, [])?;
                 }
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -446,4 +461,58 @@ pub(crate) fn now_ms() -> i64 {
 /// A fresh application-generated identifier.
 pub(crate) fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_schema_three_library_gains_the_join_indexes_and_keeps_its_rows() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("library.db");
+        {
+            // A schema 3 library: every table a schema 2 library had plus the
+            // artwork table, and none of the join indexes schema 4 adds. The
+            // cutoff is where the index batch starts, so it is counted from the
+            // end of the list — that is where new statements are appended.
+            let connection = rusqlite::Connection::open(&path).expect("open");
+            for statement in &schema::CREATE[..schema::CREATE.len() - 4] {
+                connection.execute(statement, []).expect("schema");
+            }
+            connection
+                .execute("INSERT INTO profiles(id, name) VALUES('p', 'Me')", [])
+                .expect("profile");
+            connection
+                .pragma_update(None, "user_version", 3)
+                .expect("version");
+        }
+
+        let library = Library::open(&path).expect("migrated");
+        let version: i64 = library
+            .connection()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(library.profiles().expect("profiles").len(), 1);
+
+        // The migration's whole purpose: the joins the catalogue runs get an
+        // index, so a work-to-file join stops scanning the child table.
+        for index in [
+            "editions_work",
+            "files_edition",
+            "file_episodes_episode",
+            "markers_edition",
+        ] {
+            let found: i64 = library
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    [index],
+                    |row| row.get(0),
+                )
+                .expect("index lookup");
+            assert_eq!(found, 1, "{index} is missing after the migration");
+        }
+    }
 }

@@ -142,14 +142,15 @@ enforced by its dependency list, not by convention: it has no UI or HTTP crate.
 ## SQLite and migrations
 
 One physical schema (`crates/screenroom-core/src/schema.rs`) and one
-`user_version` (`SCHEMA_VERSION = 2`) for every platform. The layout deliberately
-matches the schema the Flutter candidate wrote, so an existing library on a device
-opens without a destructive migration.
+`user_version` (`SCHEMA_VERSION = 4`) for every platform. The base layout
+deliberately matches the schema the Flutter candidate wrote, so an existing library
+on a device opens without a destructive migration.
 
 - Opening applies `PRAGMA foreign_keys = ON` and `busy_timeout`.
-- A schema version of `0` creates and stamps; `2` opens; `1` fails closed with
-  `migration_unavailable`; anything newer fails with `future_database` and leaves
-  the file untouched.
+- A schema version of `0` creates and stamps; `2` and `3` are migrated forward
+  additively (`2 → 3` adds the artwork table, `3 → 4` adds the join indexes) and
+  `4` opens unchanged; `1` fails closed with `migration_unavailable`; anything newer
+  fails with `future_database` and leaves the file untouched.
 - `PRAGMA quick_check` must return `ok`, otherwise `corrupt_database` and the file
   is left for recovery/restore.
 - Opening closes dangling sessions and re-queues `running` jobs: a crashed process

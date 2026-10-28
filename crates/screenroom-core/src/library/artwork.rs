@@ -319,10 +319,13 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("library.db");
         {
-            // Everything a schema 2 library had, and nothing else: the artwork
-            // table did not exist and its absence is what the migration adds.
+            // Everything a schema 2 library had, and nothing else: neither the
+            // artwork table nor the later join indexes existed, and their absence
+            // is what the migration adds. The cutoff is the artwork statement
+            // itself, so it has to name that boundary rather than count from the
+            // end of the list — the end of the list is where new indexes land.
             let connection = rusqlite::Connection::open(&path).expect("open");
-            for statement in &schema::CREATE[..schema::CREATE.len() - 1] {
+            for statement in &schema::CREATE[..schema::CREATE.len() - 5] {
                 connection.execute(statement, []).expect("schema");
             }
             connection

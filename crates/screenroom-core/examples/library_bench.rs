@@ -109,6 +109,30 @@ fn main() {
     );
     measure("count everything", &LibraryQuery::page(24));
 
+    // The Browse and Home screens ask the catalogue for its facets before they
+    // draw a single card, on the UI thread, so these are timed separately from
+    // paging: a slow facet is a window that does not open.
+    let profile = library.profiles().expect("profiles").remove(0);
+    let started = Instant::now();
+    let genres = library.known_genres().expect("genres");
+    let genres_time = started.elapsed();
+    println!(
+        "{:<22} {:>4} genres {genres_time:>12?}",
+        "known genres",
+        genres.len()
+    );
+
+    let started = Instant::now();
+    let watching = library
+        .continue_watching(&profile.id, 20)
+        .expect("continue watching");
+    let watching_time = started.elapsed();
+    println!(
+        "{:<22} {:>4} rows {watching_time:>12?}",
+        "continue watching",
+        watching.len()
+    );
+
     println!();
     println!("slowest page: {slowest_label} at {slowest:?}");
 }

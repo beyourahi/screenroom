@@ -89,8 +89,9 @@ Implemented in `crates/screenroom-core`:
 | Schema | `open`, `open_in_memory` | future schema fails closed without data loss; integrity check; crash normalisation |
 | Recovery | reopening after a crash | an open session is closed, a running job is requeued, progress survives the whole recovery sequence, a damaged database is reported rather than replaced |
 
-Test totals: 13 unit (`filename`, `fingerprint`), 21 store (`tests/library.rs`),
-7 scanner (`tests/scanner.rs`), 17 storage (`tests/storage.rs`), 7 recovery
+Test totals: 35 unit (`filename`, `fingerprint`, `artwork`, `markers`,
+`recommend`, library migration), 27 store (`tests/library.rs`), 10 scanner
+(`tests/scanner.rs`), 19 storage (`tests/storage.rs`), 7 recovery
 (`tests/recovery.rs`), 2 scale (`tests/scale.rs`).
 
 ### 10,000-item budget run (2026-10-28)
@@ -146,9 +147,38 @@ Run-to-run variance is real and is not hidden: the first ledger run measured
 the same machine and input. Both are recorded; neither supersedes the other. Any
 future comparison should re-run `library_bench` rather than quote a memory of it.
 
+#### The catalogue facet stall, and schema 4 (2026-10-29)
+
+The paging numbers above were never the whole story: opening Browse on a 10,000-entry
+library was unusable, and it was not `items` or `count` that did it. `known_genres`
+runs on every refresh, before the screen draws a card, and its `EXISTS` subquery
+joined `editions` on `work_id` — a column with no index. Measured with
+the same generated library, release build:
+
+| `known_genres` on 10,000 entries | Time |
+| --- | --- |
+| Before the indexes (schema 3) | **44.2 s** |
+| After the indexes (schema 4) | **13.7 ms** |
+
+That is the class of failure the loose bounds in `tests/scale.rs` exist to catch, and
+it was found by using the app on a large library rather than by the benchmark: the
+bench did not ask the catalogue for its facets at all. It does now — `library_bench`
+times `known_genres` and `continue_watching` next to paging, which is what put the
+44-second figure in the table above instead of a memory of it.
+
+Schema 4 is that fix: indexes on the join columns every catalogue query walks
+(`editions_work`, `files_edition`, `file_episodes_episode`, `markers_edition`). It is
+additive like schema 3 — no table or row is rewritten — so a schema 2 or 3 library is
+migrated in place, in one transaction, and a schema 2 library takes both steps at
+once. Both paths are exercised: `tests/library.rs` opens a schema 2 library, and a
+unit test in `library/mod.rs` opens a schema 3 library and asserts the four indexes
+exist and the profile survives. The ingest cost of maintaining them is real but
+small: 10,000 entries in 394 ms with the indexes against 440 ms without in one
+comparable pair of runs.
+
 Design choice worth keeping: the Rust schema is byte-compatible with the layout the
 Flutter candidate wrote (`user_version = 2`), so an existing on-device library opens
-instead of being reset.
+and is migrated forward to the current version instead of being reset.
 
 ### Deliberately not ported yet
 
