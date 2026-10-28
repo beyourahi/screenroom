@@ -41,11 +41,11 @@ each is named in `WINDOWS_VALIDATION.md` §7. Do not read "fixed" here as "verif
 
 Nothing in this document has been run against Windows or a TV.
 
-**Samsung TV client (2026-10-28).** `apps/tv` is the LightningJS 3 + Blits client.
+**Samsung TV client (updated 2026-10-29).** `apps/tv` is the LightningJS 3 + Blits client.
 Its tests run off-device and are a **new tier**, not a device run:
 
 ```bash
-cd apps/tv && pnpm test      # 189 tests, 0 failures
+cd apps/tv && pnpm test      # 228 tests, 0 failures
 cd apps/tv && pnpm typecheck # app source and tests, separately
 cd apps/tv && pnpm build     # bundle + the Tizen staging step
 ```
@@ -56,16 +56,20 @@ cd apps/tv && pnpm build     # bundle + the Tizen staging step
 | `test/progress.test.ts` | 10 | the session/generation/sequence guard, the finished threshold and when a position is worth writing |
 | `test/store.test.ts` | 20 | the document's durability rules: one unreadable row never costs the library, a newer format is refused rather than guessed, a version 1 document is still read, oversized input is refused before parsing, a refused write is reported, an unchanged state is not written twice, the playback preferences and the last scan survive a restart, and a scan lands in **one** document |
 | `test/scan.test.ts` | 19 | the scanner's rules: classification, the two bounds, identity across a rescan, withdrawal only after a complete walk, unsafe and downloading entries reported, one source's plan never touching another, and a stored report that cannot be read refused rather than believed |
-| `test/scan-pipeline.test.ts` | 10 | **the whole scan, end to end, over a simulated Tizen filesystem**: drives listed → walked → parsed → catalogued → stored → re-read through the screens' own accessors. Covers a rescan keeping every id, a deleted file keeping its position, a pulled drive becoming unreadable, a drive that will not list withdrawing nothing, an internal storage never being walked, and a host with no filesystem API |
+| `test/scan-pipeline.test.ts` | 11 | **the whole scan, end to end, over a simulated Tizen filesystem**: drives listed → walked → parsed → catalogued → stored → re-read through the screens' own accessors. Covers a rescan keeping every id, a deleted file keeping its position, a pulled drive becoming unreadable, a drive that will not list withdrawing nothing, an internal storage never being walked, and a host with no filesystem API |
 | `test/name.test.ts` | 17 | filename interpretation: film/year, `S01E02` and `1x02` forms, folder hints, unreadable names that never join another work |
 | `test/tracks.test.ts` | 13 | the track menu's order and selection, “subtitles off” as silence rather than an index, preference matching across `de`/`deu` spellings, the four sidecar subtitle extensions, and the next-episode rule including gaps, duplicates and season boundaries |
 | `test/settings.test.ts` | 9 | decoder preferences: the safe default, refusal of junk, language normalisation, what choosing a track remembers, and that “off” keeps the language for later |
-| `test/screens.test.ts` | 6 | the remote wiring: every screen declares the keys it implements, and the player claims Back so the menu closes before the file does. **This is the test that would have caught the first build's dead arrow keys** |
-| `test/browse.test.ts` | 12 | paging sized to whole rows, filtering, the Continue Watching predicate and its stable order, and the four empty screens that each name a different remedy |
+| `test/screens.test.ts` | 2 | the remote wiring: every screen declares the arrow keys and Enter it implements, and the player claims Back so the menu closes before the file does. **This is the test that would have caught the first build's dead arrow keys** |
+| `test/browse.test.ts` | 14 | filtering, the Continue Watching predicate and its stable order, the four empty screens that each name a different remedy, and **the shelf rule: resume points when there are any, the whole catalogue when there are not** — the defect that made a 1,200-file scan look like an empty library |
+| `test/nav.test.ts` | 14 | the rail and the cursor: which destination a route belongs to, up/down inside the rail, left from the first column, right back to the card the viewer left, clamping at both ends, and the grid window that keeps the cursor inside a band of whole rows while a 240-row list scrolls |
+| `test/rail.test.ts` | 4 | the drawn rail rows: six destinations, one focused row, the marker on the active destination, and ink that inverts rather than a ring |
+| `test/search.test.ts` | 6 | the on-screen keyboard's frame: keys, append and backspace, Clear, the query's match count, and that an empty query matches everything rather than nothing |
 | `test/locator.test.ts` | 10 | relative-locator validation: absolute, `..`, NUL, drive prefixes and UNC refused; a doubled separator accepted; a platform location such as `removable1` accepted as a root and a bare relative name refused |
 | `test/avplay.test.ts` | 9 | AVPlay's display-rect conversion and per-entry track reading — **the two places Samsung's own published samples are wrong** |
-| `test/cards.test.ts` | 12 | the card model and grid geometry: nothing overflows the authored surface, the gutter holds a focused card without overlapping its neighbour, a degenerate viewport produces a usable grid rather than `NaN`, and **a card is tall enough for both lines drawn in it and a whole page fits the band between the header and the footer** |
-| `test/templates.test.ts` | 2 | **every `$name` a screen's template references is declared in that component's state, props or computed block, or is one of its `:for` variables** — the check that would have caught the first build's blank screen, where a template read geometry off a computed object as if it were flat state. The second test proves the parser itself found what it was looking for |
+| `test/cards.test.ts` | 14 | the card model and grid geometry: nothing overflows the authored surface, the gutter holds a focused card without overlapping its neighbour, a degenerate viewport produces a usable grid rather than `NaN`, and **a card is tall enough for both lines drawn in it and a whole page fits the band between the header and the footer** |
+| `test/templates.test.ts` | 3 | **every `$name` a screen's template references is declared in that component's state, props or computed block, or is one of its `:for` variables** — the check that would have caught the first build's blank screen, where a template read geometry off a computed object as if it were flat state. A second test proves the parser found what it was looking for, and a third forbids a `:for` variable named `key`, which Blits' compiled scope overwrites with the row's key — the search keyboard drew nothing because of exactly that |
+| `test/player-menu.test.ts` | 6 | the player's D-pad menu: pause/seek first, then next episode, then the file's own tracks, then the way out; and **no transport rows at all when nothing started**, so the one control on a failed file is the honest one |
 | `test/tokens.test.ts` | 7 | the TV type scale stays legible at 10 feet and remains a viewing-distance multiple of the desktop's rather than a fork |
 
 What this tier **cannot** prove, and does not attempt to: that Lightning 3 runs on a

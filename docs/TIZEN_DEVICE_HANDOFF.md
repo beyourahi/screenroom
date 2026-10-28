@@ -4,16 +4,22 @@
 Tizen 6.0 web engine. This is the only TV in scope
 ([ADR-004](ADR-004_PERSONAL_EDITION_SCOPE.md)).
 
-**State (2026-10-29): the client is installed on the set, it runs there, and the owner
-has seen it.** The current package — 160,893 bytes,
-sha256 `69a794b2fb1ef4452b805cc4ebd3afc561fe9b2ae324a8943dc5dcfbe7ed7e14` — installed with
-`install completed` and launched, and the set's own record reads
+**State (2026-10-29, second session): the owner's drive was scanned and 1,200 files were
+catalogued and stored — and the library still could not be seen or browsed.** Two causes,
+both fixed in this tree; §2a records them. The app now draws the whole catalogue on Home,
+with a persistent rail and a D-pad-only path to every screen. The set was **not** touched
+in this session (the owner's background-first policy): every claim below is from the
+desktop browser preview and the test suite, which is **not** a TV receipt.
+
+**Last installed package (2026-10-29, first session):** 160,893 bytes,
+sha256 `69a794b2fb1ef4452b805cc4ebd3afc561fe9b2ae324a8943dc5dcfbe7ed7e14`, installed with
+`install completed` and launched; the set's own record reads
 `boot host=tizen avplay=1 filesystem=1 inputdevice=1 storage=1 keys=9/refused=0
 model=UAU8000 firmware=T-NKLAUABC-2310.0` plus
 `render canvases=1 size=1920x1080 css=1920px/1080px client=1920x1080 viewport=1920x1080 dpr=1
-mounted=1`. The owner then reported the **home screen drawn with text and cards readable
-from the sofa**, which closes the visual half of item 1. **Items 3–12 are open: no drive
-has been walked and no file has played.**
+mounted=1`. That build **predates** the library and navigation fixes, so the owner's
+1,200-file report describes it, not this tree. **Items 3–12 are open: no file has played
+on the set and no navigation flow has been exercised there.**
 
 The rule it exists to follow: a packaged `.wgt`, a signed package, a Tizen Studio
 install, a simulated filesystem or a television emulator is **not** a TV test. Only the
@@ -54,6 +60,21 @@ Its envelope reported `status: success` and **no warnings** — in particular no
 "Signed with Tizen default developer certificates" warning, which is the signal that a
 build fell back to the SDK's test certificates. Default-signed packages install on an
 emulator only.
+
+### 1b. Re-verified after the library and navigation fixes (2026-10-29)
+
+| Check | Result |
+| --- | --- |
+| `pnpm typecheck` | clean (app source and tests, separately) |
+| `pnpm test` | **228 tests, 0 failures** — 189 before the library/navigation work, plus the rail and cursor arithmetic, the shelf rule, the grid window, the search screen's keyboard and matches, and the template guards (a reference that does not resolve; a loop variable named `key`) |
+| `pnpm build` | typecheck + Vite + the Tizen staging step, one `main.js` of **541,802 bytes** (sha256 `3e46079b…4d85`), no code splitting |
+| `apps/tv/build/widget/` | staged: `config.xml`, `icon.png`, `index.html`, `main.js`, and the project metadata |
+| Browser preview (`vite`, 1920×1080) | Home draws the catalogue (`1200 files in the library`, `Row 3 of 240` after two presses of Down); the rail is focusable and opens every destination; Movies shows 600 of them; Search types a query and lists matches; Media Sources and Settings draw and scroll; Detail opens the chosen card; Play reaches the player and reports honestly that this host cannot convert a drive location into a file address |
+| Signed package | **not rebuilt in this session.** The `.wgt` on the set is the older one; packaging is the next step and its hash must be recorded here when it exists |
+
+**This is not a TV receipt.** The preview has no AVPlay, no USB storage, no remote, and
+no Tizen engine. It proves layout, the navigation arithmetic and that failure copy is
+truthful — nothing more.
 
 ### What that does **not** mean
 
@@ -173,6 +194,57 @@ reinstall, not a guarantee, and item 12 still has to be signed off by the owner.
 
 ---
 
+## 2a. Why 1,200 catalogued files were invisible (2026-10-29)
+
+The owner's report was precise and the pipeline was innocent: **the scan worked, the
+catalogue was built, and the document was written.** `library` in the evidence record
+read `items=1200 available=1200 write=accepted`, and Media Sources on the set showed
+`1200 files catalogued from 1 drive` / `Last scan: 1200 files found on 1 drive, with
+nothing skipped`. Four defects sat between that store and the screen, in this order:
+
+1. **Home drew only *Continue watching*.** `Home.ts` called `continueWatching(items)`,
+   which is empty until something has been played. `emptyState()` correctly returns
+   `null` for a library that has files and no filter, so the screen drew a heading, a
+   sub-heading, and nothing else — a successful scan that looks exactly like a failed
+   one. A library that is only visible after you have already watched something is a
+   library that cannot be started.
+2. **Nothing navigated anywhere.** The rail did not exist. `/browse`, `/movies`,
+   `/series`, `/search` and `/sources` were either absent or unreachable, and the only
+   route off Home was bound to the remote's **Info** key (`input.info → $router.to('/settings')`)
+   — a key most Samsung remotes do not label and this set's own key registration
+   cannot create. The catalogue was reachable only by pressing a button the viewer does
+   not have, which is why Settings "required a special remote button".
+3. **The grid was a page, not a window.** Browse drew a page of rows turned by the
+   rewind/forward media keys — again, keys nothing else needed, and a page that ended
+   mid-row.
+4. **The search screen's keyboard drew nothing.** `:for="key in $keys"` with
+   `key="$key.id"` compiles to a collision: Blits assigns the loop variable to the
+   scope slot named after it, and the `key` attribute then overwrites that slot with the
+   id. The body saw a string where it expected an object, every key was created with an
+   undefined position and size, and half the screen was empty with **no error and no
+   warning**. Found by rendering the screen in the preview and looking at it; guarded
+   now by a template test that forbids a loop variable named `key`.
+
+What replaced them, and what each fix is proven by:
+
+| Defect | Fix | Proven by |
+| --- | --- | --- |
+| Home showed only resume points | `homeShelf()` in `core/browse.ts`: resume points when there are any, **the whole catalogue** when there are not | `browse.test.ts` cases on both branches; the preview draws all 1,200 |
+| No navigation | `core/nav.ts` (rail entries, two-zone cursor, grid window) + `components/Rail.ts` drawn on Home, Movies, TV Shows, Search, Media Sources and Settings | `nav.test.ts` (movement, clamping, windowing), `rail.test.ts`, and a preview walk of every destination |
+| Paging by media keys | `gridWindow()`: Down is always the next row, the band slides, only ten cards exist | `nav.test.ts` window cases; preview shows `Row 3 of 240` and scrolls |
+| Search keyboard invisible | loop variable renamed; template test added | the screen renders 39 keys and types into a real query in the preview |
+
+Two smaller defects were found by walking the built screens and are fixed with the same
+commit: the grid kept a focused card **while the rail held the cursor** (two inverted
+surfaces, so Enter's target was ambiguous), and OK on the destination already open was a
+dead key on Search, Media Sources and Settings.
+
+**What is still a Mac-only claim.** Everything above is verified in the browser preview
+and the test suite. The preview has no AVPlay, no USB storage and no remote, so it
+proves layout, navigation arithmetic and honest failure copy — nothing about the set.
+
+---
+
 ## 3. Install and run
 
 ```bash
@@ -182,11 +254,24 @@ node ~/.codex/plugins/cache/tizen-platform/tizen-sdk-skills/*/lib/cli/install-ap
 
 (`tizen-install-app` owns this; nothing here should be typed as a raw `sdb install`.)
 
-The app must come up as **Screenroom**. First useful action on the set: open
-**Settings** with the remote's **Info** button. It prints, from the host itself: TV
-model, software version, Tizen version, playback path (AVPlay or `<video>`), how many
-remote keys registration accepted, where state is stored, every drive the TV reports
-with its type/state and whether this app will scan it, and what the last scan did.
+The app must come up as **Screenroom**. It opens on the rail, with **Home** highlighted,
+and everything is reachable with the arrow keys and OK — no Info key, no colour keys, no
+media keys. The rail is always on screen on the library screens:
+
+```
+Home · Movies · TV Shows · Search · Media Sources · Settings
+```
+
+First useful action on the set: **Down** to **Media Sources** and **OK**, then **OK** on
+*Scan for media*. Settings prints, from the host itself: TV model, software version,
+Tizen version, playback path (AVPlay or `<video>`), how many remote keys registration
+accepted, where state is stored, every drive the TV reports with its type/state and
+whether this app will scan it, and what the last scan did.
+
+Back is the remote's Return key everywhere: it closes the player menu, then leaves the
+file; on the home screen it leaves the app. While a file is playing, **Up** or **Down**
+opens the control menu (pause, 10-second seek, tracks, next episode, back to the
+library) — the media keys remain shortcuts, never requirements.
 
 ---
 
@@ -219,7 +304,8 @@ levels (`MAX_DEPTH` in `core/scan.ts`), skips hidden folders, and `folderHintOf`
 | 7 | The track menu works | During playback, press **Up**. | The menu lists audio tracks, *Subtitles off* and the subtitle tracks with the current choice marked. Choosing one changes the audio or subtitles, and the **next** file opens with that choice. |
 | 8 | A sidecar subtitle file is used | Put `Film.srt` beside `Film.mkv`, with the extension in the set Samsung documents (`.smi`, `.srt`, `.sub`, `.ttxt`). | Either subtitles appear, drawn by the app, or the overlay says the decoder refused the file — both are receipts. `.ass`/`.ssa` are deliberately not offered. |
 | 9 | Next episode | Finish an episode whose next episode is catalogued. | The overlay offers it by season/episode and title; Enter plays it from the beginning. With a gap in the numbering, nothing is offered. |
-| 10 | D-pad focus reachable, visible, restored | Arrow through the grid, Enter into a file, Back out. | Focus is visible from the sofa at every step, and Back returns to the same card. Back at the home screen leaves the app rather than doing nothing. |
+| 10 | D-pad focus reachable, visible, restored | Walk the rail with Down and OK: Home → Movies → TV Shows → Search → Media Sources → Settings, and back out with Return. Then arrow through a grid, Enter into a file, Back out. **Do not press Info, a colour key or a media key at any point** — if the walk needs one, the navigation is not finished. | One highlighted row or card at all times, never two; every destination opens; Left from the first card reaches the rail and Right returns to the same card; Back returns to the same card and leaves the app only from Home. |
+| 10b | The whole catalogue is visible and browsable | From Home, press Down until the grid has scrolled a few rows, then OK on a card. | Home shows the scanned files with titles and years; the row counter advances as the band scrolls; the chosen card opens its own detail screen. |
 | 11 | State survives restart and a power cycle | Play part of a file, exit, relaunch, then power the TV off and on. | The same file is offered from the same position after both, and the scan result is still on Settings. |
 | 12 | What a reinstall destroys | After the above, reinstall and re-check. | Written down, honestly, so nobody is surprised later. |
 
@@ -272,9 +358,11 @@ successful result, not a failure.
   the scan *incomplete*, and an incomplete scan withdraws nothing.
 - **Internal storage and virtual roots are reported but never walked** — a film does not
   live on the TV's flash, and walking it would catalogue the platform's bookkeeping.
-- **The remote's Info key opens Settings**, not a context menu, and the media keys are
-  *requested* with `registerKey`; the Settings screen reports how many the TV accepted,
-  which is the only honest source for that number.
+- **No screen needs a key the remote may not have.** Settings, Media Sources, Search and
+the library are on the rail; the player's controls are in a menu opened by Up/Down. The
+media and Info keys are *requested* with `registerKey` and remain shortcuts (Info
+toggles the player overlay), and the Settings screen reports how many the TV accepted,
+which is the only honest source for that number.
 - **LG webOS, Android TV and the Tizen emulator are out of scope.** The emulator in
   particular proves nothing about playback: it does not implement AVPlay's real
   decoding.

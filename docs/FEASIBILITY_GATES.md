@@ -236,9 +236,21 @@ because no issue was raised the walk would have called itself complete and withd
 every item's availability. A drive full of films would have catalogued zero, without an
 error. The reader now resolves the location and lists it, keeps each `File`'s own
 `isDirectory`, accepts a name-only answer, and tries the device-API spelling once before
-reporting a refusal. Six tests pin the normalization (`test/listing.test.ts`, 189 total),
+reporting a refusal. Six tests pin the normalization (`test/listing.test.ts`, 228 total),
 and the fix is installed on the set — **but it is not verified until a scan runs**, so
 item 3 stays open.
+
+### A fifth defect, found by the owner on the set (2026-10-29)
+
+The owner's own drive was walked and **1,200 files were catalogued and stored** — and
+the library still could not be seen. The scan, the catalogue and the write were all
+intact; the screens were the problem. Home drew only *Continue watching*, which is
+empty until something has been played, and the only route off Home was bound to the
+remote's **Info** key. The full account is in
+[`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md) §2a. The client now draws the
+whole catalogue with a persistent rail and a D-pad-only path to every screen, covering
+items 3 and 4's *display* half on the Mac — but the gate items stay open, because
+nothing in this session ran on the television.
 
 What this client now does off-device, and therefore does not have to be discovered on
 the television: it walks a mounted drive, parses film and episode identities from
