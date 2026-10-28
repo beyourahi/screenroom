@@ -85,7 +85,7 @@ they build and test the bundle only, and prove nothing about the TV:
 ```bash
 cd apps/tv
 pnpm install
-pnpm test        # 161 tests, 0 failures
+pnpm test        # 183 tests, 0 failures
 pnpm typecheck   # application source and tests, typechecked separately
 pnpm build       # one bundle + the staged Tizen widget directory
 ```

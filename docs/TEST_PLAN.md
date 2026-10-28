@@ -45,7 +45,7 @@ Nothing in this document has been run against Windows or a TV.
 Its tests run off-device and are a **new tier**, not a device run:
 
 ```bash
-cd apps/tv && pnpm test      # 180 tests, 0 failures
+cd apps/tv && pnpm test      # 183 tests, 0 failures
 cd apps/tv && pnpm typecheck # app source and tests, separately
 cd apps/tv && pnpm build     # bundle + the Tizen staging step
 ```
@@ -64,7 +64,8 @@ cd apps/tv && pnpm build     # bundle + the Tizen staging step
 | `test/browse.test.ts` | 12 | paging sized to whole rows, filtering, the Continue Watching predicate and its stable order, and the four empty screens that each name a different remedy |
 | `test/locator.test.ts` | 10 | relative-locator validation: absolute, `..`, NUL, drive prefixes and UNC refused; a doubled separator accepted; a platform location such as `removable1` accepted as a root and a bare relative name refused |
 | `test/avplay.test.ts` | 9 | AVPlay's display-rect conversion and per-entry track reading — **the two places Samsung's own published samples are wrong** |
-| `test/cards.test.ts` | 11 | the card model and grid geometry: nothing overflows the authored surface, the gutter holds a focused card without overlapping its neighbour, and a degenerate viewport produces a usable grid rather than `NaN` |
+| `test/cards.test.ts` | 12 | the card model and grid geometry: nothing overflows the authored surface, the gutter holds a focused card without overlapping its neighbour, a degenerate viewport produces a usable grid rather than `NaN`, and **a card is tall enough for both lines drawn in it and a whole page fits the band between the header and the footer** |
+| `test/templates.test.ts` | 2 | **every `$name` a screen's template references is declared in that component's state, props or computed block, or is one of its `:for` variables** — the check that would have caught the first build's blank screen, where a template read geometry off a computed object as if it were flat state. The second test proves the parser itself found what it was looking for |
 | `test/tokens.test.ts` | 7 | the TV type scale stays legible at 10 feet and remains a viewing-distance multiple of the desktop's rather than a fork |
 
 What this tier **cannot** prove, and does not attempt to: that Lightning 3 runs on a

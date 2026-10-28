@@ -535,9 +535,25 @@ own storage adapter. What was written, and what each part rests on:
 ```bash
 cd apps/tv
 pnpm typecheck    # clean; application source sees no ambient Node types at all
-pnpm test         # 180 tests, 0 failures
-pnpm build        # 462,142-byte main.js + the staging step
+pnpm test         # 183 tests, 0 failures
+pnpm build        # 484,867-byte main.js + the staging step
 ```
+
+**2026-10-28, later: the screen was actually looked at, and it was broken.** The build
+installed on the set drew one line of text on black. Reproduced in a browser at
+1920×1080 against the *built* widget, which is what made it debuggable at all:
+
+| Defect | Cause | Fix |
+| --- | --- | --- |
+| Only static text painted; every value set in `ready()` stayed empty | Blits makes an attribute reactive only when it starts with `:` (`isReactiveKey = (str) => str.startsWith(':')` in its code generator), so `content="$subheading"` was read once, at creation | every state-bound attribute now carries `:` |
+| Home, Browse and Detail placed nodes at `undefined` | their templates read geometry members off a *computed object* as if they were flat state | the geometry is copied into state by `applyLayout()` before the first paint, the way Settings and Player already did |
+| A card's title was drawn past the card's bottom edge | the title strip was guessed (`body * 2.4`) and shorter than the two lines under the art | `gridFor` derives the strip from the type scale and exposes `titleY`/`subtitleY` |
+| Browse's third row was drawn below the set | the grid was sized from the width alone | `gridFor` takes the band it has to fit and shrinks the cards; Browse pages 5×2 |
+| A file that would not open said so into an invisible node | the whole player template's alpha was the overlay's alpha, which starts at 0 | the scrim is its own layer; failures go through `reportFailure`, which keeps the message up |
+
+Guarded by `test/templates.test.ts` (no template may read a name the component does not
+declare) and the new `test/cards.test.ts` case (a card fits its own text; a page fits its
+band). **Verified in the browser against the built widget only — not yet on the set.**
 
 The signed package was produced through the `tizen-build-project` runner:
 `apps/tv/build/ScreenroomTV-0.1.0.wgt`, 157,202 bytes, sha256

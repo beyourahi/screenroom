@@ -23,14 +23,14 @@ television is.
 cd apps/tv
 pnpm install                 # Blits 2.15.0, TypeScript 5.9, Vite 7
 pnpm typecheck               # app source and tests, separately
-pnpm test                    # 161 tests, 0 failures
+pnpm test                    # 183 tests, 0 failures
 pnpm build                   # typecheck + Vite + the Tizen staging step
 ```
 
 | Check | Result (2026-10-28) |
 | --- | --- |
 | `pnpm typecheck` | clean. Application source typechecks with **no ambient types at all** (`"types": []`), so a Node-only global cannot typecheck inside a component that has to run in a web widget; the tests are the only files that see Node's globals |
-| `pnpm test` | **180 tests, 0 failures** — the focus machine, the progress guard, the store and its durability rules, the scanner's rules, a whole-drive walk over a simulated Tizen filesystem, filename interpretation, the track menu and next-episode rule, decoder preferences, the remote-key wiring of every screen, relative-locator validation, AVPlay's display-rect maths and track reading, the design tokens and the card geometry. Per-suite counts are in [`TEST_PLAN.md`](TEST_PLAN.md) |
+| `pnpm test` | **183 tests, 0 failures** — the focus machine, the progress guard, the store and its durability rules, the scanner's rules, a whole-drive walk over a simulated Tizen filesystem, filename interpretation, the track menu and next-episode rule, decoder preferences, the remote-key wiring of every screen, relative-locator validation, AVPlay's display-rect maths and track reading, the design tokens and the card geometry. Per-suite counts are in [`TEST_PLAN.md`](TEST_PLAN.md) |
 | `pnpm build` | one 462,142-byte `main.js` and a 1,391-byte `index.html`; no code splitting (a widget has no server to fetch a second chunk from) |
 | `apps/tv/build/widget/` | the staged widget: `config.xml`, `icon.png`, `index.html`, `main.js`, and the Tizen project metadata. The staging step refuses to continue if the bundle is unlinked, missing, or referenced by an absolute path |
 | Signed package | **built and installed.** `apps/tv/build/ScreenroomTV-0.1.0.wgt`, 158,500 bytes on 2026-10-28; earlier builds of the same day were 157,202 → 157,986 → 158,079 → 158,101 → 158,462 bytes as the three device defects below were fixed. The hash changes with every one of those; quote the one the TV actually has (see section 2) |
@@ -60,6 +60,26 @@ emulator only.
   Tizen engine: not the renderer, not WebGL, not a single frame.
 - It does **not** mean the app plays video, lists a drive or switches a track. No byte
   of media has passed through AVPlay and no USB drive has been walked by the set.
+
+---
+
+## 1a. The set is reachable *intermittently* — check before believing anything below
+
+**2026-10-28 (later in the day):** `sdb devices` listed the set once, then the next
+command returned `error: target not found`. `ping 192.168.0.172` is 100 % loss, the Mac
+is still on `192.168.0.110/24` with gateway `192.168.0.1`, and the ARP table holds no
+entry for the television. That is one of three states and no other: the set is off, it
+has left this network, or it has left developer mode.
+
+The single command that settles it once the set is awake, with nothing else typed first:
+
+```bash
+CLI=$(ls ~/.codex/plugins/cache/tizen-platform/tizen-sdk-skills/*/lib/cli/remote-device-cli.js | sort -V | tail -1)
+node "$CLI" connect 192.168.0.172:26101     # must report `device`, not `offline`
+```
+
+If the address changed, the router's client list is the place to read it — the set's
+hostname or MAC, not a fresh `/24` sweep.
 
 ---
 
