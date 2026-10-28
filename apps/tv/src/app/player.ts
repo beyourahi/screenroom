@@ -39,12 +39,19 @@ export interface PlaybackView {
   readonly running: boolean
 }
 
+/** What a session may be given besides the file itself. */
+export interface BeginOptions {
+  /** An absolute location for a subtitle file beside the video, or `null`. */
+  readonly subtitleFile?: string | null
+}
+
 /** Opens a file. Returns false when a playback was already in progress and was ended. */
 export function begin(
   item: { readonly id: string; readonly workId: string },
   uri: string,
   startMs: number,
   events: PlaybackEvents,
+  options: BeginOptions = {},
 ): boolean {
   const restarted = session !== null
   if (restarted) {
@@ -73,7 +80,12 @@ export function begin(
     onEnded: events.onEnded,
     onError: events.onError,
     onBuffering: events.onBuffering,
-  })
+    // Two optional callbacks, forwarded only when the screen asked for them: the port's
+    // types are exact, so passing an absent handler explicitly would be a type error
+    // and a lie about which events this session reports.
+    ...(events.onSubtitleFile === undefined ? {} : { onSubtitleFile: events.onSubtitleFile }),
+    ...(events.onSubtitleText === undefined ? {} : { onSubtitleText: events.onSubtitleText }),
+  }, options)
   return !restarted
 }
 
@@ -118,9 +130,29 @@ export function jump(deltaMilliseconds: number): void {
   session?.jump(deltaMilliseconds)
 }
 
-/** The tracks the decoder offers, for a future track menu. */
+/** The tracks the decoder offers, for the track menu. */
 export function tracks() {
   return session?.tracks() ?? []
+}
+
+/** Switches an audio or text track. False means the decoder refused. */
+export function selectTrack(type: string, index: number): boolean {
+  return session?.selectTrack(type, index) ?? false
+}
+
+/** Hides or shows subtitles without changing the selected track. */
+export function setSubtitlesSilent(silent: boolean): boolean {
+  return session?.setSubtitlesSilent(silent) ?? false
+}
+
+/** True when the decoder is rendering text silently. */
+export function subtitlesSilent(): boolean {
+  return session?.subtitlesSilent() ?? false
+}
+
+/** The duration the decoder reported, or 0 before it is ready. */
+export function decoderDurationMs(): number {
+  return session?.durationMs() ?? 0
 }
 
 /** Writes a checkpoint when enough time has passed since the last one. */

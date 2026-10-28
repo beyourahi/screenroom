@@ -226,6 +226,92 @@ test('finishing a file clears the resume point and reports it as watched', () =>
   assert.equal(service.items()[0]?.positionMs, 0, 'a finished file has no resume point')
 })
 
+test('the playback preferences and the last scan survive a restart', () => {
+  const port = createMemoryStorage()
+  const first = new LibraryService(port)
+  first.saveSettings({ subtitles: 'auto', subtitleLanguage: 'deu', audioLanguage: 'eng' })
+  first.recordScan({
+    scannedSources: 1,
+    imported: 7,
+    withdrawn: 0,
+    issues: [],
+    complete: true,
+    bounded: false,
+    finishedMs: 1_700_000_000_000,
+    reason: null,
+  })
+
+  // A new service over the same bytes is what a restart is, and both facts have to
+  // come back: a television that forgot its subtitle language every launch would be a
+  // television nobody configures twice.
+  const second = new LibraryService(port)
+  assert.deepEqual(second.settings(), {
+    subtitles: 'auto',
+    subtitleLanguage: 'deu',
+    audioLanguage: 'eng',
+  })
+  assert.equal(second.lastScan().imported, 7)
+  assert.equal(second.lastScan().complete, true)
+})
+
+test('a version 1 document is read with default settings rather than refused', () => {
+  // The whole point of the version number: a document written before the preferences
+  // existed must still open its library.
+  const raw = JSON.stringify({
+    formatVersion: 1,
+    profiles: [],
+    sources: [source],
+    items: [item()],
+    activeProfileId: null,
+    hiddenWorkIds: [],
+  })
+  const result = decodeSnapshot(raw)
+  assert.equal(result.reset, false)
+  assert.equal(result.snapshot.items.length, 1)
+  assert.equal(result.snapshot.settings.subtitles, 'off')
+  assert.equal(result.snapshot.lastScan.finishedMs, 0)
+})
+
+test('a scan writes the catalogue, the sources and the report in one document', () => {
+  const port = createMemoryStorage()
+  let writes = 0
+  const counting = {
+    ...port,
+    write: (document: string) => {
+      writes += 1
+      return port.write(document)
+    },
+  }
+  const service = new LibraryService(counting)
+  service.beginSession(LIVE_SESSION, 'item-1')
+  service.replaceCatalog([item()], [source])
+  service.recordProgress({ sessionId: LIVE_SESSION, generation: 1 }, snapshotFor(1, 90_000), 'work-1')
+  writes = 0
+
+  service.applyScan({
+    items: [item({ title: 'Renamed', available: false })],
+    sources: [{ ...source, lastScanMs: 42 }],
+    report: {
+      scannedSources: 1,
+      imported: 1,
+      withdrawn: 1,
+      issues: [],
+      complete: true,
+      bounded: false,
+      finishedMs: 42,
+      reason: null,
+    },
+  })
+
+  // One write, because localStorage on a 2021 TV is synchronous: three writes is three
+  // chances to be interrupted halfway through a library update.
+  assert.equal(writes, 1)
+  assert.equal(service.items()[0]?.title, 'Renamed')
+  assert.equal(service.items()[0]?.positionMs, 90_000, 'the position is still the owner’s')
+  assert.equal(service.state().sources[0]?.lastScanMs, 42)
+  assert.equal(service.lastScan().withdrawn, 1)
+})
+
 test('a device that refuses a write says so instead of assuming it worked', () => {
   // Tizen's localStorage throws when the quota is full, so a full disk must not look
   // like a saved position.

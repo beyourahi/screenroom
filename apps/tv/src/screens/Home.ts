@@ -19,7 +19,14 @@ import { continueWatching, emptyState } from '../core/browse.ts'
 import { moveFocus, restoreFocus, type Direction } from '../core/focus.ts'
 import { buildCards, gridFor } from '../design/cards.ts'
 import { hex, TOKENS } from '../design/tokens.ts'
-import { focus as focusMemory, items, mediaRoots, onTv } from '../app/runtime.ts'
+import {
+  focus as focusMemory,
+  items,
+  mediaRoots,
+  onTv,
+  scanInProgress,
+  sources,
+} from '../app/runtime.ts'
 
 /** How many resume entries Home shows. One full screen, no paging. */
 const HOME_COLUMNS = 4
@@ -162,6 +169,33 @@ export default Blits.Component('Home', {
       this.reload()
     },
   },
+  /**
+   * The remote keys, as the engine names them.
+   *
+   * This block is not decoration: an input handler is only reachable when it is
+   * declared here, and the screen's own `methods` are what it calls. Without it the
+   * arrow keys arrive and go nowhere.
+   */
+  input: {
+    left() {
+      this.left()
+    },
+    right() {
+      this.right()
+    },
+    up() {
+      this.up()
+    },
+    down() {
+      this.down()
+    },
+    enter() {
+      this.enter()
+    },
+    info() {
+      this.info()
+    },
+  },
   methods: {
     /** Reads the store and rebuilds what this screen shows. */
     reload() {
@@ -172,11 +206,12 @@ export default Blits.Component('Home', {
       this.focusIndex = this.count > 0 ? restoreFocus(focusMemory(), ROUTE, this.count) : 0
       this.repaint()
 
+      const granted = sources()
       const situation = emptyState({
-        sourceCount: items().length > 0 || mediaRoots().length > 0 ? 1 : 0,
+        sourceCount: granted.length,
         catalogCount: items().length,
-        scanning: false,
-        unavailableSources: 0,
+        scanning: scanInProgress(),
+        unavailableSources: granted.filter((source) => source.state !== 'available').length,
         filterText: '',
       })
       if (situation === null) {

@@ -45,7 +45,7 @@ Nothing in this document has been run against Windows or a TV.
 Its tests run off-device and are a **new tier**, not a device run:
 
 ```bash
-cd apps/tv && pnpm test      # 82 tests, 0 failures
+cd apps/tv && pnpm test      # 161 tests, 0 failures
 cd apps/tv && pnpm typecheck # app source and tests, separately
 cd apps/tv && pnpm build     # bundle + the Tizen staging step
 ```
@@ -54,19 +54,27 @@ cd apps/tv && pnpm build     # bundle + the Tizen staging step
 | --- | --- | --- |
 | `test/focus.test.ts` | 8 | the D-pad rule, checked index-for-index against the desktop's own rule, plus per-screen focus memory and the restore-after-a-shrink case |
 | `test/progress.test.ts` | 10 | the session/generation/sequence guard, the finished threshold and when a position is worth writing |
-| `test/store.test.ts` | 17 | the document's durability rules: one unreadable row never costs the library, a newer format is refused rather than guessed, oversized input is refused before parsing, a refused write is reported, an unchanged state is not written twice |
+| `test/store.test.ts` | 20 | the document's durability rules: one unreadable row never costs the library, a newer format is refused rather than guessed, a version 1 document is still read, oversized input is refused before parsing, a refused write is reported, an unchanged state is not written twice, the playback preferences and the last scan survive a restart, and a scan lands in **one** document |
+| `test/scan.test.ts` | 19 | the scanner's rules: classification, the two bounds, identity across a rescan, withdrawal only after a complete walk, unsafe and downloading entries reported, one source's plan never touching another, and a stored report that cannot be read refused rather than believed |
+| `test/scan-pipeline.test.ts` | 10 | **the whole scan, end to end, over a simulated Tizen filesystem**: drives listed → walked → parsed → catalogued → stored → re-read through the screens' own accessors. Covers a rescan keeping every id, a deleted file keeping its position, a pulled drive becoming unreadable, a drive that will not list withdrawing nothing, an internal storage never being walked, and a host with no filesystem API |
+| `test/name.test.ts` | 17 | filename interpretation: film/year, `S01E02` and `1x02` forms, folder hints, unreadable names that never join another work |
+| `test/tracks.test.ts` | 13 | the track menu's order and selection, “subtitles off” as silence rather than an index, preference matching across `de`/`deu` spellings, the four sidecar subtitle extensions, and the next-episode rule including gaps, duplicates and season boundaries |
+| `test/settings.test.ts` | 9 | decoder preferences: the safe default, refusal of junk, language normalisation, what choosing a track remembers, and that “off” keeps the language for later |
+| `test/screens.test.ts` | 6 | the remote wiring: every screen declares the keys it implements, and the player claims Back so the menu closes before the file does. **This is the test that would have caught the first build's dead arrow keys** |
 | `test/browse.test.ts` | 12 | paging sized to whole rows, filtering, the Continue Watching predicate and its stable order, and the four empty screens that each name a different remedy |
-| `test/locator.test.ts` | 8 | relative-locator validation: absolute, `..`, NUL, drive prefixes and UNC refused; a doubled separator accepted |
-| `test/avplay.test.ts` | 10 | AVPlay's display-rect conversion and per-entry track reading — **the two places Samsung's own published samples are wrong** |
+| `test/locator.test.ts` | 10 | relative-locator validation: absolute, `..`, NUL, drive prefixes and UNC refused; a doubled separator accepted; a platform location such as `removable1` accepted as a root and a bare relative name refused |
+| `test/avplay.test.ts` | 9 | AVPlay's display-rect conversion and per-entry track reading — **the two places Samsung's own published samples are wrong** |
 | `test/cards.test.ts` | 11 | the card model and grid geometry: nothing overflows the authored surface, the gutter holds a focused card without overlapping its neighbour, and a degenerate viewport produces a usable grid rather than `NaN` |
 | `test/tokens.test.ts` | 7 | the TV type scale stays legible at 10 feet and remains a viewing-distance multiple of the desktop's rather than a fork |
 
 What this tier **cannot** prove, and does not attempt to: that Lightning 3 runs on a
 Tizen engine, that the renderer finds WebGL, what the frame budget is, that AVPlay
-accepts a given URI or codec, or that any remote key arrives. Those are television
-observations. The device procedure and the per-item receipt format are in
-[`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md), and the T-01/T-02/T-03 cases in
-§4 below are unchanged by it.
+accepts a given URI or codec, that the TV grants `filesystem.read` on a USB drive, or
+that any remote key arrives. `scan-pipeline.test.ts` simulates the platform, which is
+what makes it useful and what makes it insufficient: nothing in it can fail the way a
+television fails. Those are device observations. The procedure and the per-item receipt
+format are in [`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md), and the
+T-01/T-02/T-03 cases in §4 below are unchanged by it.
 
 ## Testing without taking over the desktop
 

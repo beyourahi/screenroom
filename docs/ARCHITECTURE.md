@@ -68,7 +68,16 @@ the same *contract* rather than a second build of the same code. It mirrors
 application-generated id rather than a path, and an unavailable source never deletes
 anything — in TypeScript, and it re-implements the rules that decide behaviour as pure
 functions with their own tests (`core/focus.ts`, `core/progress.ts`, `core/store.ts`,
-`core/locator.ts`).
+`core/locator.ts`, `core/scan.ts`, `core/name.ts`, `core/tracks.ts`,
+`core/settings.ts`).
+
+The scan is the clearest example of that split. The Rust core walks a folder with
+`std::fs`; the TV cannot — its filesystem API lists one directory at a time, reports no
+size and no modification time, and the drive can vanish mid-walk. So the *decisions*
+are ported as pure functions (`core/scan.ts`: classification, the two bounds, identity
+across a rescan, and the rule that only a complete walk may withdraw availability) and
+the platform file next door (`platform/scan.ts`) only knows how to list a directory and
+when to stop.
 
 The boundaries are ports, so the platform is replaceable and testable: `StoragePort`
 takes bytes in and bytes out, and the durability rules live above it; the playback port

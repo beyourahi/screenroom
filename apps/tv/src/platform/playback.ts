@@ -25,11 +25,8 @@
  * named, it is reported in Settings, and it must never be counted as a TV result.
  */
 
-import {
-  readTracks,
-  toDisplayRect,
-  type TrackChoice,
-} from './avplay-pure.ts'
+import type { TrackChoice } from '../core/tracks.ts'
+import { readTracks, toDisplayRect } from './avplay-pure.ts'
 import { tizenGlobal, type AvPlay } from './tizen.ts'
 
 /** Which implementation is running. */
@@ -49,6 +46,23 @@ export interface PlaybackEvents {
   onError(message: string): void
   /** Buffering started or finished. */
   onBuffering(active: boolean): void
+  /**
+   * A subtitle file beside the video was offered to the decoder, and whether it took it.
+   *
+   * Reported rather than assumed: `setExternalSubtitlePath` failing is silent on some
+   * firmware, and a subtitle that never appears is exactly the case where the owner
+   * needs to be told the file was refused rather than left guessing.
+   */
+  onSubtitleFile?(result: { readonly offered: string | null; readonly accepted: boolean }): void
+  /**
+   * One line of subtitle text the decoder handed over for the app to draw.
+   *
+   * `onsubtitlechange` exists for *software* subtitles: with an external subtitle file
+   * the decoder parses the file and gives the app the text, and the app draws it —
+   * which is exactly what Samsung's own subtitle sample does
+   * (`subtitlesEl.innerText = text`). An empty string means the line has ended.
+   */
+  onSubtitleText?(text: string): void
 }
 
 /** An open player. Created once per playback, disposed when the user leaves. */
@@ -68,6 +82,16 @@ export interface PlaybackSession {
   tracks(): readonly TrackChoice[]
   /** Switches an audio or text track. Returns whether the platform accepted it. */
   selectTrack(type: string, index: number): boolean
+  /**
+   * Hides or shows subtitles without changing which track is selected.
+   *
+   * Returns whether the decoder accepted the change. This is the platform's own
+   * subtitle switch — `setSilentSubtitle` — and not a track index, because a track
+   * index cannot express "off" in a way the decoder honours.
+   */
+  setSubtitlesSilent(silent: boolean): boolean
+  /** True when the decoder is currently rendering text silently. */
+  subtitlesSilent(): boolean
   /** The last position the decoder reported. */
   positionMs(): number
   /** The duration the decoder reported, or 0. */
@@ -146,12 +170,15 @@ function createAvPlaySession(
   uri: string,
   startMs: number,
   events: PlaybackEvents,
+  options: StartOptions,
 ): PlaybackSession {
   const surface = createSurface('object')
   let position = 0
   let duration = 0
   let paused = false
   let disposed = false
+  let silent = false
+  let sidecarAccepted = false
   let tracks: readonly TrackChoice[] = []
 
   const state = (): string => {
@@ -196,10 +223,14 @@ function createAvPlaySession(
     },
     onstreamcompleted: () => events.onEnded(),
     onerror: (errorType: string) => events.onError(`AVPlay: ${errorType}`),
-    onsubtitlechange: () => {
-      // Embedded text tracks are drawn by the decoder itself; nothing to do here.
-      // External subtitle files are a gap in this slice — see the Tizen milestone
-      // notes — and are deliberately not half-implemented.
+    onsubtitlechange: (_duration: number, text: string) => {
+      // Only drawn when this app supplied the subtitle file. An embedded text track is
+      // rendered by the decoder into its own surface, and drawing the same line again
+      // would show it twice — the one bug this rule exists to avoid. Which of the two
+      // the decoder reports here is listed in the device handoff as an observable.
+      if (sidecarAccepted) {
+        events.onSubtitleText?.(typeof text === 'string' ? text : '')
+      }
     },
   })
 
@@ -209,6 +240,23 @@ function createAvPlaySession(
   // Letter-boxing keeps the file's aspect ratio; stretching to the screen would be a
   // silent picture-quality change nobody asked for.
   player.setDisplayMethod('PLAYER_DISPLAY_MODE_LETTER_BOX')
+
+  // A subtitle file sitting beside the video is offered to the decoder before it
+  // prepares, which is the order Samsung's own subtitle sample uses. A refusal is not
+  // fatal — the file still plays, and the player screen says the sidecar was not taken
+  // rather than showing a subtitle the decoder is not rendering.
+  if (options.subtitleFile !== null && options.subtitleFile !== undefined) {
+    try {
+      player.setExternalSubtitlePath(options.subtitleFile)
+      sidecarAccepted = true
+    } catch {
+      sidecarAccepted = false
+    }
+  }
+  events.onSubtitleFile?.({
+    offered: options.subtitleFile ?? null,
+    accepted: sidecarAccepted,
+  })
 
   if (startMs > 0) {
     // Valid in IDLE, and the only way to start part-way through: a seek issued after
@@ -301,11 +349,41 @@ function createAvPlaySession(
       }
       try {
         player.setSelectTrack(type, index)
+        if (type === 'TEXT') {
+          // Choosing a text track is not an instruction to hide it: whatever silent
+          // state the decoder was in, a track the owner just picked has to be visible.
+          try {
+            player.setSilentSubtitle(false)
+            silent = false
+          } catch {
+            // The track was selected; the visibility call is a second attempt, and the
+            // menu re-reads the real state on the next open.
+          }
+        }
         return true
       } catch {
         return false
       }
     },
+    setSubtitlesSilent(next: boolean): boolean {
+      if (disposed) {
+        return false
+      }
+      try {
+        player.setSilentSubtitle(next)
+        silent = next
+        if (next) {
+          // The decoder stops sending lines once it is silent, but the last line it did
+          // send is already on screen — clearing it is the difference between
+          // "subtitles off" and "subtitles off, with the last one still showing".
+          events.onSubtitleText?.('')
+        }
+        return true
+      } catch {
+        return false
+      }
+    },
+    subtitlesSilent: () => silent,
     positionMs: () => position,
     durationMs: () => duration,
     state,
@@ -421,6 +499,10 @@ function createVideoSession(uri: string, startMs: number, events: PlaybackEvents
     // them, and pretending otherwise would show a menu that does nothing.
     tracks: () => [],
     selectTrack: () => false,
+    // The browser has no equivalent of the platform's subtitle switch, and saying so is
+    // the point: a preview must not look like a TV that switched subtitles off.
+    setSubtitlesSilent: () => false,
+    subtitlesSilent: () => false,
     positionMs: () => position,
     durationMs: () => duration,
     state: () => (element.readyState >= 3 ? (paused ? 'PAUSED' : 'PLAYING') : 'IDLE'),
@@ -437,6 +519,12 @@ function createVideoSession(uri: string, startMs: number, events: PlaybackEvents
   }
 }
 
+/** What an open may be given besides the file itself. */
+export interface StartOptions {
+  /** An absolute location for a subtitle file beside the video, or `null`. */
+  readonly subtitleFile?: string | null
+}
+
 /**
  * Opens a file for playback.
  *
@@ -447,10 +535,15 @@ export function startPlayback(
   uri: string,
   startMs: number,
   events: PlaybackEvents,
+  options: StartOptions = {},
 ): PlaybackSession {
   const player = tizenGlobal()?.webapis?.avplay
   if (player !== undefined) {
-    return createAvPlaySession(player, uri, startMs, events)
+    return createAvPlaySession(player, uri, startMs, events, options)
   }
+  events.onSubtitleFile?.({
+    offered: options.subtitleFile ?? null,
+    accepted: false,
+  })
   return createVideoSession(uri, startMs, events)
 }

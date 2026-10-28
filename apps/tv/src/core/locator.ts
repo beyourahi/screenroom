@@ -74,44 +74,69 @@ export function checkLocator(locator: string): LocatorVerdict {
 }
 
 /**
+ * A media root, as the TV actually spells one.
+ *
+ * Two forms are legitimate, and the difference is the platform's rather than this
+ * app's:
+ *
+ * * **An absolute device path**, as a desktop library imported from elsewhere carries —
+ *   `/Volumes/Media`, `/USB/Media`, `D:\Media`.
+ * * **A platform location**, which is what a Tizen storage *is*. Samsung's filesystem
+ *   reference states that `FileSystemStorage.label` is "used as location parameter",
+ *   and names `removable_…` as the location for external storages — so a USB drive is
+ *   addressed as `removable1`, not as a mount path this app would have to invent.
+ *
+ * A root that is neither is refused. That matters more than it looks: a rooted-looking
+ * relative path such as `Movies` would join to produce something resolved against the
+ * widget's own private storage, which is not where the owner's media lives, and a
+ * silent wrong answer there is worse than a refusal.
+ */
+function usableRoot(rootPath: string): string | null {
+  const root = rootPath.replace(/[/\\]+$/, '')
+  if (root.length === 0 || root.includes('\0')) {
+    return null
+  }
+  if (root.startsWith('/') || /^[a-zA-Z]:/.test(root)) {
+    return root
+  }
+  // A platform location: a storage label or a virtual root, with no separator in it.
+  return /^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(root) ? root : null
+}
+
+/**
  * Joins a validated locator onto a granted root.
  *
- * Returns `null` when the locator is unsafe, so a caller cannot accidentally use the
- * unvalidated string. Trailing separators on the root are tolerated because a
- * granted root is spelled by the picker, which may or may not include one.
+ * Returns `null` when either half is unusable, so a caller cannot accidentally use an
+ * unvalidated string. Trailing separators on the root are tolerated because the two
+ * places a root comes from — a folder picker and a platform label — do not agree on
+ * whether one is included.
+ *
+ * The result is a *location*, which on this platform is what the filesystem API takes:
+ * `removable1/Movies/Film.mkv`. Turning it into something a decoder accepts is the
+ * platform adapter's job (`tizen.filesystem.toURI`), not this module's.
  */
 export function resolveLocator(rootPath: string, locator: string): string | null {
   const verdict = checkLocator(locator)
   if (!verdict.safe) {
     return null
   }
-  const root = rootPath.replace(/[/\\]+$/, '')
-  if (!root.startsWith('/')) {
-    // A TV media root is always absolute on this platform; anything else would make
-    // the join produce a path relative to the app's own storage, which is not where
-    // media lives.
+  const root = usableRoot(rootPath)
+  if (root === null) {
     return null
   }
   return `${root}/${verdict.segments.join('/')}`
 }
 
-/**
- * The USB media root, when the TV reports one.
- *
- * Tizen mounts removable storage under `/opt/developer` for developer uploads and
- * `/USB`-style device paths for a plugged-in drive, and the exact mount path is not
- * guaranteed across models or firmware. This normalises the spellings the platform
- * is known to use and returns the first that resolves; it deliberately does not
- * guess, and a drive that is not there returns an empty list rather than a wrong
- * path.
- */
-export function candidateRoots(devicePath: string | null): string[] {
-  if (devicePath === null) {
-    return []
+/** Per-subtitle file names to look for beside a video, without their extension. */
+export function subtitleStem(locator: string): string | null {
+  const verdict = checkLocator(locator)
+  if (!verdict.safe) {
+    return null
   }
-  const trimmed = devicePath.replace(/[/\\]+$/, '')
-  if (trimmed.length === 0) {
-    return []
+  const name = verdict.segments[verdict.segments.length - 1]
+  if (name === undefined) {
+    return null
   }
-  return trimmed.startsWith('/') ? [trimmed] : [`/${trimmed}`]
+  const dot = name.lastIndexOf('.')
+  return dot > 0 ? name.slice(0, dot) : name
 }

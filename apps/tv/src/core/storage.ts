@@ -16,7 +16,9 @@
  *   to have worked.
  */
 
-import type { LibraryItem, PlaybackSnapshot, Profile, ProfileId } from './contract.ts'
+import type { LibraryItem, PlaybackSnapshot, Profile, ProfileId, Source } from './contract.ts'
+import type { ScanReport } from './scan.ts'
+import type { DeviceSettings } from './settings.ts'
 import { acceptProgress, isFinished, isWorthSaving, type LiveSession } from './progress.ts'
 import {
   decodeSnapshot,
@@ -24,6 +26,8 @@ import {
   encodeSnapshot,
   withHiddenWork,
   withItemProgress,
+  withScanReport,
+  withSettings,
   type StoreIssue,
   type StoreSnapshot,
 } from './store.ts'
@@ -259,6 +263,71 @@ export class LibraryService {
       }
     })
     this.snapshot = { ...this.snapshot, items: merged, sources }
+    return this.persist()
+  }
+
+  /**
+   * Replaces the catalogue, the sources and the scan report in one write.
+   *
+   * One write rather than three, because `localStorage` on a 2021 TV is synchronous and
+   * small: a scan that wrote the items, then the sources, then the report would be
+   * three chances to be interrupted halfway through a library update.
+   *
+   * Item progress is still carried forward per id, exactly as `replaceCatalog` does.
+   */
+  applyScan(input: {
+    readonly items: readonly LibraryItem[]
+    readonly sources: readonly Source[]
+    readonly report: ScanReport
+  }): boolean {
+    const previous = new Map(this.snapshot.items.map((item) => [item.id, item]))
+    const merged = input.items.map((item) => {
+      const before = previous.get(item.id)
+      if (before === undefined) {
+        return item
+      }
+      return {
+        ...item,
+        positionMs: before.positionMs,
+        durationMs: item.durationMs > 0 ? item.durationMs : before.durationMs,
+        watched: before.watched,
+        updatedMs: before.updatedMs,
+      }
+    })
+    this.snapshot = {
+      ...this.snapshot,
+      items: merged,
+      sources: input.sources,
+      lastScan: input.report,
+    }
+    return this.persist()
+  }
+
+  /** This device's playback preferences. */
+  settings(): DeviceSettings {
+    return this.snapshot.settings
+  }
+
+  /**
+   * Stores new playback preferences.
+   *
+   * `false` means "nothing was written", which is also what an unchanged preference
+   * reports: the writer compares the encoded document, so setting the same language
+   * twice costs no flash write.
+   */
+  saveSettings(settings: DeviceSettings): boolean {
+    this.snapshot = withSettings(this.snapshot, settings)
+    return this.persist()
+  }
+
+  /** What the last scan did, as it was stored. */
+  lastScan(): ScanReport {
+    return this.snapshot.lastScan
+  }
+
+  /** Records a finished scan where no catalogue changed. */
+  recordScan(report: ScanReport): boolean {
+    this.snapshot = withScanReport(this.snapshot, report)
     return this.persist()
   }
 

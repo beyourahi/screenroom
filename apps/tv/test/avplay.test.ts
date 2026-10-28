@@ -5,9 +5,11 @@ import {
   AVPLAY_SPACE_HEIGHT,
   AVPLAY_SPACE_WIDTH,
   readTracks,
-  selectableTracks,
   toDisplayRect,
 } from '../src/platform/avplay-pure.ts'
+// The grouping rule is a domain decision, so it lives with the menu builder rather than
+// with the decoder that reports the tracks.
+import { selectableTracks } from '../src/core/tracks.ts'
 
 test('a full-screen app rectangle maps to the full 1920x1080 AVPlay rectangle', () => {
   // The app is authored at 1920x1080 and the TV scales the whole surface, so on a TV

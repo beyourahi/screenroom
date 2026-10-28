@@ -14,6 +14,8 @@
  * Nothing here touches the platform, so both rules are verifiable on a laptop.
  */
 
+import type { TrackChoice } from '../core/tracks.ts'
+
 /** A rectangle in the app's own coordinate space. */
 export interface Rect {
   readonly x: number
@@ -62,17 +64,10 @@ export function toDisplayRect(rect: Rect, viewport: Viewport): Rect {
   }
 }
 
-/** A selectable track, as the app shows it. */
-export interface TrackChoice {
-  /** The AVPlay track type, kept as the platform spells it. */
-  readonly type: string
-  /** The index `setSelectTrack` takes. */
-  readonly index: number
-  /** The language from `extra_info`, or `null` when the platform did not say. */
-  readonly language: string | null
-  /** A label for the menu, never empty. */
-  readonly label: string
-}
+// The track shape belongs to the domain, not to AVPlay: the menu, the preference rule
+// and the next-episode rule all speak it, and only this file knows how the decoder
+// spells it. Re-exported so callers that already reach for it here keep working.
+export type { TrackChoice } from '../core/tracks.ts'
 
 /** The track types this app offers a menu for. */
 export const SELECTABLE_TRACK_TYPES = ['AUDIO', 'TEXT'] as const
@@ -135,19 +130,5 @@ function readLanguage(extraInfo: unknown): string | null {
   }
 }
 
-/**
- * Groups tracks into the menus the player screen offers.
- *
- * Audio and text are the two the app can actually switch, so those are the two it
- * lists; anything else the decoder reports is left alone rather than shown as a
- * control that would do nothing.
- */
-export function selectableTracks(tracks: readonly TrackChoice[]): {
-  readonly audio: readonly TrackChoice[]
-  readonly text: readonly TrackChoice[]
-} {
-  return {
-    audio: tracks.filter((track) => track.type === 'AUDIO'),
-    text: tracks.filter((track) => track.type === 'TEXT'),
-  }
-}
+// Grouping and menu-building live in `core/tracks.ts`, where they are pure and tested
+// without a decoder. This file owns only the part that reads the platform's own shape.

@@ -151,6 +151,18 @@ export default Blits.Component('Detail', {
       this.reload()
     },
   },
+  /** The remote keys. See the note in `Home.ts` for why this block has to exist. */
+  input: {
+    up() {
+      this.up()
+    },
+    down() {
+      this.down()
+    },
+    enter() {
+      this.enter()
+    },
+  },
   methods: {
     /** Rebuilds the header and the action list from the store. */
     reload() {
@@ -166,6 +178,11 @@ export default Blits.Component('Detail', {
       }
       this.title = item.title
       this.subtitle = this.subtitleFor(item)
+      // An unreadable file is the one case where the footer has something more useful
+      // to say than which key does what: the remedy is outside this screen.
+      this.footer = item.available
+        ? 'Enter selects · Back returns'
+        : 'This file cannot be read now — plug the drive in, then scan from Settings (Info)'
       this.barFill = Math.round(this.barWidth * progressFraction(item.positionMs, item.durationMs))
       const workHidden = library().isHidden(item.workId)
       const rows: { kind: string; label: string; detail: string }[] = []

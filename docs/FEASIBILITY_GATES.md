@@ -20,7 +20,7 @@ Current summary:
 | G3 libmpv frame presented through wgpu in an iced window | **PASSED on macOS** (30 fps, correct aspect, transport and resume verified in the window); Windows path **BLOCKED** |
 | G3b Audio output and audio/video sync | **PARTIAL** — audio clock and `avsync` measured (0.982× real time, 0.0 ms); not heard by a person |
 | G4 Desktop playback quality on owner hardware | **BLOCKED** (no Windows hardware) |
-| G5 Samsung Tizen physical device | **BLOCKED on the device** — the client builds, tests and packages, and a signed `.wgt` exists; nothing has run on a Tizen engine |
+| G5 Samsung Tizen physical device | **BLOCKED on the device** — the client now scans a drive, catalogues it and plays with a track menu off-device; nothing has run on a Tizen engine |
 | G6 Other TV platforms | **RETIRED** (LG webOS / Android TV out of scope, ADR-004) |
 | G7 iOS | **RETIRED** (out of scope, ADR-003) |
 | G8 Android TV + Media3 | **RETIRED** (out of scope, ADR-004) |
@@ -168,11 +168,12 @@ answered.
 
 | Question the gate depends on | State |
 | --- | --- |
-| Does a Lightning 3 bundle build for this engine at all? | **Yes.** `pnpm build` emits a single 428,957-byte `main.js` targeted at the 2021 engine, with no code splitting — a widget has no server to fetch a second chunk from — and relative asset paths, verified by the staging step rather than trusted |
-| Is the client's own logic exercised? | **82 tests, 0 failures**, off-device and in `pnpm test`: the D-pad rule index-for-index against the desktop's, the progress guard, the store's durability rules, locator validation, AVPlay's display-rect maths and track reading, tokens and grid geometry |
-| Does the widget manifest ask for the right things? | **The privileges are the ones the code uses** — remote-key and filesystem-read, and the template's unused `application.launch` request is gone. The TV is still the only authority on whether it grants them |
-| Can a signed package be produced? | **Yes.** `build/ScreenroomTV-0.1.0.wgt`, 147,404 bytes, sha256 `ec40f2cebe29da19ec8911d2e3342263294aab6096f169b6744e0eca37ee05d0`, produced by the `tizen-build-project` runner with **no** default-developer-certificate warning, and containing a `main.js` byte-identical to the tested bundle |
+| Does a Lightning 3 bundle build for this engine at all? | **Yes.** `pnpm build` emits a single 462,142-byte `main.js` targeted at the 2021 engine, with no code splitting — a widget has no server to fetch a second chunk from — and relative asset paths, verified by the staging step rather than trusted |
+| Is the client's own logic exercised? | **161 tests, 0 failures**, off-device and in `pnpm test`: the D-pad rule index-for-index against the desktop's, the progress guard, the store's durability rules, locator validation, AVPlay's display-rect maths and track reading, the scan rules and a simulated-Tizen walk of a whole drive, the track menu and next-episode rules, decoder preferences, the remote-key wiring of every screen, tokens and grid geometry |
+| Does the widget manifest ask for the right things? | **The privileges are the ones the code uses** — remote-key and filesystem-read, and the template's unused `application.launch` request is gone. The TV is still the only authority on whether it grants them, and a refused `listDirectory` is reported verbatim on the Settings screen rather than shown as an empty drive |
+| Can a signed package be produced? | **Yes.** `build/ScreenroomTV-0.1.0.wgt`, 157,202 bytes, sha256 `b7d82c49755ae1501bffe62040cd2263aaa181510d477d3c4196d8b5710ecc51`, produced by the `tizen-build-project` runner with **no** default-developer-certificate warning, and containing a `main.js` byte-identical to the tested bundle (`9b7cbda…97c4`) |
 | Is the TV authorised to install it? | **Unknown, and it is the first thing to check.** The `screenroom` signing profile is active; whether its distributor certificate lists this television's DUID is not something the Mac can see, and the TV will reject the chain if it does not |
+| Can the television be reached at all right now? | **No, checked rather than assumed (2026-10-28).** `remote-device-cli scan` swept `192.168.0.0/24` on SDB port 26101 and found **0 devices**; `sdb devices` lists nothing; Device Manager's saved-remote list holds **0 entries**, so there is no stored address to retry. The set is off, on another network, or out of developer mode — each of which the owner can settle in one step |
 
 So item 2 is *approached* rather than passed: a package exists, but "signed `.wgt`
 installs" needs the television to accept it. Items 1 and 4–7 need it to run. Item 3
@@ -180,10 +181,18 @@ needs a drive in it. **The remaining work is on the TV, not in the build** — t
 steps and the observable that settles each open question are in
 [`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md).
 
-Three things this client does **not** do yet, recorded here so the gate is not read
-as covering them: there is no scan on the TV (a drive is enumerated but never walked,
-so nothing is catalogued), there are no external subtitle files, and there is no
-track menu.
+What this client now does off-device, and therefore does not have to be discovered on
+the television: it walks a mounted drive, parses film and episode identities from
+filenames, stores the catalogue and the scan report in one durable document, keeps
+item ids across rescans so positions stay attached, marks a pulled drive's rows
+unreadable without deleting anything, opens a sidecar subtitle file where the decoder
+accepts one, and offers an audio/subtitle menu whose choices are remembered for the
+next file.
+
+Three things the gate still covers completely, because only the television can answer
+them: whether the platform grants `filesystem.read` on a USB drive at all, whether
+AVPlay accepts the URI the platform's `toURI` returns, and whether the engine renders
+this bundle.
 
 ## G6 — Other TV platforms (retired)
 

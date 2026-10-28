@@ -23,7 +23,13 @@ import { clampIndex, moveFocus, restoreFocus, type Direction } from '../core/foc
 import { buildCards, gridFor } from '../design/cards.ts'
 import { hex, TOKENS } from '../design/tokens.ts'
 import type { LibraryItem } from '../core/contract.ts'
-import { focus as focusMemory, items, mediaRoots, onTv } from '../app/runtime.ts'
+import {
+  focus as focusMemory,
+  items,
+  onTv,
+  scanInProgress,
+  sources,
+} from '../app/runtime.ts'
 
 const ROUTE = '/browse'
 
@@ -152,6 +158,33 @@ export default Blits.Component('Browse', {
       this.reload()
     },
   },
+  /** The remote keys. See the note in `Home.ts` for why this block has to exist. */
+  input: {
+    left() {
+      this.left()
+    },
+    right() {
+      this.right()
+    },
+    up() {
+      this.up()
+    },
+    down() {
+      this.down()
+    },
+    enter() {
+      this.enter()
+    },
+    info() {
+      this.info()
+    },
+    rewind() {
+      this.rewind()
+    },
+    fastForward() {
+      this.fastForward()
+    },
+  },
   methods: {
     /** Reads the store, clamps the page, and rebuilds the visible page. */
     reload() {
@@ -164,11 +197,12 @@ export default Blits.Component('Browse', {
         this.count > 0 ? restoreFocus(focusMemory(), ROUTE, this.count) : 0
       this.cards = this.build(visible)
 
+      const granted = sources()
       const situation = emptyState({
-        sourceCount: mediaRoots().length > 0 || all.length > 0 ? 1 : 0,
+        sourceCount: granted.length,
         catalogCount: all.length,
-        scanning: false,
-        unavailableSources: all.some((item) => !item.available) ? 1 : 0,
+        scanning: scanInProgress(),
+        unavailableSources: granted.filter((source) => source.state !== 'available').length,
         filterText: '',
       })
       this.emptyTitle = situation?.title ?? ''

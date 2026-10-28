@@ -158,8 +158,8 @@ export function emptyState(input: EmptyInput): EmptyState | null {
   if (input.unavailableSources > 0) {
     return {
       situation: 'source_unreadable',
-      title: 'A folder is not readable right now.',
-      detail: 'Reconnect the drive, then Rescan in Settings. Nothing in your library was lost.',
+      title: 'A drive is not readable right now.',
+      detail: 'Plug it back in, then Scan for media in Settings. Nothing in your library was lost.',
     }
   }
   if (input.scanning) {
@@ -180,14 +180,16 @@ export function emptyState(input: EmptyInput): EmptyState | null {
     return {
       situation: 'first_run',
       title: 'No media yet.',
-      detail: 'Add a folder from Settings to give Screenroom something to show.',
+      // A television has no folder picker: the remedy is a drive and a scan, in that
+      // order, and saying so is the difference between a dead end and a next step.
+      detail: 'Plug a drive with films or episodes into the TV, then run Scan for media in Settings (press Info).',
     }
   }
   if (input.catalogCount === 0) {
     return {
       situation: 'empty_library',
-      title: 'This folder has no media in it.',
-      detail: 'Add another folder, or rescan this one after putting files in it.',
+      title: 'This drive has no media in it.',
+      detail: 'Put films or episodes on the drive, then Scan for media in Settings.',
     }
   }
   return null

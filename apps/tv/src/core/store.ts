@@ -29,9 +29,19 @@ import type {
   Source,
   SourceState,
 } from './contract.ts'
+import { decodeScanReport, NEVER_SCANNED, type ScanReport } from './scan.ts'
+import { decodeSettings, DEFAULT_SETTINGS, type DeviceSettings } from './settings.ts'
 
-/** Version of the document this build writes. */
-export const STORE_FORMAT_VERSION = 1
+/**
+ * Version of the document this build writes.
+ *
+ * 2 added the playback preferences and the last scan report. A version 1 document is
+ * still read: the two new fields are absent, so their decoders return the defaults —
+ * which is the whole point of keeping the version below a refusal threshold. Only a
+ * document written by a *newer* build is refused, because nothing here can know what
+ * such a build meant by a field that looks familiar.
+ */
+export const STORE_FORMAT_VERSION = 2
 
 /** Largest document this parser will look at, in characters. */
 export const MAX_STORE_CHARS = 8 * 1024 * 1024
@@ -49,6 +59,10 @@ export interface StoreSnapshot {
   readonly activeProfileId: ProfileId | null
   /** Per-work "never show a resume point" choices, by work id. */
   readonly hiddenWorkIds: readonly string[]
+  /** This device's playback preferences, learned from the player's own menu. */
+  readonly settings: DeviceSettings
+  /** What the last scan did, so a restart can still say what it found. */
+  readonly lastScan: ScanReport
 }
 
 /** An empty store, as a brand-new install has. */
@@ -60,6 +74,8 @@ export function emptySnapshot(): StoreSnapshot {
     items: [],
     activeProfileId: null,
     hiddenWorkIds: [],
+    settings: DEFAULT_SETTINGS,
+    lastScan: NEVER_SCANNED,
   }
 }
 
@@ -296,6 +312,8 @@ export function decodeSnapshot(raw: string | null): StoreReadResult {
           ? activeProfileId
           : null,
       hiddenWorkIds,
+      settings: decodeSettings(parsed['settings']),
+      lastScan: decodeScanReport(parsed['lastScan']),
     },
     reset: false,
     issues,
@@ -317,6 +335,8 @@ export function encodeSnapshot(snapshot: StoreSnapshot): string {
     items: snapshot.items,
     activeProfileId: snapshot.activeProfileId,
     hiddenWorkIds: snapshot.hiddenWorkIds,
+    settings: snapshot.settings,
+    lastScan: snapshot.lastScan,
   })
 }
 
@@ -349,6 +369,16 @@ export function withItemProgress(
     }
   })
   return changed ? { ...snapshot, items } : snapshot
+}
+
+/** Replaces the device's playback preferences. */
+export function withSettings(snapshot: StoreSnapshot, settings: DeviceSettings): StoreSnapshot {
+  return { ...snapshot, settings }
+}
+
+/** Records what a scan did. */
+export function withScanReport(snapshot: StoreSnapshot, report: ScanReport): StoreSnapshot {
+  return { ...snapshot, lastScan: report }
 }
 
 /** Sets a work's resume point to hidden, or stops hiding it. */

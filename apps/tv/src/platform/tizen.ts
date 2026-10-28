@@ -21,21 +21,60 @@ export interface TizenSystemInfo {
   getPropertyValue(property: string): string | null
 }
 
-/** A Tizen `filesystem` storage entry, as `listStorages` reports it. */
+/**
+ * A Tizen `filesystem` storage entry, as `listStorages` reports it.
+ *
+ * The three attributes are the whole interface in the Tizen 6.0 TV reference
+ * (`FileSystemStorage`): `label`, `type` and `state`. The reference notes that the label
+ * is also the *location* to pass to a resolve or a listing call, which is why this
+ * client stores the label and never constructs a mount path of its own.
+ */
 export interface TizenStorage {
-  /** Platform-dependent label (for example `removable_sda1`). Never hard-code one. */
+  /** Platform-dependent label (for example `removable1`). Never hard-code one. */
   readonly label: string
-  /** `MOUNTED`, `REMOVED`, `UNMOUNTABLE` and similar, as the platform spells them. */
+  /** `MOUNTED`, `REMOVED` or `UNMOUNTABLE`, as the platform spells them. */
   readonly state: string
+  /** `INTERNAL` or `EXTERNAL`, as the platform spells them. */
   readonly type: string
 }
 
-/** The Tizen filesystem API, limited to what this client uses. */
+/**
+ * The Tizen filesystem API, limited to what this client uses.
+ *
+ * Declared from the Tizen 6.0 TV Web Device API reference (`filesystem.html`). The
+ * four synchronous predicates — `isFile`, `isDirectory`, `pathExists` and `toURI` —
+ * raise on failure rather than reporting it, so every call site wraps them; a thrown
+ * platform call inside a key handler takes the screen down.
+ *
+ * Nothing that writes is declared: no `deleteFile`, no `createDirectory`, no
+ * `openFile`. The absence is the point — there is no code path in this client that
+ * could modify the owner's media, and a missing declaration is the strongest form of
+ * that promise this file can make.
+ */
 export interface TizenFilesystem {
   listStorages(
     onSuccess: (storages: TizenStorage[]) => void,
     onError: (error: unknown) => void,
   ): void
+  /** Lists one folder. The callback receives entry names (and, on some firmware, paths). */
+  listDirectory(
+    path: string,
+    onSuccess: (entries: string[], path?: string) => void,
+    onError?: (error: unknown) => void,
+    filter?: unknown,
+  ): void
+  /** True when the path is a folder. Raises on failure. */
+  isDirectory(path: string): boolean
+  /** True when the path exists. Raises on failure. */
+  pathExists(path: string): boolean
+  /** The platform's own URI for a path. Raises on failure. */
+  toURI(path: string): string
+  /** Registers a storage add/remove/eject notification; returns a watch id. */
+  addStorageStateChangeListener?(
+    onSuccess: (storage: TizenStorage) => void,
+    onError?: (error: unknown) => void,
+  ): number
+  removeStorageStateChangeListener?(watchId: number): void
 }
 
 /** The Tizen remote-key API. Registration is what makes non-arrow keys arrive. */
@@ -68,6 +107,16 @@ export interface AvPlay {
   getDuration(): number
   getTotalTrackInfo(): readonly AvPlayTrack[]
   setSelectTrack(type: 'AUDIO' | 'TEXT', index: number): void
+  /**
+   * Silences the subtitle renderer without changing the selected track.
+   *
+   * This — not a negative track index — is how AVPlay turns subtitles off, and it is
+   * what Samsung's own subtitle sample calls when the user toggles them
+   * (`setSilentSubtitle(!subtitlesOn)`).
+   */
+  setSilentSubtitle(silent: boolean): void
+  /** Points the decoder at a subtitle file beside the video. */
+  setExternalSubtitlePath(path: string): void
   setDisplayRect(x: number, y: number, width: number, height: number): void
   setDisplayMethod(method: string): void
   setListener(listener: AvPlayListener): void
