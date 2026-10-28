@@ -63,6 +63,7 @@ impl Library {
                 format!("Next episode of {}", item.title),
             );
         }
+        seen_works.extend(in_progress.iter().map(|item| item.work_id.clone()));
 
         // 2. What the viewer themselves put aside for later.
         self.offer(
@@ -74,6 +75,7 @@ impl Library {
                 watchlist_only: true,
                 watched: Some(false),
                 available_only: true,
+                group_by_work: true,
                 sort: Sort::Added,
                 limit: 20,
                 ..LibraryQuery::default()
@@ -102,6 +104,7 @@ impl Library {
                     genre: Some(genre.clone()),
                     watched: Some(false),
                     available_only: true,
+                    group_by_work: true,
                     sort: Sort::Title,
                     limit: 8,
                     ..LibraryQuery::default()
@@ -119,6 +122,7 @@ impl Library {
                 profile_id: Some(profile_id.to_string()),
                 watched: Some(false),
                 available_only: true,
+                group_by_work: true,
                 sort: Sort::Added,
                 limit: 12,
                 ..LibraryQuery::default()
@@ -312,10 +316,16 @@ mod tests {
 
         let suggestions = library.recommendations(&profile, 10).expect("suggestions");
         assert!(
+            suggestions.iter().any(|suggestion| {
+                suggestion.reason == "More Drama" && suggestion.item.work_id == two
+            }),
+            "the other Drama work should be offered: {suggestions:?}"
+        );
+        assert!(
             suggestions
                 .iter()
-                .any(|suggestion| suggestion.reason == "More Drama"),
-            "{suggestions:?}"
+                .all(|suggestion| suggestion.item.work_id != one.work_id),
+            "an in-progress work must not be recommended again: {suggestions:?}"
         );
     }
 
@@ -336,5 +346,20 @@ mod tests {
                 .any(|suggestion| suggestion.item.id == seen),
             "{suggestions:?}"
         );
+    }
+
+    #[test]
+    fn an_unstarted_watchlisted_show_starts_at_its_first_episode() {
+        let (_directory, library, profile) = library();
+        let first = ingest(&library, "Show.S01E01.mkv");
+        ingest(&library, "Show.S01E02.mkv");
+        let item = library.item(&first, None).unwrap().unwrap();
+        library
+            .set_watchlisted(&profile, &item.work_id, true)
+            .unwrap();
+
+        let suggestions = library.recommendations(&profile, 10).unwrap();
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].item.episode, Some(1));
     }
 }

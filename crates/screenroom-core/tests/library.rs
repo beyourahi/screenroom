@@ -528,6 +528,58 @@ fn continue_watching_orders_by_recency_and_honours_hide() {
 }
 
 #[test]
+fn explicit_watch_decisions_clear_resume_and_rewatch_clears_watched() {
+    let (_dir, library, source) = fixture();
+    let file = ingest(&library, &source, "Film.2020.mkv");
+    let profile = library.profiles().unwrap().remove(0);
+    let item = library.item(&file, Some(&profile.id)).unwrap().unwrap();
+    let session = library.start_session(&profile.id, &file).unwrap();
+    library
+        .checkpoint(screenroom_core::Checkpoint {
+            session: &session,
+            position_ms: 5_000,
+            duration_ms: 10_000,
+            sequence: 1,
+            seek_generation: 0,
+            ended: false,
+        })
+        .unwrap();
+    library
+        .mark_watched(&profile.id, &item.edition_id, true)
+        .unwrap();
+    let watched = library.item(&file, Some(&profile.id)).unwrap().unwrap();
+    assert_eq!(watched.position_ms, 0);
+    assert!(watched.watched);
+
+    let rewatch = library.start_session(&profile.id, &file).unwrap();
+    library
+        .checkpoint(screenroom_core::Checkpoint {
+            session: &rewatch,
+            position_ms: 1_000,
+            duration_ms: 10_000,
+            sequence: 1,
+            seek_generation: 0,
+            ended: false,
+        })
+        .unwrap();
+    let resumed = library.item(&file, Some(&profile.id)).unwrap().unwrap();
+    assert!(!resumed.watched);
+    assert_eq!(resumed.position_ms, 1_000);
+    assert_eq!(library.continue_watching(&profile.id, 10).unwrap().len(), 1);
+    library
+        .mark_watched(&profile.id, &item.edition_id, false)
+        .unwrap();
+    assert_eq!(
+        library
+            .item(&file, Some(&profile.id))
+            .unwrap()
+            .unwrap()
+            .position_ms,
+        0
+    );
+}
+
+#[test]
 fn one_viewers_progress_never_appears_under_another() {
     // Per-profile state is independent by design — there is no cross-device or
     // cross-viewer sync requirement — so the risk is not that two profiles disagree

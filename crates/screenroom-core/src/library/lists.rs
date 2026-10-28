@@ -34,7 +34,8 @@ impl Library {
             "INSERT INTO progress(profile_id, edition_id, position_ms, duration_ms, watched,
              hidden, updated_ms) VALUES(?1, ?2, 0, 0, ?3, 0, ?4)
              ON CONFLICT(profile_id, edition_id) DO UPDATE SET
-             watched = excluded.watched, hidden = 0, updated_ms = excluded.updated_ms",
+             position_ms = 0, watched = excluded.watched, hidden = 0,
+             updated_ms = excluded.updated_ms",
             params![profile_id, edition_id, i64::from(value), now_ms()],
         )?;
         tx.commit()?;

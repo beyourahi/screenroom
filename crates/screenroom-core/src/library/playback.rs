@@ -164,7 +164,7 @@ impl Library {
              VALUES(?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)
              ON CONFLICT(profile_id, edition_id) DO UPDATE SET
              file_id = excluded.file_id, position_ms = excluded.position_ms,
-             duration_ms = excluded.duration_ms, hidden = 0,
+             duration_ms = excluded.duration_ms, watched = excluded.watched, hidden = 0,
              updated_ms = excluded.updated_ms, last_session_id = excluded.last_session_id",
             params![
                 session.profile_id,
