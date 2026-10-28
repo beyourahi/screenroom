@@ -17,7 +17,7 @@ use crate::filename::{ParsedName, parse_filename};
 /// Every column a [`LibraryItem`] needs, with the viewer's progress and lists.
 const SELECT: &str = "SELECT f.id, f.source_id, f.edition_id, f.relative_path, f.filename,
     f.available, f.added_ms, w.id work_id, w.title, w.kind, w.year, w.overview, w.genres,
-    w.poster_path, w.manual_match, e.duration_ms, f.season_number, f.episode_number,
+    w.manual_match, e.duration_ms, f.season_number, f.episode_number,
     (SELECT CASE WHEN ep.metadata_origin='stale' THEN '' ELSE ep.title END
        FROM episodes ep JOIN file_episodes fe ON fe.episode_id=ep.id
        WHERE fe.file_id=f.id ORDER BY fe.sequence LIMIT 1) episode_title,
@@ -760,7 +760,6 @@ fn item_from_row(row: &Row<'_>) -> rusqlite::Result<LibraryItem> {
         episode_overview: row
             .get::<_, Option<String>>("episode_overview")?
             .unwrap_or_default(),
-        poster_path: row.get("poster_path")?,
         genres: serde_json::from_str(&genres).unwrap_or_default(),
         year: row.get("year")?,
         season: row.get("season_number")?,

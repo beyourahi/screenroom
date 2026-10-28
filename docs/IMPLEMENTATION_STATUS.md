@@ -260,10 +260,87 @@ files through ffmpeg. Sampled by hand, one is a real frame rather than a card.
 | All 18 series had a null year | the year only came from the episode filename, and episode names never carry it — the show folder does | an episodic file with no year of its own takes the show folder's (`filename.rs`); a film in a collection folder does not, because `Duology (2009-2011)` is a range, not a release year. Test: two `The Office` shows at different years stay two works |
 | A cover-art JPEG appeared as a selectable **video** track | `track-list` reports embedded artwork as video; it was listed like a second angle | skip video tracks with `image=yes` (`worker.rs`); `Predators` now lists one video track, not two |
 | Only the first 16 posters of a 24-card page were ever extracted; the rest stayed blank until a key was pressed | the queue is 16 deep and nothing refilled it when an extraction finished | refill the freed slot on the next poll, for works on screen only — not a library-wide marathon (`app.rs`) |
+| `LibraryItem.poster_path` was documented as "app-owned poster path, if artwork bytes were retained" and was `None` on all 830 rows **even for the 21 works whose posters had been stored** | the field read a legacy `works.poster_path` column that nothing writes, because posters are stored as bytes and read with `artwork()`/`artworks_for()`. A client trusting it would have drawn no posters at all | the field is removed from `LibraryItem` and the projection (`domain.rs`, `catalog.rs`), since its only reader was the illusion; the column stays for schema compatibility. Nothing in the app, the TV contract or the tests referenced it |
 
 Measured after the fixes: 830 imported (was 851), 18 series with years (was 0), one
 video track on a file with cover art (was two), 21 posters for the visible works
 (was 16).
+
+#### The catalogue and the posters, checked on the real library (2026-10-29)
+
+Two examples run by hand against a copy of the scanned library, because the
+questions only exist on a library built from real files:
+
+```bash
+cargo run --release -p screenroom-core --example library_check -- <copy.db>
+cargo run --release -p screenroom-core --example artwork_check -- <copy.db> [fresh]
+```
+
+`library_check` — **27 passed, 0 failed, 1 skipped**:
+
+- paging walks all **830 rows exactly once** in two 500-row pages, none repeated;
+- a 100 000-row page is refused (`invalid_page`) rather than honoured or truncated;
+- all four orderings return a full page, and Title is genuinely ascending across 200
+  compared rows;
+- search finds an existing title (1 row), a word inside one (30 rows), treats `%`
+  as a literal, and finds nothing for nonsense;
+- the kind partition is exact: **291 films + 539 episodes + 0 unknown = 830**; an
+  unknown kind is refused (`invalid_filter`);
+- seasons are read from a real series and an episode page contains only that
+  season's episodes (4 in season 1);
+- a checkpoint becomes a Continue Watching row; after a seek the **pre-seek
+generation is refused** and the post-seek one is accepted;
+- favourite and watchlist filters see their own profile's flags and clear again;
+- suggestions are explained and deduplicated (2 suggestions, 2 distinct works, both
+  with a reason);
+- preferences (subtitle scale, autoplay, volume) survive a close and reopen;
+- profiles add, rename and remove;
+- a backup of the real catalogue is **1 490 944 bytes, 830 files, 309 works**, restores
+  into a fresh library at **830 of 830 rows**, and a restore over existing data writes
+  a safety copy.
+
+Skipped, honestly: the genre filter, because a scanned library stores no genres until
+enrichment exists. It is covered by unit tests on synthetic labels, which is not the
+same claim.
+
+`artwork_check` — **all checks passed**:
+
+- all **21 stored posters** were written back out and decoded by ffprobe as JPEG at
+  the width and height the row claims (**180 731 bytes** total, 0 rejected);
+- **200 of the 288** works still without a poster offer a candidate, and **every one**
+  points at a file that exists and is readable — so the queue never spins on a work
+  that can never be drawn;
+- `fresh` extracted, stored and re-decoded **5 posters from real films in ~1.2 s each**,
+  and classified the one refusal correctly: one file is a **truncated MP4**
+  (`moov atom not found`), which the app records as a failed work and stops asking,
+  rather than a pipeline failure. (Titles are deliberately not repeated here; the raw
+  logs hold them and stay local.)
+
+Also unverified on the real catalogue, and why: **durations** (none stored, see below,
+so every candidate reports `duration_ms = 0` and the sampler seeks blind), and the
+**115 embedded cover images** that would beat a film frame as a poster.
+
+#### macOS features exercised on isolated fixtures (2026-10-29)
+
+Three application-level journeys were added to `apps/desktop/src/app.rs`, each on a
+temporary folder the test owns — no window, no focus, no drive:
+
+| Test | What it drives, and what it asserts |
+| --- | --- |
+| `a_first_run_scan_builds_the_library_and_writes_nothing_to_the_media_folder` | an empty library → grant a folder through `Message::AddFolder` → the real scan thread finishes → the film appears in Browse with title, year and kind read from the filename. Then the folder's own listing (names, sizes, modification times, recursively) must be **identical** to what it was before the scan |
+| `a_folder_that_moved_keeps_its_history_until_it_is_relinked` | scan a folder, store a resume point at 240 s, then `rename` the folder to a new name — the removable-drive case. A rescan keeps the row and the position while marking it unavailable; `RelinkTargetChosen` → `RelinkPathChanged` → `RelinkSource` makes it available again **at the same row**, with the position intact and no duplicate |
+| `a_restore_from_a_damaged_backup_changes_nothing` | a file that is not a backup is offered twice (arm, then apply): the error names the backup, and the catalogue, the profiles and the 120 s resume point are unchanged |
+
+Also already covered by the existing application tests, so not repeated: profile
+switching and the last-profile rule, preference editing with a refused language tag,
+folder removal asking first and keeping history, backup → inspect → restore through
+the Settings screen, quitting with a file open storing the final position, keyboard
+focus, paging and search.
+
+The **settle window** is worth knowing about here: the scanner ignores a file modified
+within 2 s of the walk, because it may still be copying. A test that writes a fixture
+and scans at once imports nothing, which is why both journey tests backdate their
+files an hour. That is real behaviour, not a test artefact.
 
 #### What the real library still does not do
 
@@ -754,7 +831,7 @@ Items 3–12 (drive, scan, playback, tracks, subtitles, next episode, focus, res
 reinstall) remain open and need the remote in a hand: this firmware accepts no synthetic
 key press, exposes no screenshot and no `dlog` over TCP.
 
-### Test totals after the M3 work (2026-10-28)
+### Test totals (updated 2026-10-29)
 
 ```bash
 cargo test --workspace
@@ -762,24 +839,24 @@ cargo clippy --workspace --all-targets
 cargo fmt --all --check
 ```
 
-**189 tests, 0 failures**, clippy with no first-party warnings, formatting clean:
+**225 tests, 0 failures**, clippy with no first-party warnings, formatting clean:
 
 | Suite | Tests |
 | --- | --- |
-| `screenroom-core` unit (filename, fingerprint, path identity) | 23 |
+| `screenroom-core` unit (filename, fingerprint, path identity, lists, recommend) | 38 |
 | `core/tests/library.rs` (incl. per-viewer isolation, path semantics) | 27 |
 | `core/tests/storage.rs` (preferences, subtitle style, backup) | 19 |
-| `core/tests/scanner.rs` (incl. an unplugged drive, a deleted folder, a withdrawn grant) | 10 |
+| `core/tests/scanner.rs` (incl. an unplugged drive, a deleted folder, a withdrawn grant) | 12 |
 | `core/tests/recovery.rs` | 7 |
 | `core/tests/scale.rs` (10,000 items) | 2 |
 | `screenroom-player` unit (incl. the bundled-libmpv search order) | 20 |
-| `player/tests/worker.rs` (real decode, audio, tracks, subtitle style) | 12 |
+| `player/tests/worker.rs` (real decode, audio, tracks, subtitle style) | 13 |
 | `player/tests/libmpv_smoke.rs` | 2 |
-| `screenroom-desktop` unit (incl. the window-width grid rule) | 69 |
+| `screenroom-desktop` unit (incl. the window-width grid rule and the three real-folder journeys) | 76 |
 | `desktop/tests/playback.rs` | 6 |
 | `desktop/tests/artwork.rs` | 3 |
 
-Workspace total after M3b: **211 passed, 0 failed**.
+Workspace total after the real-library work: **225 passed, 0 failed**.
 
 The count is not the coverage. Two scanner tests have `#[cfg(unix)]` bodies, and the
 fourteen player tests print `skipped: …` and pass vacuously when no libmpv is found.
@@ -955,6 +1032,18 @@ receipt.
 4. Native 4K presentation. The offscreen 4K row above measures a **1920×1080**
    render target because `render::MAX_DIMENSION` caps it, so gate G2's 4K half is
    untouched by it.
+
+What is left before macOS acceptance, exactly, after the real-library pass:
+
+| # | Remaining | Why it cannot be closed here |
+| --- | --- | --- |
+| 1 | A permissioned visible-window session: resume after quit, full screen, the keyboard journey, and the on-screen frame budget at 830 items | needs a window and the owner's consent; every number so far is offscreen |
+| 2 | Durations, so runtimes and progress bars exist before the first play | a scan does not probe `duration_ms`; a design decision to make, not a bug to fix blindly |
+| 3 | Embedded cover art as the poster source for the 115 files that carry it | the extractor samples 10% into the video instead |
+| 4 | Anamorphic display height from the frame's real content, not 16:9 | the window fits the frame as 16:9, so 2:1 content is drawn smaller than it needs to be |
+| 5 | The hardware-decode bridge | the gate that makes 4K and battery life defensible; `hwdec=no` by design for the CPU bridge |
+| 6 | The genre filter exercised on real data | a scanned library stores no genres until enrichment exists; only synthetic labels are tested |
+| 7 | A listening pass (G3b) and an offline check with networking actually off | needs ears, and a network state this session should not change unasked |
 
 See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the full definitions of
 done.

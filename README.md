@@ -160,8 +160,10 @@ still builds. The running app shows which pin produced its theme. See
    done, verified, blocked.
 7. [`docs/FEASIBILITY_GATES.md`](docs/FEASIBILITY_GATES.md) — device gates.
 8. [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) — what each test layer proves.
-9. [`docs/REUSE_LEDGER.md`](docs/REUSE_LEDGER.md), [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md),
-   [`docs/DESIGN.md`](docs/DESIGN.md), [`docs/LICENSING.md`](docs/LICENSING.md).
+9. [`docs/REAL_LIBRARY_COVERAGE.md`](docs/REAL_LIBRARY_COVERAGE.md) — what the
+   owner's own 830-file library exercised, and what it did not.
+10. [`docs/REUSE_LEDGER.md`](docs/REUSE_LEDGER.md), [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md),
+    [`docs/DESIGN.md`](docs/DESIGN.md), [`docs/LICENSING.md`](docs/LICENSING.md).
 
 ## Repository layout
 

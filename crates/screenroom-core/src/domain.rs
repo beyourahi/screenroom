@@ -131,8 +131,6 @@ pub struct LibraryItem {
     pub episode_title: String,
     /// Episode synopsis for series entries.
     pub episode_overview: String,
-    /// App-owned poster path, if artwork bytes were retained.
-    pub poster_path: Option<String>,
     /// Genre labels known for the work.
     pub genres: Vec<String>,
     /// Release year, when confident.

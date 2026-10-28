@@ -4468,7 +4468,7 @@ pub fn clock(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use screenroom_core::{Ingest, parse_filename};
+    use screenroom_core::{Checkpoint, Ingest, parse_filename};
 
     #[test]
     fn clock_formats_short_and_long_media() {
@@ -5614,5 +5614,289 @@ mod tests {
         let _ = app.update(Message::ProfileChosen("no-such-profile".to_string()));
         assert_eq!(app.profile_id, before);
         assert!(app.error.is_some());
+    }
+
+    /// Pumps ticks until the running scan reports it is done.
+    ///
+    /// The scan is a real thread, so this waits for the real event rather than
+    /// assuming a fixed delay; the deadline is what stops a hang from becoming a
+    /// hung test suite.
+    fn finish_scan(app: &mut App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while app.scan_token.is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the scan never finished"
+            );
+            let _ = app.update(Message::Tick);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // The finishing tick reloads the catalogue after clearing the token, so one
+        // more pass lets that reload land before the assertions read it.
+        let _ = app.update(Message::Tick);
+    }
+
+    /// Adds a folder through the interface and waits for its first scan.
+    fn add_folder(app: &mut App, root: &std::path::Path) {
+        app.new_root = root.to_string_lossy().to_string();
+        let _ = app.update(Message::AddFolder);
+        assert!(
+            app.scan_token.is_some(),
+            "adding a folder must start its scan"
+        );
+        finish_scan(app);
+    }
+
+    /// Writes a file and dates it an hour ago.
+    ///
+    /// The scanner skips a file that changed moments ago, because it may still be
+    /// copying. A test that wrote a file and scanned immediately would therefore
+    /// import nothing and prove nothing.
+    fn write_settled(path: &std::path::Path, contents: &[u8]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("folder");
+        }
+        std::fs::write(path, contents).expect("write");
+        let file = std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open");
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3_600))
+            .expect("backdate");
+    }
+
+    /// Every name, size and modification time under a folder, for proving that a
+    /// scan read the media without writing to it.
+    fn folder_fingerprint(
+        root: &std::path::Path,
+    ) -> Vec<(String, u64, Option<std::time::SystemTime>)> {
+        let mut entries = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            let Ok(listing) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for entry in listing.flatten() {
+                let path = entry.path();
+                let metadata = entry.metadata().expect("metadata");
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string();
+                entries.push((relative, metadata.len(), metadata.modified().ok()));
+                if metadata.is_dir() {
+                    pending.push(path);
+                }
+            }
+        }
+        entries.sort();
+        entries
+    }
+
+    #[test]
+    fn a_first_run_scan_builds_the_library_and_writes_nothing_to_the_media_folder() {
+        // The whole first-run journey, on a folder this test made: an empty
+        // library, one granted folder, a finished scan, and a catalogue to browse.
+        // The second half is the promise that matters most — a scan reads the
+        // owner's drive and leaves it exactly as it found it.
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let media = directory.path().join("media");
+        write_settled(
+            &media.join("Arrival (2016)/Arrival (2016).mkv"),
+            b"not really a video",
+        );
+        let before = folder_fingerprint(&media);
+
+        let library = Library::open_in_memory().expect("library");
+        let mut app = App::with_library(library, None, "test".into());
+        assert!(app.sources.is_empty(), "a first run starts with no folder");
+        assert_eq!(app.home.len(), 0, "and nothing to watch");
+
+        add_folder(&mut app, &media);
+
+        assert_eq!(app.error, None, "a scan of a readable folder must not fail");
+        assert_eq!(app.sources.len(), 1, "the folder was granted");
+        let _ = app.update(Message::GoBrowse);
+        assert_eq!(app.browse.items.len(), 1, "the film is in the library");
+        let item = &app.browse.items[0];
+        assert_eq!(item.title, "Arrival", "the title came from the filename");
+        assert_eq!(item.year, Some(2016));
+        assert_eq!(item.kind, MediaKind::Movie);
+
+        assert_eq!(
+            before,
+            folder_fingerprint(&media),
+            "the scan must not create, change or remove anything in the media folder"
+        );
+    }
+
+    #[test]
+    fn a_folder_that_moved_keeps_its_history_until_it_is_relinked() {
+        // The removable-drive case, which is the everyday one here: a folder is
+        // granted at one path, the volume comes back at another, and the owner's
+        // progress must survive both the disappearance and the relink.
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let media = directory.path().join("media");
+        write_settled(&media.join("Show.S01E01.Pilot.mkv"), b"not really a video");
+
+        let library = Library::open_in_memory().expect("library");
+        let mut app = App::with_library(library, None, "test".into());
+        add_folder(&mut app, &media);
+        let source_id = app.sources[0].id.clone();
+        let item = app
+            .library
+            .items(&LibraryQuery::page(10))
+            .expect("items")
+            .remove(0);
+
+        // Half-way through the episode, so the resume point is real.
+        let session = app
+            .library
+            .start_session(&app.profile_id, &item.id)
+            .expect("session");
+        app.library
+            .checkpoint(Checkpoint {
+                session: &session,
+                position_ms: 240_000,
+                duration_ms: 1_800_000,
+                sequence: 1,
+                seek_generation: 0,
+                ended: false,
+            })
+            .expect("checkpoint");
+        app.library.end_session(&session).expect("end");
+
+        // The volume comes back under a different name.
+        let moved = directory.path().join("media 1");
+        std::fs::rename(&media, &moved).expect("move the folder");
+        let _ = app.update(Message::RescanSource(source_id.clone()));
+        finish_scan(&mut app);
+
+        assert_eq!(
+            app.library.count(&LibraryQuery::default()).expect("count"),
+            1,
+            "an unreadable folder must not empty the library"
+        );
+        let offline = app
+            .library
+            .item(&item.id, Some(&app.profile_id))
+            .expect("item")
+            .expect("the row is still there");
+        assert!(!offline.available, "its file cannot be read right now");
+        assert_eq!(
+            offline.position_ms, 240_000,
+            "the resume point survived the folder disappearing"
+        );
+
+        // Point it at where the volume actually is now.
+        let _ = app.update(Message::RelinkTargetChosen(source_id.clone()));
+        let _ = app.update(Message::RelinkPathChanged(
+            moved.to_string_lossy().to_string(),
+        ));
+        let _ = app.update(Message::RelinkSource);
+        finish_scan(&mut app);
+
+        assert_eq!(
+            app.error, None,
+            "a relink to a readable folder must not fail"
+        );
+        let online = app
+            .library
+            .item(&item.id, Some(&app.profile_id))
+            .expect("item")
+            .expect("the same row, not a new one");
+        assert!(
+            online.available,
+            "the episode plays again from the new path"
+        );
+        assert_eq!(
+            online.position_ms, 240_000,
+            "and resumes where the viewer stopped"
+        );
+        assert_eq!(
+            app.library.count(&LibraryQuery::default()).expect("count"),
+            1,
+            "relinking must not duplicate the episode"
+        );
+    }
+
+    #[test]
+    fn a_restore_from_a_damaged_backup_changes_nothing() {
+        // Restore replaces the library, so the failure path is the one that has to
+        // be exact: a file that is not a backup must be refused, and the library,
+        // its progress and its profiles must be exactly as they were.
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let library = Library::open_in_memory().expect("library");
+        let source = library.add_source(directory.path(), None).expect("source");
+        std::fs::write(
+            directory.path().join("Film.2020.mkv"),
+            b"not really a video",
+        )
+        .expect("write");
+        let parsed = parse_filename("Film.2020.mkv", None);
+        let file_id = library
+            .ingest_file(Ingest {
+                source_id: &source.id,
+                relative_path: "Film.2020.mkv",
+                fingerprint: "fingerprint-film",
+                size: 18,
+                modified_ms: 1,
+                scan_id: "test",
+                parsed: Some(&parsed),
+                expected_root: Some(&source.root_path),
+            })
+            .expect("ingest");
+        let mut app = App::with_library(library, None, "test".into());
+        let session = app
+            .library
+            .start_session(&app.profile_id, &file_id)
+            .expect("session");
+        app.library
+            .checkpoint(Checkpoint {
+                session: &session,
+                position_ms: 120_000,
+                duration_ms: 600_000,
+                sequence: 1,
+                seek_generation: 0,
+                ended: false,
+            })
+            .expect("checkpoint");
+        app.library.end_session(&session).expect("end");
+        let profiles_before = app.library.profiles().expect("profiles").len();
+        let count_before = app.library.count(&LibraryQuery::default()).expect("count");
+
+        let damaged = directory.path().join("not-a-backup.json");
+        std::fs::write(&damaged, b"this is not a Screenroom backup").expect("write");
+        let _ = app.update(Message::RestorePathChanged(
+            damaged.to_string_lossy().to_string(),
+        ));
+        // The first press only states what would happen; the second applies it.
+        let _ = app.update(Message::RestoreNow);
+        let _ = app.update(Message::RestoreNow);
+
+        let error = app
+            .error
+            .clone()
+            .expect("a damaged backup must be reported");
+        assert!(
+            error.contains("backup") || error.contains("readable"),
+            "the reason must name the backup, got {error:?}"
+        );
+        assert_eq!(
+            app.library.count(&LibraryQuery::default()).expect("count"),
+            count_before,
+            "a refused restore must not change the catalogue"
+        );
+        assert_eq!(
+            app.library.profiles().expect("profiles").len(),
+            profiles_before
+        );
+        let item = app
+            .library
+            .item(&file_id, Some(&app.profile_id))
+            .expect("item")
+            .expect("the row");
+        assert_eq!(item.position_ms, 120_000, "progress is untouched");
     }
 }

@@ -97,6 +97,8 @@ UI automation is opt-in via `SCREENROOM_ALLOW_FOREGROUND=1` and refuses without 
 | `crates/screenroom-player/examples/render_bench.rs` | no | no | Decode → render → frame delivery rate, time to first frame and command latency, entirely offscreen |
 | `crates/screenroom-player/examples/play_file.rs <file>...` | no | no | Real files through the real worker: open or the player's own failure, tracks (including external subtitles), the audio device clock advancing, delivery rate, seek round trip, subtitle read-back, audio switching. Muted; optionally dumps one frame as a PNG for looking at |
 | `scripts/probe-library.sh <root> <out.jsonl>` | no | no | Every file's container, codecs and streams via ffprobe, four reads deep, output outside the media root. Read-only on the drive: no thumbnails, databases or temporary files land there |
+| `crates/screenroom-core/examples/library_check.rs <copy.db>` | no | no | The catalogue contracts on a **real** library: paging reaches every row exactly once, an oversized page is refused, every ordering, literal search, the kind partition, season grouping, a resume point, the stale-generation guard, lists, explained suggestions, preferences across a reopen, profiles, and a backup that restores to the same counts |
+| `crates/screenroom-core/examples/artwork_check.rs <copy.db> [fresh]` | no | no | Every stored poster is written to a temporary file and handed to ffprobe, which must report a JPEG of the size the row claims; every remaining work must offer a candidate pointing at a file that exists. `fresh` extracts and stores posters for works the app has not reached |
 | `scripts/check-quit-routing.sh` | hidden | **no** | That the menu bar's Quit was re-pointed at the window's close action |
 | `scripts/verify-quit.sh` | yes | **yes** — opt-in only | That a real dismissal stores the final position and closes the session |
 | `scripts/drive-app.sh`, `capture-window.sh` raise | yes | **yes** — opt-in only | Screenshots and keyboard journeys |
@@ -118,7 +120,7 @@ and render path with no window, but **not** an on-screen frame rate. iced, the w
 upload and the compositor add cost it cannot see, so its numbers are a ceiling on
 what the display can reach, not a substitute for measuring the display.
 
-What runs today (`cargo test --workspace`, **222 tests, 0 failures** on macOS ARM64):
+What runs today (`cargo test --workspace`, **225 tests, 0 failures** on macOS ARM64):
 
 | Suite | Proves |
 | --- | --- |
@@ -131,9 +133,16 @@ What runs today (`cargo test --workspace`, **222 tests, 0 failures** on macOS AR
 | `screenroom-player` unit | state machine, options, property mapping |
 | `player/tests/worker.rs` | real libmpv decode, frame rate, audio clock and `avsync`, track switching, **subtitle style reaching libmpv and surviving a file change**, failure states, long session |
 | `player/tests/libmpv_smoke.rs` | client API on this host |
-| `screenroom-desktop` unit | navigation, filters, autoplay decision, resume copy, close-path state, slider-percent rounding, agreement between the offered subtitle range and what the player accepts, and that the menu-bar routing is found by action rather than by title |
+| `screenroom-desktop` unit | navigation, filters, autoplay decision, resume copy, close-path state, slider-percent rounding, agreement between the offered subtitle range and what the player accepts, the menu-bar routing being found by action rather than by title, **a first run that grants a folder, scans it, and leaves that folder byte-for-byte unchanged**, **a folder that moved under a new name keeping its works and resume point until it is relinked**, and **a damaged backup being refused with the library and its progress intact** |
 | `desktop/tests/playback.rs` | checkpoint policy against a real SQLite library and a real clip |
 | `scripts/check-quit-routing.sh` | that the running application re-pointed the menu bar's Quit (hidden window, no focus taken) |
+
+**The two `*_check` examples are not unit tests.** They are run by hand against a
+copy of a scanned library, because what they verify only exists on a library built
+from real files: that paging arrives at 830 rows without repeating one, that the
+posters in the database are decodable images, that a backup of a real catalogue
+restores to the same 830 rows. Their output is a receipt, pasted into
+`IMPLEMENTATION_STATUS.md`, not a pass/fail a CI run would produce.
 
 Everything below about Windows/TV tiers, browser tiers and the Svelte UI is
 historical planning; the platforms it names were narrowed by ADR-004.
