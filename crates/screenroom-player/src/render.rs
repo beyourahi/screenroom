@@ -29,6 +29,7 @@ pub const UPDATE_FRAME: u64 = 1;
 /// so an unbounded 4K target would cost far more than the display can show on a
 /// typical desktop window. 1920 keeps 1080p exact and downscales larger sources.
 pub const MAX_DIMENSION: u32 = 1920;
+const FRAME_BUFFER_POOL_SIZE: usize = 3;
 
 // `mpv_render_param_type` values used here (`mpv/render.h`).
 const PARAM_API_TYPE: c_int = 1;
@@ -79,6 +80,7 @@ pub struct SoftwareRenderer {
     stride: usize,
     buffer: Vec<u8>,
     offset: usize,
+    packed_buffers: Vec<Arc<Vec<u8>>>,
     generation: u64,
 }
 
@@ -160,6 +162,9 @@ impl SoftwareRenderer {
             stride: 0,
             buffer: Vec::new(),
             offset: 0,
+            packed_buffers: std::iter::repeat_with(|| Arc::new(Vec::new()))
+                .take(FRAME_BUFFER_POOL_SIZE)
+                .collect(),
             generation: 0,
         })
     }
@@ -295,28 +300,47 @@ impl SoftwareRenderer {
     /// previous per-pixel loop rewrote all four bytes of every pixel and cost
     /// ~40 ms for a single 1920x1080 frame in an unoptimized build, which capped
     /// presentation at ~11 fps; nothing here inspects pixel values any more.
-    fn pack(&self, _pointer: *mut u8) -> Frame {
+    fn pack(&mut self, _pointer: *mut u8) -> Frame {
         let width = self.width as usize;
         let height = self.height as usize;
         let row_bytes = width * 4;
         let start = self.offset;
-        let source = &self.buffer[start..start + self.stride * height];
-
-        let mut rgba = vec![0u8; row_bytes * height];
-        for (row, out_row) in source
-            .chunks_exact(self.stride)
-            .zip(rgba.chunks_exact_mut(row_bytes))
+        let stride = self.stride;
+        let source = &self.buffer[start..start + stride * height];
+        let output_index = reusable_buffer_index(&self.packed_buffers);
+        let mut overflow = output_index.is_none().then(|| Arc::new(Vec::new()));
         {
-            out_row.copy_from_slice(&row[..row_bytes]);
+            let rgba = match output_index {
+                Some(index) => Arc::get_mut(&mut self.packed_buffers[index])
+                    .expect("the selected frame buffer is uniquely owned"),
+                None => Arc::get_mut(overflow.as_mut().expect("overflow buffer exists"))
+                    .expect("the overflow frame buffer is uniquely owned"),
+            };
+            rgba.resize(row_bytes * height, 0);
+            for (row, out_row) in source
+                .chunks_exact(stride)
+                .zip(rgba.chunks_exact_mut(row_bytes))
+            {
+                out_row.copy_from_slice(&row[..row_bytes]);
+            }
         }
+        let rgba = output_index
+            .map(|index| Arc::clone(&self.packed_buffers[index]))
+            .unwrap_or_else(|| overflow.take().expect("overflow buffer exists"));
 
         Frame {
             width: self.width,
             height: self.height,
-            rgba: Arc::new(rgba),
+            rgba,
             generation: self.generation,
         }
     }
+}
+
+fn reusable_buffer_index(buffers: &[Arc<Vec<u8>>]) -> Option<usize> {
+    buffers
+        .iter()
+        .position(|buffer| Arc::strong_count(buffer) == 1)
 }
 
 impl Drop for SoftwareRenderer {
@@ -365,5 +389,16 @@ mod tests {
             assert_eq!(stride % 64, 0);
             assert!(stride >= width as usize * 4);
         }
+    }
+
+    #[test]
+    fn packed_buffers_are_reused_after_the_frame_is_released() {
+        let buffers = vec![Arc::new(vec![0; 32])];
+        let original = buffers[0].as_ptr();
+        let frame = Arc::clone(&buffers[0]);
+        assert_eq!(reusable_buffer_index(&buffers), None);
+        drop(frame);
+        assert_eq!(reusable_buffer_index(&buffers), Some(0));
+        assert_eq!(buffers[0].as_ptr(), original);
     }
 }
