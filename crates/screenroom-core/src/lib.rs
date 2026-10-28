@@ -36,8 +36,8 @@ pub use error::{CoreError, Result};
 pub use filename::{ParsedName, parse_filename};
 pub use fingerprint::media_fingerprint;
 pub use library::{
-    BackupInfo, BackupReport, Checkpoint, Ingest, Library, LibraryQuery, PathSemantics,
-    Preferences, RestoreReport, Sort,
+    Artwork, ArtworkCandidate, BackupInfo, BackupReport, Checkpoint, Ingest, Library, LibraryQuery,
+    PathSemantics, Preferences, RestoreReport, Sort,
 };
 pub use paths::{PathStyle, location_key};
 pub use scanner::{
@@ -46,9 +46,10 @@ pub use scanner::{
 
 /// Schema version of the SQLite library written by this crate.
 ///
-/// This is the same version and physical layout the Flutter candidate wrote, so
-/// an existing Screenroom library can be opened without a destructive migration.
-pub const SCHEMA_VERSION: i64 = 2;
+/// Version 2 is the layout the Flutter candidate wrote; version 3 adds the
+/// artwork table and is migrated forward additively, so a library written by
+/// either version opens without a destructive migration.
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Version of the versioned JSON backup format accepted by [`Library`].
 pub const BACKUP_FORMAT_VERSION: i64 = 2;

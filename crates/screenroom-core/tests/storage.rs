@@ -146,6 +146,9 @@ fn preferences_survive_a_reopen() {
     let profile = library.profiles().unwrap().remove(0);
     let chosen = Preferences {
         autoplay_next: false,
+        // The new preference is part of the round trip too: a saved choice that is
+        // not stored is a setting the next launch silently forgets.
+        auto_skip_intro: true,
         subtitle_language: Some("pt-BR".to_string()),
         audio_language: Some("en".to_string()),
         subtitle_scale_percent: 175,

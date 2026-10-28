@@ -23,6 +23,7 @@ use super::Library;
 /// The stored spelling is a compatibility surface: renaming a key silently
 /// discards the user's choice, so these strings are fixed.
 const AUTOPLAY_NEXT: &str = "autoplayNext";
+const AUTO_SKIP_INTRO: &str = "autoSkipIntro";
 const SUBTITLE_LANGUAGE: &str = "subtitleLanguage";
 const AUDIO_LANGUAGE: &str = "audioLanguage";
 const SUBTITLE_SCALE: &str = "subtitleScalePercent";
@@ -47,6 +48,14 @@ pub struct Preferences {
     /// one toggle away. It is still a stored preference rather than a constant so
     /// a viewer who dislikes it can switch it off and have that survive a restart.
     pub autoplay_next: bool,
+    /// Jump past a stored intro segment without being asked.
+    ///
+    /// Off by default. Skipping a title sequence is a real convenience once the
+    /// markers exist, but doing it uninvited is the app deciding on the viewer's
+    /// behalf, so the manual button comes first and this is the opt-in. Only a
+    /// marker that was actually stored can be skipped; guessing an intro is not
+    /// what this setting does.
+    pub auto_skip_intro: bool,
     /// Preferred subtitle language tag, for example `en`.
     ///
     /// `None` means "let the player choose", which is not the same as "no
@@ -88,6 +97,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             autoplay_next: true,
+            auto_skip_intro: false,
             subtitle_language: None,
             audio_language: None,
             subtitle_scale_percent: SUBTITLE_SCALE_NORMAL,
@@ -111,6 +121,7 @@ impl Library {
             let (key, value) = row?;
             match key.as_str() {
                 AUTOPLAY_NEXT => preferences.autoplay_next = value == "true",
+                AUTO_SKIP_INTRO => preferences.auto_skip_intro = value == "true",
                 SUBTITLE_LANGUAGE => preferences.subtitle_language = text(&value),
                 AUDIO_LANGUAGE => preferences.audio_language = text(&value),
                 SUBTITLE_SCALE => {
@@ -190,6 +201,15 @@ impl Library {
             &tx,
             AUTOPLAY_NEXT,
             if preferences.autoplay_next {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
+        write(
+            &tx,
+            AUTO_SKIP_INTRO,
+            if preferences.auto_skip_intro {
                 "true"
             } else {
                 "false"

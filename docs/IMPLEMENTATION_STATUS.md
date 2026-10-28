@@ -158,12 +158,12 @@ dropped before M3/M6 claims them:
 | Dart API | Reason not ported now | Target |
 | --- | --- | --- |
 | `updateMetadata`, `updateEpisodeMetadata`, `clearMatch`, `setExternalIdentity`, `metadataRevision` | belongs with enrichment (M6), needs the provider client | M6 |
-| `saveMarker`, `markers`, `removeMarker` | needs the player to validate intervals against duration | M2/M6 |
+| ~~`saveMarker`, `markers`, `removeMarker`~~ | **ported 2026-10-29** as `set_marker`/`mark_segment`/`markers`/`remove_marker`; intervals are validated against the edition's stored duration | done |
 | `relinkCandidates`, `confirmFileRelink` | needs the relink UI flow | M3 |
 | `exportBackup`, `importBackup` | validated versioned JSON format; port alongside the settings UI | M3 |
 | `queueJob`, `jobs`, `updateJob` | store exists in schema; scheduling belongs with enrichment | M6 |
 | Local NFO parsing | bounded parser; port with metadata ingestion | M6 |
-| `recommendations` | explainable ranking over owned media | M6 |
+| ~~`recommendations`~~ | **ported 2026-10-29** as `Library::recommendations`, explainable over owned media only | done |
 | `authorizedPath` | platform adapter concern | M2 |
 
 ---
@@ -637,8 +637,11 @@ cargo fmt --all --check
 | `screenroom-player` unit (incl. the bundled-libmpv search order) | 20 |
 | `player/tests/worker.rs` (real decode, audio, tracks, subtitle style) | 12 |
 | `player/tests/libmpv_smoke.rs` | 2 |
-| `screenroom-desktop` unit (incl. the window-width grid rule) | 61 |
+| `screenroom-desktop` unit (incl. the window-width grid rule) | 69 |
 | `desktop/tests/playback.rs` | 6 |
+| `desktop/tests/artwork.rs` | 3 |
+
+Workspace total after M3b: **211 passed, 0 failed**.
 
 The count is not the coverage. Two scanner tests have `#[cfg(unix)]` bodies, and the
 fourteen player tests print `skipped: …` and pass vacuously when no libmpv is found.
@@ -652,6 +655,58 @@ Headless scripts, which are not part of `cargo test`:
 | `scripts/check-quit-routing.sh` | the running app re-pointed the menu bar's Quit — hidden window, no focus taken |
 | `scripts/verify-bundle.sh` | the packaged bundle's structure, plist, bundled libmpv and all 20 of its dependencies |
 | `scripts/foreground-guard.sh` | sourced by every foreground script; refuses without `SCREENROOM_ALLOW_FOREGROUND=1` |
+
+---
+
+## M3b — retained posters, skip segments, local suggestions (2026-10-29)
+
+**Status: host-verified on macOS.** Three gaps that made the desktop feel unfinished
+are closed, and each one is closed without a network, a model or a guess.
+
+| Capability | Store (`screenroom-core`) | Desktop (`apps/desktop`) |
+| --- | --- | --- |
+| Offline artwork (F06) | new `artwork` table (schema **3**), `store_artwork`, `artwork`, `artworks_for`, `artwork_candidates`, `artwork_candidates_in`, `missing_artwork_count`. JPEG only, ≤768 KiB, ≤4096 px per side, magic number checked, one poster per work, replacing is an overwrite | `src/artwork.rs` runs ffmpeg as a child process (`-nostdin`, arguments as separate values so a filename can never be a shell fragment), one frame per work, 20 s deadline per run, output capped, fallback to the first frame when a stored duration seeks past the end; a bounded 16-deep queue on its own thread, never while a file is playing. Cards, Detail and Home draw the retained bytes |
+| Skip intro/credits (F14) | `set_marker`, `mark_segment` (duration taken from the edition, `duration_unknown` when it is still unknown), `markers`, `remove_marker`; one marker per kind per edition; an interval that does not fit the film is refused, not clamped | Player pins a segment at the playhead (`i` intro, `c` credits, again to end it; `s` skips), offers *Skip intro*/*Skip credits* only while the playhead is inside a stored marker, and `auto_skip_intro` (default **off**) skips once per viewing |
+| Local recommendations (F16) | `Library::recommendations`: next episode of a series in progress or just finished, then the viewer's watchlist, then more of a genre already being watched, then recently added. One row per work, unavailable and watched files excluded, each row carries its reason | Home draws a *Suggested for you* shelf from the same cursor order as Continue watching, with the reason on each card |
+
+Schema change is additive and migrated: a `user_version = 2` library gains the
+`artwork` table in place and keeps every row (asserted by a test that builds a
+schema-2 database and opens it). A backup written before the table existed restores
+with no artwork rather than failing — the restore reads only the tables the file
+actually holds.
+
+### Evidence from the running application
+
+Four generated clips (three films, one series episode) were scanned into a real
+library, then the application was launched against it with a hidden window and no
+foreground:
+
+```bash
+cargo run -p screenroom-core --example prepare_library -- /tmp/sr-art/library.db /tmp/sr-art/media Library
+SCREENROOM_LIBRARY=/tmp/sr-art/library.db SCREENROOM_WINDOW=hidden ./target/debug/screenroom-desktop
+sqlite3 /tmp/sr-art/library.db "SELECT w.title, a.width, a.height, a.sampled_at_ms, LENGTH(a.bytes) FROM artwork a JOIN works w ON w.id = a.work_id;"
+```
+
+Observed: four rows, each `400×226`, `8,883` bytes — one poster per work, produced by
+the running application from real ffmpeg runs, not by a test fixture. `sampled_at_ms`
+is `0` for all four because a 4-second clip has no stored duration, so the first probe
+is at 120 s; the fallback to the first frame is what turned that into a poster rather
+than a failure, which is the behaviour that test covers.
+
+Checks: `cargo test --workspace` **211 passed, 0 failed**; `clippy --workspace
+--all-targets` clean apart from the pre-existing transitive `block 0.1.6`
+future-incompat note; `fmt --all --check` clean.
+
+### What this does **not** prove
+
+- Posters have been **stored and handed to the widget**, and the mapping is unit
+tested, but nobody has looked at a visible window since they were added. Drawing is
+**PENDING** an owner-approved foreground session, like the on-screen budget.
+- No real personal media was sampled; the posters above come from generated test clips.
+- The skip button has not been pressed during a real viewing; its interval rule, the
+once-only auto-skip and the store's validation are tested.
+- Recommendations are exercised against synthetic libraries; how they read with a
+real 1,200-file library is unmeasured.
 
 ---
 
@@ -751,7 +806,8 @@ receipt.
 **Finish M3's remainder, then the two honesty gaps that only the owner can close.**
 
 1. Remaining M3: browse previews, and the **on-screen** rendering/input budget at
-   10,000 items. Subtitle styling is delivered (above); the store and offscreen
+   10,000 items. The M3b posters also need one visible-window pass to be called
+   drawn rather than stored. Subtitle styling is delivered (above); the store and offscreen
    halves of the budget are measured (M1 and the render section above). The on-screen
    half needs a visible window, so it is **PENDING** an owner-approved session.
 2. Listening pass for gate G3b: hear a known audio track, and confirm the measured

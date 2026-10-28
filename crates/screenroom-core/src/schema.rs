@@ -76,4 +76,16 @@ pub const CREATE: &[&str] = &[
     "CREATE UNIQUE INDEX jobs_active_target ON jobs(kind,target)
       WHERE status IN ('queued','running','rateLimited','waitingNetwork','needsConfirmation')",
     "CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)",
+    "CREATE TABLE artwork(work_id TEXT PRIMARY KEY REFERENCES works(id),file_id TEXT REFERENCES files(id),
+      mime TEXT NOT NULL DEFAULT 'image/jpeg',width INTEGER NOT NULL CHECK(width>0),
+      height INTEGER NOT NULL CHECK(height>0),sampled_at_ms INTEGER NOT NULL CHECK(sampled_at_ms>=0),
+      created_ms INTEGER NOT NULL,bytes BLOB NOT NULL)",
 ];
+
+/// Statements that take a schema 2 library to schema 3.
+///
+/// Additive only: the artwork table is new, and no existing table or index is
+/// rewritten, so a library written before posters were retained keeps every row
+/// and simply gains the new table. Fresh libraries get the same statement from
+/// [`CREATE`], which is why it is spelled once here.
+pub const MIGRATE_2_TO_3: &[&str] = &[CREATE[CREATE.len() - 1]];

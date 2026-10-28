@@ -7,10 +7,13 @@
 //! Availability never deletes: marking a source missing or a file unavailable
 //! keeps works, editions, progress and lists intact.
 
+mod artwork;
 mod backup;
 mod catalog;
 mod lists;
+mod markers;
 mod playback;
+mod recommend;
 mod settings;
 mod sources;
 
@@ -26,6 +29,7 @@ use crate::error::{CoreError, Result};
 use crate::paths::{PathStyle, location_key};
 use crate::{SCHEMA_VERSION, schema};
 
+pub use artwork::{Artwork, ArtworkCandidate};
 pub use backup::{BackupInfo, BackupReport, RestoreReport};
 pub use catalog::Ingest;
 pub use playback::Checkpoint;
@@ -225,6 +229,16 @@ impl Library {
                 tx.commit()?;
             }
             v if v == SCHEMA_VERSION => {}
+            2 => {
+                // Additive: the artwork table is new, nothing is rewritten. A
+                // library written before posters were retained keeps every row.
+                let tx = connection.transaction()?;
+                for statement in schema::MIGRATE_2_TO_3 {
+                    tx.execute(statement, [])?;
+                }
+                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                tx.commit()?;
+            }
             1 => {
                 return Err(CoreError::library(
                     "migration_unavailable",

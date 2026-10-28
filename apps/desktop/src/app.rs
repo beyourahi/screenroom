@@ -13,6 +13,7 @@
 //! Visual roles come from [`crate::design`], which maps the private Dropout
 //! Design System's semantic tokens onto iced. No colour literal lives here.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -20,18 +21,19 @@ use std::time::Duration;
 
 use iced::widget::shader;
 use iced::widget::{
-    Space, button, checkbox, column, container, pick_list, row, scrollable, slider, text,
+    Space, button, checkbox, column, container, image, pick_list, row, scrollable, slider, text,
     text_input,
 };
-use iced::{Alignment, Element, Length, Subscription, Task, keyboard};
+use iced::{Alignment, ContentFit, Element, Length, Subscription, Task, keyboard};
 use screenroom_core::{
     CoreError, Library, LibraryItem, LibraryQuery, LibraryScanner, MediaKind, Preferences, Profile,
-    ScanToken, Sort, Source, SourceState,
+    Recommendation, ScanToken, SegmentMarker, Sort, Source, SourceState,
 };
 use screenroom_player::{
     MediaTrack, NO_TRACK, Player, PlayerCapability, PlayerSnapshot, TrackKind,
 };
 
+use crate::artwork::{ArtworkEvent, Extractor};
 use crate::design::{self, Level};
 use crate::playback::PlaybackTracker;
 use crate::video_surface::{Frame, VideoSurface};
@@ -72,6 +74,25 @@ const RAIL: i64 = 8;
 
 /// How long a forward seek jumps.
 const SEEK_STEP: f64 = 10.0;
+
+/// Poster height on a card, in logical pixels.
+///
+/// Fixed rather than proportional so a title's text starts at the same height on
+/// every card in a row, and a poster with an unusual aspect is cropped rather
+/// than pushing its neighbours out of line.
+const CARD_POSTER_HEIGHT: f32 = 150.0;
+
+/// Poster size on the detail screen, in logical pixels.
+const DETAIL_POSTER: (f32, f32) = (210.0, 315.0);
+
+/// How many extra works are queued for artwork while a screen is idle.
+///
+/// A page's own works are always queued first; this fills the library in during
+/// the quiet moments instead of in one long burst after a scan.
+const ARTWORK_IDLE_BATCH: i64 = 4;
+
+/// Suggestions shown on Home.
+const SUGGESTIONS: i64 = 8;
 
 /// Update cycles in which a launch may try to point the menu bar's Quit at the
 /// window's close action.
@@ -356,14 +377,41 @@ pub struct App {
     focus: usize,
 
     home: Vec<LibraryItem>,
+    /// Local suggestions with the reason each one was offered.
+    suggestions: Vec<Recommendation>,
     browse: Browse,
     detail: Option<Detail>,
+
+    /// Retained posters, keyed by work. The bytes live in the library; this is
+    /// the decoded handle the image widget draws, and nothing is fetched.
+    artwork: HashMap<String, image::Handle>,
+    /// Works already handed to the extractor, so one work is not queued twice.
+    artwork_queued: HashSet<String>,
+    /// Works whose frame could not be read, so a reload does not retry forever.
+    artwork_failed: HashSet<String>,
+    /// How many works came back without a drawable frame, shown honestly.
+    artwork_failures: usize,
+    extractor: Option<Extractor>,
+    /// Whether this instance may run background work at all.
+    ///
+    /// A launch may: extraction is what makes the grid drawable. A test may not:
+    /// it would start ffmpeg processes and write into a fixture library, which is
+    /// a side effect no unit test should have.
+    background_work: bool,
 
     player: Option<Player>,
     snapshot: PlayerSnapshot,
     frame: Option<Frame>,
     active: Option<Active>,
     scrub: Option<f64>,
+
+    /// Intro and credits markers stored for the file now open.
+    markers: Vec<SegmentMarker>,
+    /// A segment whose start was pinned and is waiting for its end.
+    mark_pending: Option<(String, i64)>,
+    /// The intro marker already auto-skipped, so a seek engine that reports the
+    /// pre-seek position one more time cannot skip twice.
+    auto_skipped: Option<String>,
 
     /// Window width in logical pixels, updated from resize events.
     ///
@@ -494,6 +542,14 @@ pub enum Message {
     RemoveProfile(String),
     /// Turn automatic next-episode playback on or off.
     ToggleAutoplay(bool),
+    /// Turn automatic intro skipping on or off.
+    ToggleAutoSkip(bool),
+    /// Jump to the end of the intro or credits segment the playhead is inside.
+    SkipSegment,
+    /// Pin the start of a segment, or finish the one already pinned.
+    MarkSegment(String),
+    /// Store the pinned marker with its end at the playhead.
+    FinishSegment,
     /// Apply the typed subtitle language, or clear it when empty.
     ApplySubtitleLanguage,
     /// Apply the typed audio language, or clear it when empty.
@@ -585,6 +641,11 @@ impl App {
         let (mut app, task) = Self::launch();
         app.quit_routing_budget = QUIT_ROUTING_BUDGET;
         app.quit_check = crate::quit::check_path();
+        app.background_work = true;
+        // The library was read while background work was still disabled, so the
+        // first screen's posters are queued here: without this, extraction would
+        // not start until the viewer happened to navigate somewhere.
+        app.ensure_artwork();
         (app, task)
     }
 
@@ -648,13 +709,23 @@ impl App {
             screen: Screen::Home,
             focus: 0,
             home: Vec::new(),
+            suggestions: Vec::new(),
             browse: Browse::new(),
             detail: None,
+            artwork: HashMap::new(),
+            artwork_queued: HashSet::new(),
+            artwork_failed: HashSet::new(),
+            artwork_failures: 0,
+            extractor: None,
+            background_work: false,
             player: None,
             snapshot: PlayerSnapshot::default(),
             frame: None,
             active: None,
             scrub: None,
+            markers: Vec::new(),
+            mark_pending: None,
+            auto_skipped: None,
             window_width: INITIAL_WINDOW_WIDTH,
             preferences,
             profiles: Vec::new(),
@@ -697,6 +768,7 @@ impl App {
         self.reload_home();
         self.reload_browse();
         self.reload_administration();
+        self.ensure_artwork();
     }
 
     /// Reloads the profile and folder lists the Settings screen administers.
@@ -727,6 +799,11 @@ impl App {
             Ok(items) => self.home = items,
             Err(error) => self.report(&error),
         }
+        match self.library.recommendations(&self.profile_id, SUGGESTIONS) {
+            Ok(suggestions) => self.suggestions = suggestions,
+            Err(error) => self.report(&error),
+        }
+        self.ensure_artwork();
     }
 
     /// Runs the current Browse query: a count, then exactly one page of rows.
@@ -778,6 +855,138 @@ impl App {
             self.browse.genres = genres;
         }
         self.clamp_focus();
+        self.ensure_artwork();
+    }
+
+    // -------------------------------------------------------------- artwork
+
+    /// Works the current screen shows, deduplicated.
+    ///
+    /// Only these are asked for first: a grid must draw what is on it before it
+    /// spends the machine's time on works nobody is looking at.
+    fn visible_work_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        let mut add = |work_id: &str| {
+            if !ids.iter().any(|known| known == work_id) {
+                ids.push(work_id.to_string());
+            }
+        };
+        for item in &self.home {
+            add(&item.work_id);
+        }
+        for item in &self.browse.items {
+            add(&item.work_id);
+        }
+        if let Some(detail) = &self.detail {
+            add(&detail.item.work_id);
+            for episode in &detail.episodes {
+                add(&episode.work_id);
+            }
+        }
+        for suggestion in &self.suggestions {
+            add(&suggestion.item.work_id);
+        }
+        ids
+    }
+
+    /// Loads every stored poster the screen shows and queues the ones missing.
+    ///
+    /// Nothing is extracted while a file is playing: video decoding owns the GPU
+    /// and the disk, and a poster can wait — which is also the rule that keeps
+    /// watching from being interrupted by background work.
+    fn ensure_artwork(&mut self) {
+        if self.screen == Screen::Player {
+            return;
+        }
+        let ids = self.visible_work_ids();
+        if ids.is_empty() {
+            return;
+        }
+
+        let missing: Vec<String> = ids
+            .iter()
+            .filter(|work_id| {
+                !self.artwork.contains_key(*work_id) && !self.artwork_failed.contains(*work_id)
+            })
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            match self.library.artworks_for(&missing) {
+                Ok(found) => {
+                    for art in found {
+                        self.artwork
+                            .entry(art.work_id)
+                            .or_insert_with(|| image::Handle::from_bytes(art.bytes));
+                    }
+                }
+                Err(error) => self.report(&error),
+            }
+        }
+
+        if !self.background_work {
+            return;
+        }
+        let mut candidates = match self.library.artwork_candidates_in(&ids) {
+            Ok(candidates) => candidates,
+            Err(error) => return self.report(&error),
+        };
+        if candidates.is_empty() {
+            // Nothing on screen needs a poster, so the queue takes a few others
+            // and the library fills in while the viewer reads.
+            candidates = match self.library.artwork_candidates(ARTWORK_IDLE_BATCH) {
+                Ok(candidates) => candidates,
+                Err(error) => return self.report(&error),
+            };
+        }
+        candidates.retain(|candidate| {
+            !self.artwork_queued.contains(&candidate.work_id)
+                && !self.artwork_failed.contains(&candidate.work_id)
+        });
+        if candidates.is_empty() {
+            return;
+        }
+        if self.extractor.is_none() {
+            self.extractor = Some(Extractor::spawn(Arc::clone(&self.library)));
+        }
+        let Some(extractor) = &self.extractor else {
+            return;
+        };
+        for candidate in candidates {
+            let work_id = candidate.work_id.clone();
+            // Recorded only when the work was actually accepted: a full queue must
+            // leave the work free to be offered again rather than look queued.
+            if extractor.request(candidate) {
+                self.artwork_queued.insert(work_id);
+            }
+        }
+    }
+
+    /// Takes whatever the extractor finished since the last tick.
+    fn drain_artwork(&mut self) {
+        let Some(extractor) = &self.extractor else {
+            return;
+        };
+        for event in extractor.poll() {
+            match event {
+                ArtworkEvent::Stored { work_id } => {
+                    self.artwork_queued.remove(&work_id);
+                    if let Ok(Some(art)) = self.library.artwork(&work_id) {
+                        self.artwork
+                            .insert(work_id, image::Handle::from_bytes(art.bytes));
+                    }
+                }
+                ArtworkEvent::Failed { work_id, reason } => {
+                    self.artwork_queued.remove(&work_id);
+                    self.artwork_failed.insert(work_id);
+                    self.artwork_failures += 1;
+                    // Said once, not once per title: a folder of unreadable files
+                    // should not turn the footer into a scrolling list.
+                    if self.artwork_failures == 1 {
+                        self.status = Some(format!("No poster could be drawn — {reason}"));
+                    }
+                }
+            }
+        }
     }
 
     /// Keeps the keyboard cursor inside the loaded page.
@@ -786,10 +995,26 @@ impl App {
         self.focus = if len == 0 { 0 } else { self.focus.min(len - 1) };
     }
 
+    /// The Home item at a cursor position: suggestions first, then progress.
+    ///
+    /// The order is the drawing order, so an index means the same card the cursor
+    /// highlights and the one Enter opens.
+    fn home_item(&self, index: usize) -> Option<&LibraryItem> {
+        if index < self.suggestions.len() {
+            self.suggestions
+                .get(index)
+                .map(|suggestion| &suggestion.item)
+        } else {
+            self.home.get(index - self.suggestions.len())
+        }
+    }
+
     /// How many items the keyboard cursor can reach on this screen.
     fn visible_len(&self) -> usize {
         match self.screen {
-            Screen::Home => self.home.len(),
+            // Suggestions are reachable from the same cursor as Continue Watching,
+            // so the arrow keys cover the whole screen rather than half of it.
+            Screen::Home => self.home.len() + self.suggestions.len(),
             Screen::Browse => self.browse.items.len(),
             // Settings is a form with no grid, and the player has its own keys.
             Screen::Settings | Screen::Player => 0,
@@ -898,6 +1123,7 @@ impl App {
         });
         self.focus = 0;
         self.screen = Screen::Detail;
+        self.ensure_artwork();
     }
 
     /// Opens a file: session first, then the player, then the resume seek.
@@ -967,6 +1193,12 @@ impl App {
         self.snapshot = player.snapshot();
         self.frame = None;
         self.scrub = None;
+        // Segments are per edition, so a ruled intro does not follow the film into
+        // a different cut of it.
+        self.markers.clear();
+        self.reload_markers(&item.edition_id);
+        self.mark_pending = None;
+        self.auto_skipped = None;
         self.screen = Screen::Player;
     }
 
@@ -1036,6 +1268,7 @@ impl App {
 
     fn poll(&mut self) {
         self.drain_scan();
+        self.drain_artwork();
         let Some(player) = &self.player else { return };
         let snapshot = player.snapshot();
         let changed_frame = snapshot.frame.as_ref().is_some_and(|frame| {
@@ -1057,6 +1290,11 @@ impl App {
         // next one takes over the session.
         if ended {
             self.advance_to_next_episode();
+        }
+        // After the save, so skipping does not jump the checkpoint around, and
+        // last, so a finished file is never seeked away from its end.
+        if !ended {
+            self.maybe_auto_skip_intro();
         }
     }
 
@@ -1213,6 +1451,131 @@ impl App {
             return;
         }
         player.seek(seconds);
+    }
+
+    // -------------------------------------------------------- skip segments
+
+    /// The stored marker the playhead is inside, if any.
+    ///
+    /// Returned by value so the caller can seek without holding a borrow on the
+    /// marker list it is about to update.
+    fn active_marker(&self) -> Option<SegmentMarker> {
+        let position = self.snapshot.position_ms();
+        self.markers
+            .iter()
+            .find(|marker| position >= marker.start_ms && position < marker.end_ms)
+            .cloned()
+    }
+
+    /// Jumps past the segment the playhead is in.
+    fn skip_segment(&mut self) {
+        let Some(marker) = self.active_marker() else {
+            self.status = Some("No intro or credits marker covers this position yet.".to_string());
+            return;
+        };
+        self.seek_to(marker.end_ms as f64 / 1_000.0);
+        self.status = Some(
+            if marker.kind == "intro" {
+                "Skipped the intro."
+            } else {
+                "Skipped the credits."
+            }
+            .to_string(),
+        );
+    }
+
+    /// Pins a segment's start, or closes the one already pinned.
+    fn toggle_segment_mark(&mut self, kind: &str) {
+        if self
+            .mark_pending
+            .as_ref()
+            .is_some_and(|(pending, _)| pending == kind)
+        {
+            self.finish_segment_mark();
+        } else {
+            self.start_segment_mark(kind);
+        }
+    }
+
+    fn start_segment_mark(&mut self, kind: &str) {
+        let position = self.snapshot.position_ms();
+        if position <= 0 {
+            self.status =
+                Some("Play into the segment first, then pin where it starts.".to_string());
+            return;
+        }
+        self.mark_pending = Some((kind.to_string(), position));
+        self.status = Some(format!(
+            "{kind} start pinned at {} — press again where the segment ends.",
+            clock(position as f64 / 1_000.0)
+        ));
+    }
+
+    /// Stores the pinned marker, ending it at the playhead.
+    ///
+    /// The end is taken from the player rather than asked for in a field: the
+    /// position on screen is the one the viewer is describing.
+    fn finish_segment_mark(&mut self) {
+        let Some((kind, start_ms)) = self.mark_pending.take() else {
+            return;
+        };
+        let Some(file_id) = self.active.as_ref().map(|active| active.file_id.clone()) else {
+            return;
+        };
+        let edition_id = match self.library.item(&file_id, Some(&self.profile_id)) {
+            Ok(Some(item)) => item.edition_id,
+            Ok(None) => {
+                self.status = Some("That file is no longer in the library.".to_string());
+                return;
+            }
+            Err(error) => return self.report(&error),
+        };
+        let end_ms = self.snapshot.position_ms().max(start_ms);
+        match self
+            .library
+            .mark_segment(&edition_id, &kind, start_ms, end_ms)
+        {
+            Ok(marker) => {
+                self.reload_markers(&marker.edition_id);
+                self.status = Some(format!(
+                    "{kind} marked {} – {}; it is offered next time this file plays.",
+                    clock(marker.start_ms as f64 / 1_000.0),
+                    clock(marker.end_ms as f64 / 1_000.0)
+                ));
+            }
+            Err(error) => self.report(&error),
+        }
+    }
+
+    fn reload_markers(&mut self, edition_id: &str) {
+        match self.library.markers(edition_id) {
+            Ok(markers) => self.markers = markers,
+            Err(error) => self.report(&error),
+        }
+    }
+
+    /// Skips a marked intro once, when the preference asks for it.
+    fn maybe_auto_skip_intro(&mut self) {
+        if !self.preferences.auto_skip_intro {
+            return;
+        }
+        let position = self.snapshot.position_ms();
+        let found = self
+            .markers
+            .iter()
+            .find(|marker| {
+                marker.kind == "intro" && position >= marker.start_ms && position < marker.end_ms
+            })
+            .map(|marker| (marker.id.clone(), marker.end_ms));
+        let Some((id, end_ms)) = found else {
+            return;
+        };
+        if self.auto_skipped.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        self.auto_skipped = Some(id);
+        self.seek_to(end_ms as f64 / 1_000.0);
+        self.status = Some("Skipped the intro.".to_string());
     }
 
     // ------------------------------------------------------------------ scan
@@ -1836,6 +2199,16 @@ impl App {
                 };
                 self.save_preferences(preferences);
             }
+            Message::ToggleAutoSkip(enabled) => {
+                let preferences = Preferences {
+                    auto_skip_intro: enabled,
+                    ..self.preferences.clone()
+                };
+                self.save_preferences(preferences);
+            }
+            Message::SkipSegment => self.skip_segment(),
+            Message::MarkSegment(kind) => self.toggle_segment_mark(&kind),
+            Message::FinishSegment => self.finish_segment_mark(),
             Message::SubtitleLanguageChanged(value) => self.subtitle_input = value,
             Message::AudioLanguageChanged(value) => self.audio_input = value,
             Message::Resized(width) => {
@@ -1937,7 +2310,7 @@ impl App {
     /// Enter on the focused item.
     fn activate(&mut self) {
         let file_id = match self.screen {
-            Screen::Home => self.home.get(self.focus).map(|item| item.id.clone()),
+            Screen::Home => self.home_item(self.focus).map(|item| item.id.clone()),
             Screen::Browse => self
                 .browse
                 .items
@@ -2027,6 +2400,12 @@ impl App {
                 Key::Named(Named::Space) => self.toggle_play(),
                 Key::Named(Named::ArrowLeft) => self.seek_step(-SEEK_STEP),
                 Key::Named(Named::ArrowRight) => self.seek_step(SEEK_STEP),
+                Key::Character(character) => match character.as_str() {
+                    "s" => self.skip_segment(),
+                    "i" => self.toggle_segment_mark("intro"),
+                    "c" => self.toggle_segment_mark("credits"),
+                    _ => {}
+                },
                 _ => {}
             },
             Screen::Detail => match key {
@@ -2246,7 +2625,9 @@ impl App {
             text("").size(tokens.type_scale.caption)
         };
         let hint = match self.screen {
-            Screen::Player => "Space play/pause · ←/→ seek 10s · Esc back",
+            Screen::Player => {
+                "Space play/pause · ←/→ seek 10s · s skip segment · i intro mark · c credits mark · Esc back"
+            }
             Screen::Detail => "Enter play · f favourite · w watchlist · m watched · Esc back",
             Screen::Settings => "Esc back · ⌘1 Home · ⌘2 Library",
             _ => "Arrows move · Enter opens · ⌘1 Home · ⌘2 Library · ⌘3 Settings · Esc back",
@@ -2274,6 +2655,13 @@ impl App {
             .spacing(tokens.spacing.content_pad)
             .width(Length::Fill);
 
+        // Suggestions first, because for a new library they are the only thing
+        // there is to do; Continue watching takes the cursor positions after them.
+        if !self.suggestions.is_empty() {
+            body = body.push(text("Suggested for you").size(tokens.type_scale.title_sm));
+            body = body.push(self.suggestion_grid(0));
+        }
+
         body = body.push(text("Continue watching").size(tokens.type_scale.title_sm));
         if self.home.is_empty() {
             body = body.push(self.empty_note(
@@ -2281,7 +2669,7 @@ impl App {
                 "Start something from the library and its position appears here.",
             ));
         } else {
-            body = body.push(self.card_grid(&self.home, 0));
+            body = body.push(self.card_grid(&self.home, self.suggestions.len()));
         }
 
         body = body.push(text("Your library").size(tokens.type_scale.subtitle));
@@ -2313,6 +2701,16 @@ impl App {
                 text("Files are read in place and never moved, renamed or deleted.")
                     .size(tokens.type_scale.micro)
                     .color(tokens.palette.ink_muted),
+                if self.artwork_failures > 0 {
+                    text(format!(
+                        "{} title(s) had no readable frame, so they keep a title-only card.",
+                        self.artwork_failures
+                    ))
+                    .size(tokens.type_scale.micro)
+                    .color(tokens.palette.destructive)
+                } else {
+                    text(String::new()).size(tokens.type_scale.micro)
+                },
             ]
             .spacing(tokens.spacing.field_y),
         )
@@ -2555,7 +2953,24 @@ impl App {
             }
         }
 
-        scrollable(body).height(Length::Fill).into()
+        // The poster sits beside the facts, not above them: the title, the actions
+        // and the synopsis are what a viewer reads, and a large image would push
+        // them below the fold on a short window.
+        let details: Element<'_, Message> = match self.artwork.get(&item.work_id) {
+            Some(handle) => row![
+                image(handle.clone())
+                    .width(Length::Fixed(DETAIL_POSTER.0))
+                    .height(Length::Fixed(DETAIL_POSTER.1))
+                    .content_fit(ContentFit::Cover),
+                body,
+            ]
+            .spacing(tokens.spacing.content_pad)
+            .align_y(Alignment::Start)
+            .into(),
+            None => body.into(),
+        };
+
+        scrollable(details).height(Length::Fill).into()
     }
 
     /// A compact one-per-line episode list; the arrow keys walk it.
@@ -2629,12 +3044,24 @@ impl App {
         grid_columns(self.window_width)
     }
 
-    /// One poster-less card: title, position, and its state.
+    /// One card: retained poster when there is one, then title and state.
     ///
-    /// Artwork is not drawn because no artwork bytes are retained yet (F06). A
-    /// placeholder image would be a fake.
+    /// No placeholder image is drawn for a work that has none. A generic poster
+    /// would claim to be this title's artwork, and a title-only card is the
+    /// truthful version of "no artwork was found".
     fn card(&self, item: &LibraryItem, focused: bool) -> Element<'_, Message> {
+        self.card_with(item, focused, None)
+    }
+
+    /// A card with an optional line saying why it is being shown.
+    fn card_with(
+        &self,
+        item: &LibraryItem,
+        focused: bool,
+        note: Option<&str>,
+    ) -> Element<'_, Message> {
         let tokens = design::tokens();
+        let handle = self.artwork.get(&item.work_id);
         let title = truncate(&item.title, 34);
         let subtitle = {
             let label = item.episode_label();
@@ -2659,28 +3086,82 @@ impl App {
             "not started".to_string()
         };
 
-        let content = column![
-            text(title).size(tokens.type_scale.label),
-            text(subtitle)
-                .size(tokens.type_scale.micro)
-                .color(tokens.palette.ink_muted),
-            Space::new().height(Length::Fixed(4.0)),
-            text(position)
-                .size(tokens.type_scale.micro)
-                .color(tokens.palette.ink_muted),
-            text(truncate(&item.filename, 30))
-                .size(tokens.type_scale.micro)
-                .color(tokens.palette.ink_muted),
-        ]
-        .spacing(2.0);
+        let mut content = column![].spacing(2.0);
+        if let Some(handle) = handle {
+            content = content.push(
+                image(handle.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fixed(CARD_POSTER_HEIGHT))
+                    .content_fit(ContentFit::Cover),
+            );
+            content = content.push(Space::new().height(Length::Fixed(4.0)));
+        }
+        content = content
+            .push(text(title).size(tokens.type_scale.label))
+            .push(
+                text(subtitle)
+                    .size(tokens.type_scale.micro)
+                    .color(tokens.palette.ink_muted),
+            )
+            .push(Space::new().height(Length::Fixed(4.0)))
+            .push(
+                text(position)
+                    .size(tokens.type_scale.micro)
+                    .color(tokens.palette.ink_muted),
+            )
+            .push(
+                text(truncate(&item.filename, 30))
+                    .size(tokens.type_scale.micro)
+                    .color(tokens.palette.ink_muted),
+            );
+        if let Some(note) = note {
+            content = content.push(
+                text(truncate(note, 34))
+                    .size(tokens.type_scale.micro)
+                    .color(tokens.palette.signal),
+            );
+        }
+
+        let mut height = 132.0;
+        if handle.is_some() {
+            height += CARD_POSTER_HEIGHT + 4.0;
+        }
+        if note.is_some() {
+            height += 18.0;
+        }
 
         button(content)
             .on_press(Message::OpenDetail(item.id.clone()))
             .style(design::tile_style(focused))
             .width(Length::FillPortion(1))
-            .height(Length::Fixed(132.0))
+            .height(Length::Fixed(height))
             .padding(tokens.spacing.field_y)
             .into()
+    }
+
+    /// The suggestion grid, which says why each card is offered.
+    fn suggestion_grid(&self, base: usize) -> Element<'_, Message> {
+        let tokens = design::tokens();
+        let columns = self.columns();
+        let mut grid = column![]
+            .spacing(tokens.spacing.field_x)
+            .width(Length::Fill);
+        for (row_index, chunk) in self.suggestions.chunks(columns).enumerate() {
+            let mut cells = row![].spacing(tokens.spacing.field_x).width(Length::Fill);
+            for (column_index, suggestion) in chunk.iter().enumerate() {
+                let index = base + row_index * columns + column_index;
+                cells = cells.push(self.card_with(
+                    &suggestion.item,
+                    self.focus == index,
+                    Some(&suggestion.reason),
+                ));
+            }
+            for _ in chunk.len()..columns {
+                cells = cells.push(Space::new().width(Length::FillPortion(1)));
+            }
+            grid = grid.push(cells);
+        }
+        grid.into()
     }
 
     /// An honest empty/blocked state: a title and the concrete next action.
@@ -2783,6 +3264,11 @@ impl App {
             note(
                 "A gap in a season stops the chain: the next episode is never skipped guessing.",
             ),
+            checkbox(self.preferences.auto_skip_intro)
+                .label("Skip marked intros automatically")
+                .on_toggle(Message::ToggleAutoSkip)
+                .size(18.0),
+            note("Only a segment you marked is skipped; an intro is never guessed."),
             row![
                 text("Subtitle language".to_string()).size(tokens.type_scale.label),
                 text_input("e.g. en", &self.subtitle_input)
@@ -3084,6 +3570,79 @@ impl App {
         ]
         .spacing(tokens.spacing.field_x)
         .align_y(Alignment::Center);
+        // The skip button appears only when a stored marker actually covers the
+        // playhead: an always-visible button would claim a segment the library
+        // does not know about.
+        let mut segment_row: iced::widget::Row<'_, Message> = row![]
+            .spacing(tokens.spacing.field_x)
+            .align_y(Alignment::Center);
+        if let Some(marker) = self.active_marker() {
+            let label = if marker.kind == "intro" {
+                "Skip intro"
+            } else {
+                "Skip credits"
+            };
+            segment_row = segment_row.push(
+                button(text(label).size(tokens.type_scale.label))
+                    .on_press(Message::SkipSegment)
+                    .style(design::action_style(true))
+                    .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+            );
+        }
+        segment_row = segment_row.push(
+            button(
+                text(match &self.mark_pending {
+                    Some((kind, start)) => {
+                        format!("End {kind} at {}", clock(*start as f64 / 1_000.0))
+                    }
+                    None => "Mark intro start".to_string(),
+                })
+                .size(tokens.type_scale.label),
+            )
+            .on_press(Message::MarkSegment("intro".to_string()))
+            .style(design::quiet_style(false))
+            .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+        );
+        segment_row = segment_row.push(
+            button(text("Mark credits start").size(tokens.type_scale.label))
+                .on_press(Message::MarkSegment("credits".to_string()))
+                .style(design::quiet_style(false))
+                .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+        );
+        if self.mark_pending.is_some() {
+            segment_row = segment_row.push(
+                button(text("Finish segment").size(tokens.type_scale.label))
+                    .on_press(Message::FinishSegment)
+                    .style(design::action_style(false))
+                    .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+            );
+        }
+        let marked = self
+            .markers
+            .iter()
+            .map(|marker| {
+                format!(
+                    "{} {}–{}",
+                    marker.kind,
+                    clock(marker.start_ms as f64 / 1_000.0),
+                    clock(marker.end_ms as f64 / 1_000.0)
+                )
+            })
+            .collect::<Vec<_>>();
+        let segment_note = if marked.is_empty() {
+            "No segments stored for this file. Pin them while watching; nothing is guessed."
+                .to_string()
+        } else {
+            marked.join(" · ")
+        };
+        let segments = column![
+            segment_row,
+            text(segment_note)
+                .size(tokens.type_scale.micro)
+                .color(tokens.palette.ink_muted),
+        ]
+        .spacing(tokens.spacing.field_y);
+
         let (audio_choices, audio_selected) = self.track_chooser(TrackKind::Audio);
         let (subtitle_choices, subtitle_selected) = self.track_chooser(TrackKind::Subtitle);
         // A picker with nothing to pick is a dead control, so each kind renders
@@ -3163,7 +3722,7 @@ impl App {
         .spacing(tokens.spacing.field_x);
 
         container(
-            column![header, surface, controls, track_row, footer]
+            column![header, surface, controls, segments, track_row, footer]
                 .spacing(tokens.spacing.content_pad),
         )
         .padding(tokens.spacing.content_pad)
@@ -3710,6 +4269,123 @@ mod tests {
         app.screen = Screen::Browse;
         app.reload_browse();
         (app, directory)
+    }
+
+    #[test]
+    fn a_retained_poster_is_cached_for_its_card() {
+        // The whole point of retaining bytes is that drawing needs no network and
+        // no second decode of the media file; the card gets a handle from the row.
+        let (library, _directory) = library_with(2);
+        let item = library.items(&LibraryQuery::page(1)).expect("items")[0].clone();
+        library
+            .store_artwork(
+                &item.work_id,
+                None,
+                &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10],
+                400,
+                600,
+                1_000,
+            )
+            .expect("artwork");
+
+        let mut app = App::with_library(library, None, "test".into());
+        app.screen = Screen::Browse;
+        app.reload_browse();
+        assert!(
+            app.artwork.contains_key(&item.work_id),
+            "a stored poster must be handed to the card"
+        );
+    }
+
+    #[test]
+    fn a_test_built_app_never_starts_an_extraction() {
+        // Extraction spawns ffmpeg and writes into the library; a unit test must not
+        // do either. Only a launch sets this, and the queue is what it gates.
+        let (mut app, _directory) = app_with(4);
+        app.screen = Screen::Browse;
+        app.reload_browse();
+        assert!(app.extractor.is_none());
+        assert!(app.artwork_queued.is_empty());
+    }
+
+    #[test]
+    fn a_marker_covers_only_the_interval_it_describes() {
+        // The button appears from the start of the segment to its end and not one
+        // frame outside it: a skip offered over the opening scene would cut the
+        // film, and one offered after the intro would do nothing.
+        let (mut app, _directory) = app_with(1);
+        app.markers = vec![SegmentMarker {
+            id: "marker".to_string(),
+            edition_id: "edition".to_string(),
+            kind: "intro".to_string(),
+            start_ms: 60_000,
+            end_ms: 120_000,
+            duration_ms: 3_600_000,
+        }];
+
+        app.snapshot = App::playing_snapshot(30.0, 3_600.0);
+        assert!(app.active_marker().is_none());
+        app.snapshot = App::playing_snapshot(60.0, 3_600.0);
+        assert_eq!(
+            app.active_marker().map(|marker| marker.kind),
+            Some("intro".to_string())
+        );
+        app.snapshot = App::playing_snapshot(120.0, 3_600.0);
+        assert!(app.active_marker().is_none());
+    }
+
+    #[test]
+    fn automatic_skipping_only_happens_once_and_only_when_asked_for() {
+        let (mut app, _directory) = app_with(1);
+        app.markers = vec![SegmentMarker {
+            id: "marker".to_string(),
+            edition_id: "edition".to_string(),
+            kind: "intro".to_string(),
+            start_ms: 60_000,
+            end_ms: 120_000,
+            duration_ms: 3_600_000,
+        }];
+        app.snapshot = App::playing_snapshot(90.0, 3_600.0);
+
+        // Off by default: nothing moves on its own.
+        app.maybe_auto_skip_intro();
+        assert!(app.auto_skipped.is_none());
+        assert_ne!(app.status.as_deref(), Some("Skipped the intro."));
+
+        app.preferences.auto_skip_intro = true;
+        app.maybe_auto_skip_intro();
+        assert_eq!(app.auto_skipped.as_deref(), Some("marker"));
+        assert_eq!(app.status.as_deref(), Some("Skipped the intro."));
+
+        // A player that reports the pre-seek position again must not skip twice,
+        // and the status is not overwritten on every frame.
+        app.status = None;
+        app.maybe_auto_skip_intro();
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn the_home_cursor_walks_suggestions_before_continue_watching() {
+        let (mut app, _directory) = app_with(2);
+        let all = app.library.items(&LibraryQuery::page(10)).expect("items");
+        app.suggestions = vec![Recommendation {
+            item: all[0].clone(),
+            reason: "Recently added".to_string(),
+        }];
+        app.home = vec![all[1].clone()];
+        app.screen = Screen::Home;
+        app.focus = 0;
+
+        assert_eq!(app.visible_len(), 2, "both cards are reachable");
+        assert_eq!(
+            app.home_item(0).map(|item| item.id.clone()),
+            Some(all[0].id.clone())
+        );
+        assert_eq!(
+            app.home_item(1).map(|item| item.id.clone()),
+            Some(all[1].id.clone())
+        );
+        assert!(app.home_item(2).is_none());
     }
 
     #[test]

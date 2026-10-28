@@ -75,12 +75,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = started + Duration::from_secs(30);
     while Instant::now() < deadline {
         let snapshot = player.snapshot();
-        if let Some(frame) = snapshot.frame.as_ref() {
-            if snapshot.loaded && !frame.is_blank() {
-                first_after_load = Some(started.elapsed());
-                first_frame = Some(frame.generation);
-                break;
-            }
+        if let Some(frame) = snapshot.frame.as_ref()
+            && snapshot.loaded
+            && !frame.is_blank()
+        {
+            first_after_load = Some(started.elapsed());
+            first_frame = Some(frame.generation);
+            break;
         }
         if snapshot.failure.is_some() {
             println!("load failed: {:?}", snapshot.failure);
@@ -110,14 +111,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     while sampling_started.elapsed() < sample_for {
         let snapshot = player.snapshot();
-        if let Some(frame) = snapshot.frame.as_ref() {
-            if seen.insert(frame.generation) {
-                if last_generation.is_some() {
-                    worst_gap = worst_gap.max(last_change.elapsed());
-                }
-                last_change = Instant::now();
-                last_generation = Some(frame.generation);
+        if let Some(frame) = snapshot.frame.as_ref()
+            && seen.insert(frame.generation)
+        {
+            if last_generation.is_some() {
+                worst_gap = worst_gap.max(last_change.elapsed());
             }
+            last_change = Instant::now();
+            last_generation = Some(frame.generation);
         }
         if snapshot.ended {
             break;

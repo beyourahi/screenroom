@@ -40,6 +40,7 @@ const TABLES: &[&str] = &[
     "episodes",
     "editions",
     "files",
+    "artwork",
     "file_episodes",
     "profiles",
     "sessions",
@@ -237,7 +238,19 @@ fn replace_contents(connection: &mut Connection) -> Result<()> {
     for table in TABLES.iter().rev() {
         tx.execute(&format!("DELETE FROM main.{table}"), [])?;
     }
+    // A backup written before a table existed simply has no rows for it, and a
+    // restore must not fail over artwork it never had. The tables the file does
+    // hold are read, and the rest keep the empty state the delete above left.
+    let present: std::collections::HashSet<String> = {
+        let mut statement =
+            tx.prepare("SELECT name FROM backup.sqlite_master WHERE type = 'table'")?;
+        let names = statement.query_map([], |row| row.get::<_, String>(0))?;
+        names.collect::<rusqlite::Result<_>>()?
+    };
     for table in TABLES {
+        if !present.contains(*table) {
+            continue;
+        }
         tx.execute(
             &format!("INSERT INTO main.{table} SELECT * FROM backup.{table}"),
             [],
@@ -303,7 +316,7 @@ fn inspect(path: &Path) -> Result<BackupInfo> {
     let schema_version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .map_err(|_| unreadable())?;
-    if schema_version > SCHEMA_VERSION || schema_version < 2 {
+    if !(2..=SCHEMA_VERSION).contains(&schema_version) {
         return Err(CoreError::library(
             "backup_unsupported",
             "That backup was written by an incompatible Screenroom version.",

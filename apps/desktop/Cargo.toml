@@ -10,7 +10,9 @@ repository.workspace = true
 [dependencies]
 screenroom-core = { path = "../../crates/screenroom-core" }
 screenroom-player = { path = "../../crates/screenroom-player" }
-iced = { version = "0.14", features = ["wgpu"] }
+# `image` is what lets a retained poster be drawn: the bytes come from the local
+# library, so no network or extra service is involved.
+iced = { version = "0.14", features = ["wgpu", "image"] }
 # Must match the wgpu version iced 0.14 renders with; verify with `cargo tree -i wgpu`.
 wgpu = "27"
 
