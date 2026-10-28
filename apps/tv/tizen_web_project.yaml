@@ -1,0 +1,68 @@
+# Tizen project metadata for the Samsung TV widget.
+#
+# The `files` list below is the contents of the built widget, not the sources. That is
+# deliberate and it is the one thing to know about this file: **the widget is built by
+# `pnpm build`, not by Tizen Studio.** The application is TypeScript bundled by Vite into
+# a single `main.js`, and `apps/tv/build/tizen/` is the directory that gets packaged — so
+# a list naming `src/**` would describe a widget that cannot run, because nothing in the
+# widget's directory would have been bundled.
+#
+# `tizen package -t wgt -- apps/tv/build/tizen` is therefore the packaging command, and
+# `scripts/prepare-tizen-dist.mjs` is what produces that directory. Studio's own
+# `tizen build-web` is not part of this project's build path.
+
+# Project type [web_app, test_runner]
+project_type: web_app
+
+# Default profile, Tizen API version
+profile: tv-samsung
+api_version: "6.0"
+
+# Build type [Debug/ Release/ Test]
+build_type: Release
+
+# Output name for application
+output_name: ScreenroomTV
+
+# Output path for build
+output_path: "build"
+
+# Enable size optimization of wgt for web workspace
+opt: false
+
+# Signing profile to be used for Tizen package signing
+# If value is empty: "", active signing profile will be used
+# Else If value is ".", default signing profile will be used
+signing_profile: ""
+
+# list of certs in web project (.trust-anchor)
+trust_anchor: []
+
+# The built widget: exactly what `scripts/prepare-tizen-dist.mjs` stages.
+files:
+  - config.xml
+  - icon.png
+  - index.html
+  - main.js
+  - assets
+
+# list of files to exclude based on the matched patterns
+excludes:
+  - build/.*
+  - node_modules/.*
+  - src/.*
+  - test/.*
+  - scripts/.*
+  - dist/.*
+  - .sign/.*
+  - .tproject
+  - config.xml.bak
+  - pnpm-lock.yaml
+  - tizen_web_project.yaml
+  - tsconfig.json
+  - tsconfig.test.json
+  - vite.config.ts
+  - .wgt
+
+# project dependencies
+deps: []

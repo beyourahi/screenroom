@@ -58,19 +58,36 @@ switched, with the selection read back from the player.
   this machine's networking.
 - 4K and hardware decode are neither claimed nor measured: the software bridge is
   `hwdec=no` by design and bounded to 1920 px.
-- Everything Windows and everything Samsung TV. Both are **BLOCKED** on hardware
-  access and (for Tizen) a local signing certificate. No device receipt exists.
+- Everything Windows. **BLOCKED** on hardware access; no Windows target compiles
+  from this Mac at all.
+- Everything on the Samsung TV. The client is written, typechecked, tested off-device
+  and packaged into a signed `.wgt` — but **nothing has run on a Tizen engine**, no
+  media has reached AVPlay, and no drive has been walked. The step-by-step handoff is
+  [`docs/TIZEN_DEVICE_HANDOFF.md`](docs/TIZEN_DEVICE_HANDOFF.md).
 
 Full detail, receipts and blockers:
 [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md).
 
 ## Run it
 
+Desktop (Rust):
+
 ```bash
-cargo test --workspace          # 168 tests, 0 failures on the dev host
+cargo test --workspace          # 189 tests, 0 failures on the dev host
 cargo clippy --workspace --all-targets
 cargo fmt --all --check
 cargo run -p screenroom-desktop                    # the application
+```
+
+TV client (TypeScript, Samsung Tizen). These need no television and no emulator —
+they build and test the bundle only, and prove nothing about the TV:
+
+```bash
+cd apps/tv
+pnpm install
+pnpm test        # 82 tests, 0 failures
+pnpm typecheck   # application source and tests, typechecked separately
+pnpm build       # one bundle + the staged Tizen widget directory
 ```
 
 Measurements and checks that need **no window** — prefer these, they never take
@@ -153,7 +170,7 @@ Cargo.toml                  # Rust workspace
 crates/screenroom-core/     # domain, SQLite library, scanner, fingerprints
 crates/screenroom-player/   # libmpv runtime boundary, player state machine
 apps/desktop/               # iced + wgpu client, libmpv -> wgpu bridge
-apps/tv/                    # Samsung Tizen client (not started)
+apps/tv/                    # LightningJS 3 + Blits Samsung Tizen client (not yet on a TV)
 scripts/                    # local evidence helpers (capture, drive), macOS packager
 docs/                       # ADRs, architecture, roadmap, ledger, gates
 reference/                  # historical Svelte/Tauri prototype and handoff

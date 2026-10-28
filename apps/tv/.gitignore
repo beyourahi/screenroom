@@ -1,0 +1,14 @@
+# Build output. Both of these are generated from `src/` by `pnpm build` and are not
+# source: `dist/` is the web page Vite emits, and `build/tizen/` is the widget directory
+# assembled from it. Committing either would mean a widget that can disagree with the
+# code it was supposedly built from.
+dist/
+build/
+
+# A signed package is never committed: it carries the owner's certificate identity.
+*.wgt
+*.tpk
+
+# The signing material for a local developer profile.
+.author/
+.sign/

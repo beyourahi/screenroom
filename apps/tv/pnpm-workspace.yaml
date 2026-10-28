@@ -1,0 +1,6 @@
+allowBuilds:
+  esbuild: true
+# A single-package workspace, which is where pnpm keeps settings that moved out of
+# package.json. `esbuild` (through vite) installs a platform binary from a build
+# script, and pnpm blocks build scripts unless a dependency is named here. Without
+# this, `pnpm install` succeeds but `pnpm build` fails with a broken esbuild.

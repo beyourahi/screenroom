@@ -20,7 +20,7 @@ Current summary:
 | G3 libmpv frame presented through wgpu in an iced window | **PASSED on macOS** (30 fps, correct aspect, transport and resume verified in the window); Windows path **BLOCKED** |
 | G3b Audio output and audio/video sync | **PARTIAL** — audio clock and `avsync` measured (0.982× real time, 0.0 ms); not heard by a person |
 | G4 Desktop playback quality on owner hardware | **BLOCKED** (no Windows hardware) |
-| G5 Samsung Tizen physical device | **BLOCKED** (Tizen device and signing profile unavailable) |
+| G5 Samsung Tizen physical device | **BLOCKED on the device** — the client builds, tests and packages, and a signed `.wgt` exists; nothing has run on a Tizen engine |
 | G6 Other TV platforms | **RETIRED** (LG webOS / Android TV out of scope, ADR-004) |
 | G7 iOS | **RETIRED** (out of scope, ADR-003) |
 | G8 Android TV + Media3 | **RETIRED** (out of scope, ADR-004) |
@@ -37,7 +37,7 @@ cargo fmt --all --check
 ```
 
 Pass condition: all tests green, no first-party lint warnings, formatting clean.
-Recorded: **168 tests, 0 failures**, `clippy -D warnings` clean, `fmt --check` clean
+Recorded: **189 tests, 0 failures**, `clippy -D warnings` clean, `fmt --check` clean
 (2026-10-28, after the tracks/audio, settings/backup, subtitle styling, recovery,
 scale, path-semantics and packaging work). The suite includes real libmpv decode,
 audio and track switching, subtitle style read-back, a 10,000-item query budget,
@@ -159,6 +159,31 @@ Until that machine is available: **BLOCKED**. Do not infer it from macOS results
 7. Document what a reinstall destroys, and that external backup is required.
 
 Each numbered item is its own receipt. Guessing at any of them is prohibited.
+
+### What is settled without the device (2026-10-28)
+
+None of the seven items above is closer to passing, and none of them is being claimed.
+What did change is the **size of the unknown**: the parts that a Mac could answer are
+answered.
+
+| Question the gate depends on | State |
+| --- | --- |
+| Does a Lightning 3 bundle build for this engine at all? | **Yes.** `pnpm build` emits a single 428,957-byte `main.js` targeted at the 2021 engine, with no code splitting — a widget has no server to fetch a second chunk from — and relative asset paths, verified by the staging step rather than trusted |
+| Is the client's own logic exercised? | **82 tests, 0 failures**, off-device and in `pnpm test`: the D-pad rule index-for-index against the desktop's, the progress guard, the store's durability rules, locator validation, AVPlay's display-rect maths and track reading, tokens and grid geometry |
+| Does the widget manifest ask for the right things? | **The privileges are the ones the code uses** — remote-key and filesystem-read, and the template's unused `application.launch` request is gone. The TV is still the only authority on whether it grants them |
+| Can a signed package be produced? | **Yes.** `build/ScreenroomTV-0.1.0.wgt`, 147,404 bytes, sha256 `ec40f2cebe29da19ec8911d2e3342263294aab6096f169b6744e0eca37ee05d0`, produced by the `tizen-build-project` runner with **no** default-developer-certificate warning, and containing a `main.js` byte-identical to the tested bundle |
+| Is the TV authorised to install it? | **Unknown, and it is the first thing to check.** The `screenroom` signing profile is active; whether its distributor certificate lists this television's DUID is not something the Mac can see, and the TV will reject the chain if it does not |
+
+So item 2 is *approached* rather than passed: a package exists, but "signed `.wgt`
+installs" needs the television to accept it. Items 1 and 4–7 need it to run. Item 3
+needs a drive in it. **The remaining work is on the TV, not in the build** — the exact
+steps and the observable that settles each open question are in
+[`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md).
+
+Three things this client does **not** do yet, recorded here so the gate is not read
+as covering them: there is no scan on the TV (a drive is enumerated but never walked,
+so nothing is catalogued), there are no external subtitle files, and there is no
+track menu.
 
 ## G6 — Other TV platforms (retired)
 

@@ -13,8 +13,15 @@ tmp_screenshots/
 /apps/desktop/src/design/ds_pinned.rs
 
 # Local Freebuff/agent session exports are working notes, not project source.
+# They contain transcripts, which means pasted command output, which means whatever was
+# on screen at the time — addresses, process listings, paths. The pattern is deliberately
+# loose about the prefix spelling: a transcript named `sessin_export_…` is exactly the
+# kind of file this rule exists to keep out of Git, and a strict spelling would miss it.
 freebuff-chat-*.md
 session_export*
+# The observed misspelling, named explicitly rather than covered by a wildcard that
+# would start swallowing unrelated files.
+sessin_export*
 
 # Rust
 /target/

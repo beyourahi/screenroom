@@ -41,6 +41,33 @@ each is named in `WINDOWS_VALIDATION.md` §7. Do not read "fixed" here as "verif
 
 Nothing in this document has been run against Windows or a TV.
 
+**Samsung TV client (2026-10-28).** `apps/tv` is the LightningJS 3 + Blits client.
+Its tests run off-device and are a **new tier**, not a device run:
+
+```bash
+cd apps/tv && pnpm test      # 82 tests, 0 failures
+cd apps/tv && pnpm typecheck # app source and tests, separately
+cd apps/tv && pnpm build     # bundle + the Tizen staging step
+```
+
+| Suite | Tests | Proves |
+| --- | --- | --- |
+| `test/focus.test.ts` | 8 | the D-pad rule, checked index-for-index against the desktop's own rule, plus per-screen focus memory and the restore-after-a-shrink case |
+| `test/progress.test.ts` | 10 | the session/generation/sequence guard, the finished threshold and when a position is worth writing |
+| `test/store.test.ts` | 17 | the document's durability rules: one unreadable row never costs the library, a newer format is refused rather than guessed, oversized input is refused before parsing, a refused write is reported, an unchanged state is not written twice |
+| `test/browse.test.ts` | 12 | paging sized to whole rows, filtering, the Continue Watching predicate and its stable order, and the four empty screens that each name a different remedy |
+| `test/locator.test.ts` | 8 | relative-locator validation: absolute, `..`, NUL, drive prefixes and UNC refused; a doubled separator accepted |
+| `test/avplay.test.ts` | 10 | AVPlay's display-rect conversion and per-entry track reading — **the two places Samsung's own published samples are wrong** |
+| `test/cards.test.ts` | 11 | the card model and grid geometry: nothing overflows the authored surface, the gutter holds a focused card without overlapping its neighbour, and a degenerate viewport produces a usable grid rather than `NaN` |
+| `test/tokens.test.ts` | 7 | the TV type scale stays legible at 10 feet and remains a viewing-distance multiple of the desktop's rather than a fork |
+
+What this tier **cannot** prove, and does not attempt to: that Lightning 3 runs on a
+Tizen engine, that the renderer finds WebGL, what the frame budget is, that AVPlay
+accepts a given URI or codec, or that any remote key arrives. Those are television
+observations. The device procedure and the per-item receipt format are in
+[`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md), and the T-01/T-02/T-03 cases in
+§4 below are unchanged by it.
+
 ## Testing without taking over the desktop
 
 **Policy (2026-10-28): background-first.** Verification runs on the owner's own
@@ -76,7 +103,7 @@ and render path with no window, but **not** an on-screen frame rate. iced, the w
 upload and the compositor add cost it cannot see, so its numbers are a ceiling on
 what the display can reach, not a substitute for measuring the display.
 
-What runs today (`cargo test --workspace`, **168 tests, 0 failures** on macOS ARM64):
+What runs today (`cargo test --workspace`, **189 tests, 0 failures** on macOS ARM64):
 
 | Suite | Proves |
 | --- | --- |

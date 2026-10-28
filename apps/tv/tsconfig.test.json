@@ -1,0 +1,13 @@
+{
+  // The tests are a separate compilation unit on purpose.
+  //
+  // They run in Node, so they are the only files in this package allowed Node's
+  // ambient types. Keeping the app's `tsconfig.json` free of them is what stops a
+  // Node-only global from typechecking inside a component that has to run on a
+  // 2021 Tizen web widget.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.mjs"]
+}

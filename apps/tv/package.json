@@ -1,0 +1,22 @@
+{
+  "name": "@screenroom/tv",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Screenroom TV client for Samsung Tizen 6.0 (LightningJS 3 + Blits + TypeScript)",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "build": "pnpm typecheck && vite build && node scripts/prepare-tizen-dist.mjs",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "@lightningjs/blits": "^2.15.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  }
+}

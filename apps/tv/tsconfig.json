@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    // Relative imports carry their `.ts` extension so that the same source runs
+    // unmodified under `node --test` (which resolves specifiers literally) and
+    // through the Vite build. `noEmit` below is what TypeScript requires for this.
+    "allowImportingTsExtensions": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    // No ambient types at all: the application source runs in a Tizen web widget,
+    // whose host objects are declared by the adapters in `src/platform/`. Pulling in
+    // Node's globals here would let `process` or `Buffer` typecheck in code that could
+    // never run on the TV.
+    "types": [],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "exactOptionalPropertyTypes": true,
+    "noFallthroughCasesInSwitch": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "vite.config.ts"]
+}

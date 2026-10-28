@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Tizen widget manifest for Screenroom's Samsung TV client.
+
+  This file started as Samsung's own TV web-app template and has been edited in exactly
+  two ways, both of which matter:
+
+  1. **The widget id is no longer `http://yourdomain/...`.** That is the template's
+     placeholder, and installing a widget that claims somebody else's domain is both
+     wrong and confusing when it is listed next to the user's other apps.
+  2. **The privileges are the ones this app actually uses.** The template requests
+     `application.launch`, which this client never calls — it exits itself, and exiting
+     needs no privilege — so that request is gone. In its place are the two APIs the
+     client really does touch: the remote-key API, which is what makes the media keys
+     arrive at all, and the filesystem read API, which is what enumerating the owner's
+     drive uses. Nothing here asks for write access: the app never writes to the user's
+     media, and a privilege it does not need is a privilege that cannot be abused.
+
+  `tizen:application`'s package and id are left exactly as the SDK generated them. They
+  are what the TV uses to identify the installed app, and changing them after a device
+  has seen the app would make it a different app rather than an update.
+-->
+<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" id="http://screenroom.local/ScreenroomTV" version="0.1.0" viewmodes="maximized">
+   <name>ScreenroomTV</name>
+   <icon src="icon.png"></icon>
+   <content src="index.html"></content>
+   <feature name="http://tizen.org/feature/screen.size.normal.1080.1920"></feature>
+   <tizen:setting screen-orientation="landscape" context-menu="enable" background-support="disable" encryption="disable" install-location="auto" hwkey-event="enable"></tizen:setting>
+   <tizen:application id="PlYByk3psw.ScreenroomTV" package="PlYByk3psw" required_version="2.3"></tizen:application>
+   <!-- The remote's media keys and Info button do not arrive without this. -->
+   <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"></tizen:privilege>
+   <!-- Enumerating removable storage. Deliberately read-only: media is never written. -->
+   <tizen:privilege name="http://tizen.org/privilege/filesystem.read"></tizen:privilege>
+   <tizen:metadata key="http://samsung.com/tv/metadata/prelaunch.support" value="true"></tizen:metadata>
+   <tizen:profile name="tv-samsung"></tizen:profile>
+</widget>

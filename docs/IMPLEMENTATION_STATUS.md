@@ -516,6 +516,54 @@ Negative tests were run too, because a check that cannot fail proves nothing:
 **Still not proven, by design:** that a frame reaches the screen, or that the window
 opens at all. Both need a visible window and an owner-approved session.
 
+## M4 — Samsung Tizen client (`apps/tv`), 2026-10-28
+
+The TV client is built. It is a **new application**, not a port: the television does
+not run the Rust core, so the client speaks the core's entities and invariants over its
+own storage adapter. What was written, and what each part rests on:
+
+| Piece | What it is |
+| --- | --- |
+| `src/core/` | the contract ported from `crates/screenroom-core/src/domain.rs`, plus the four rules that decide things: the D-pad focus machine (the desktop's rule, exactly), the session/generation/sequence progress guard, the durable-document store, and relative-locator validation |
+| `src/platform/` | the Tizen boundary: `webapis.avplay` behind a playback port, remote-key registration, `localStorage` behind the storage port, and removable-storage enumeration. The host probe reports what it found rather than assuming |
+| `src/design/` | the same semantic tokens the desktop uses, multiplied for viewing distance, and the card/grid model the screens draw from |
+| `src/screens/` | Home, Browse, Detail, Settings and Player, each owning one focus zone |
+| `config.xml`, `vite.config.ts`, `scripts/prepare-tizen-dist.mjs` | the widget manifest, the engine-targeted bundle, and the step that turns the bundle into an installable widget directory |
+
+### Verified here (2026-10-28)
+
+```bash
+cd apps/tv
+pnpm typecheck    # clean; application source sees no ambient Node types at all
+pnpm test         # 82 tests, 0 failures
+pnpm build        # 428,957-byte main.js + the staging step
+```
+
+The signed package was produced through the `tizen-build-project` runner:
+`apps/tv/build/ScreenroomTV-0.1.0.wgt`, 147,404 bytes, sha256
+`ec40f2cebe29da19ec8911d2e3342263294aab6096f169b6744e0eca37ee05d0`. Its envelope
+carried **no** "signed with Tizen default developer certificates" warning, and the
+`main.js` inside the package is byte-identical to the tested bundle (sha256
+`1912be6ea0401e51fa0bcd18b889d465cf184de2f10d27b2f809f720c666ba98`). One signing
+profile exists and is active (`screenroom`); no certificate material was inspected.
+
+### What M4 does **not** prove
+
+- **Nothing has run on a Tizen engine.** No frame rendered, no WebGL probe, no frame
+  budget. A packaged `.wgt` is a file, not a device result.
+- **No media has reached AVPlay.** No URI, codec, seek or track switch.
+- **No free-to-air drive was walked.** Removable storage can be enumerated; there is no
+  TypeScript scanner yet, so the library stays empty on the TV and the screens show
+  their empty states. This is the next TV work item, and the storage, progress and
+  focus layers it needs are built and tested.
+- **No external subtitles and no track menu** (embedded text tracks are drawn by the
+  decoder itself).
+- **The TV's DUID has not been checked against the distributor certificate**, which is
+  what decides whether the package installs at all.
+
+Gate G5 is **BLOCKED on the device**; the checklist and the three questions only the
+TV can settle are in [`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md).
+
 ### Test totals after the M3 work (2026-10-28)
 
 ```bash
@@ -562,7 +610,7 @@ Headless scripts, which are not part of `cargo test`:
 | Desktop frame presentation on real Windows GPU | BLOCKED | no Windows hardware/Visual Studio on this host; every `cfg!(windows)` branch is unbuilt as well as unrun. The exact handoff — commands, expectations, acceptance checks and named falsifications — is `WINDOWS_VALIDATION.md` |
 | Windows 4K/HDR/hardware decode | BLOCKED | same |
 | Physical Samsung UA50AU8000RXER (install, USB, AVPlay, durability) | BLOCKED | no device. Checked on 2026-10-28 rather than assumed: `tizen` CLI 2.5.25 and `sdb` 4.2.36 are on `PATH`, and `sdb devices` reports `List of devices attached` with nothing under it. `tz` is not on `PATH`. A signing profile was not inspected, to avoid printing certificate or DUID material into a log |
-| Lightning 3 on the Tizen 6.0 engine | NOT YET RUN | needs the TV client and the device; `apps/tv` does not exist yet |
+| Lightning 3 on the Tizen 6.0 engine | NOT YET RUN | the client now exists, typechecks, passes 82 off-device tests and packages into a signed `.wgt` — but nothing has executed on a Tizen engine, so this needs the TV and is unchanged by any of that |
 | Audible output heard by a person | NOT YET VERIFIED | the audio clock and `avsync` are measured; nobody has listened |
 | macOS bundle signing and notarization for distribution | BLOCKED | Command Line Tools only, no full Xcode; not required for a personal install |
 

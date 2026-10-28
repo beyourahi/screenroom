@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      A Tizen web widget sets its own viewport; the TV is a fixed 1920x1080 surface and
+      browser-style zoom or scaling must not apply to it.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>Screenroom</title>
+    <style>
+      /*
+        The page is the video surface's backdrop. It is black rather than styled,
+        because anything the app draws is drawn by the renderer into its canvas: this
+        element is only what shows through when the player's <object> is behind the
+        transparent canvas.
+      */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+      }
+    </style>
+    <!--
+      Samsung's own web APIs. `$WEBAPIS` is a virtual path the TV resolves; on any other
+      host the script is simply missing, which is exactly how `platform/env.ts` finds
+      out it is not on a TV. It must load before the bundle, because the app probes for
+      `webapis.avplay` as soon as it starts.
+    -->
+    <script src="$WEBAPIS/webapis/webapis.js"></script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/index.ts"></script>
+  </body>
+</html>

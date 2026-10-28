@@ -47,10 +47,38 @@ screenroom/
     screenroom-player/           # libmpv runtime boundary + player state machine
   apps/
     desktop/                     # iced + wgpu client, video_surface.rs bridge
-    tv/                          # (M5) LightningJS 3 + Blits (Samsung Tizen only)
+    tv/                          # LightningJS 3 + Blits client (Samsung Tizen only)
+      src/core/                  # the core's contract and rules, ported to TypeScript
+      src/platform/              # the Tizen boundary: AVPlay, remote keys, storage, USB
+      src/design/                # semantic tokens at TV scale, card and grid model
+      src/screens/               # Home · Browse · Detail · Settings · Player
+      src/app/                   # runtime assembly, player runtime, route props
+      test/                      # 82 off-device tests (node --test, no TV needed)
+      config.xml                 # the widget manifest and its privileges
+      scripts/prepare-tizen-dist.mjs  # bundle -> installable widget directory
   scripts/                       # evidence helpers + the macOS .app packager
   docs/  reference/  .worktrees/ #  .worktrees is Git-ignored, archive branches
 ```
+
+### How `apps/tv` differs, and why it is not a port
+
+The television does not run the Rust core, so `apps/tv` is a second implementation of
+the same *contract* rather than a second build of the same code. It mirrors
+`domain.rs`'s entities and its two travelling rules — identity is an
+application-generated id rather than a path, and an unavailable source never deletes
+anything — in TypeScript, and it re-implements the rules that decide behaviour as pure
+functions with their own tests (`core/focus.ts`, `core/progress.ts`, `core/store.ts`,
+`core/locator.ts`).
+
+The boundaries are ports, so the platform is replaceable and testable: `StoragePort`
+takes bytes in and bytes out, and the durability rules live above it; the playback port
+has an AVPlay implementation and a browser-preview one that is named as such in the UI,
+because a preview that reads like a device result is worse than no preview.
+
+The build is deliberately unlike the desktop's: one bundle, relative paths, targeted at
+`es2019` for the 2021 engine, because a widget has no server and no origin. Everything
+the Mac can verify about it is verified; nothing about the engine, the renderer or
+AVPlay is claimed. See [`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md).
 
 The Flutter candidate lives on `archive/full-app-2026-10-25`,
 `archive/source-check-2026-10-25` and `archive/cache-controls-2026-10-25` and in
@@ -188,7 +216,7 @@ in `Playing`, `Paused` or `Ended`.
 | --- | --- |
 | MacBook Air M4 (macOS ARM64) | iced window + wgpu (Metal) + libmpv software bridge + SQLite — **running** |
 | Windows desktop (x86_64, Intel Arc B580) | iced window + wgpu (DX12) + libmpv (D3D11 bridge target) + SQLite — same crate, not built on Windows |
-| Samsung UA50AU8000RXER (Tizen 6.0) | Lightning 3 + Blits bundle (`.wgt`) + AVPlay + local storage adapter — not started |
+| Samsung UA50AU8000RXER (Tizen 6.0) | Lightning 3 + Blits bundle (`.wgt`) + AVPlay + local-storage adapter — **built, tested and packaged; has never executed on a Tizen engine** |
 
 A platform label is not a capability. Each capability is recorded per device in
 [`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md) with the state of its evidence.
