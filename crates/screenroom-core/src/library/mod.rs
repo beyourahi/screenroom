@@ -12,6 +12,7 @@ mod backup;
 mod catalog;
 mod lists;
 mod markers;
+mod media_info;
 mod playback;
 mod recommend;
 mod settings;
@@ -32,6 +33,7 @@ use crate::{SCHEMA_VERSION, schema};
 pub use artwork::{Artwork, ArtworkCandidate};
 pub use backup::{BackupInfo, BackupReport, RestoreReport};
 pub use catalog::Ingest;
+pub use media_info::UnprobedFile;
 pub use playback::Checkpoint;
 pub use settings::Preferences;
 

@@ -16,5 +16,6 @@ pub mod artwork;
 pub mod design;
 pub mod picker;
 pub mod playback;
+pub mod probe;
 pub mod quit;
 pub mod video_surface;

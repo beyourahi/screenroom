@@ -9,7 +9,7 @@
 //! exactly like the scanner.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, channel, sync_channel};
@@ -44,6 +44,8 @@ pub struct Poster {
     pub height: i64,
     /// Position in the file the frame was taken from.
     pub sampled_at_ms: i64,
+    /// Whether this is the file's own embedded cover rather than a film frame.
+    pub cover: bool,
 }
 
 /// Where in a file to look for a representative frame.
@@ -59,6 +61,26 @@ pub fn sample_position_ms(duration_ms: i64) -> i64 {
     (duration_ms / 10).clamp(1_000, 900_000)
 }
 
+/// Where a media tool is run from.
+///
+/// An application opened from the Dock or Finder inherits launchd's `PATH`
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`), which holds no ffmpeg, so a bare name
+/// worked from a terminal and failed in the installed bundle. `PATH` is still
+/// searched first; Homebrew's two prefixes are the fallback. Only absolute
+/// directories are considered, so the working directory can never supply a tool.
+pub fn tool(name: &str) -> PathBuf {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .chain([
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ])
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
 /// The command one extraction runs.
 ///
 /// Arguments are passed as separate values, never through a shell, so a filename
@@ -66,7 +88,7 @@ pub fn sample_position_ms(duration_ms: i64) -> i64 {
 /// from consuming the application's input, and the frame is written to stdout so
 /// no temporary file has to be created or cleaned up.
 pub fn command_for(path: &Path, at_ms: i64) -> Command {
-    let mut command = Command::new("ffmpeg");
+    let mut command = Command::new(tool("ffmpeg"));
     command
         .arg("-nostdin")
         .arg("-v")
@@ -92,6 +114,80 @@ pub fn command_for(path: &Path, at_ms: i64) -> Command {
     command
 }
 
+/// The command that reads a file's embedded cover image.
+///
+/// `stream` is the absolute stream index ffprobe reported with the
+/// `attached_pic` disposition. The image is scaled like a sampled frame, so a
+/// cover is stored under the same size and byte limits as any other poster.
+pub fn cover_command_for(path: &Path, stream: u32) -> Command {
+    let mut command = Command::new(tool("ffmpeg"));
+    command
+        .arg("-nostdin")
+        .arg("-v")
+        .arg("error")
+        .arg("-i")
+        .arg(path)
+        .arg("-map")
+        .arg(format!("0:{stream}"))
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-vf")
+        .arg(format!("scale={POSTER_WIDTH}:-2"))
+        .arg("-f")
+        .arg("image2")
+        .arg("-vcodec")
+        .arg("mjpeg")
+        .arg("pipe:1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
+/// Reads a file's embedded cover image as a poster.
+pub fn extract_cover(path: &Path, stream: u32) -> Result<Poster, String> {
+    let bytes = capture(
+        cover_command_for(path, stream),
+        MAX_POSTER_BYTES,
+        "Reading the cover",
+    )?;
+    let (width, height) =
+        jpeg_dimensions(&bytes).ok_or_else(|| "The cover was not a readable image.".to_string())?;
+    Ok(Poster {
+        bytes,
+        width,
+        height,
+        sampled_at_ms: 0,
+        cover: true,
+    })
+}
+
+/// The best poster a file can give: its own cover image, else a sampled frame.
+///
+/// The container is probed first. A probed duration is stored, so the runtime
+/// appears on the card before the first play and the frame is sampled at a real
+/// ten percent instead of a two-minute guess. A cover that fails to decode falls
+/// back to a frame rather than leaving the work without a poster.
+pub fn best_poster(library: &Library, candidate: &ArtworkCandidate) -> Result<Poster, String> {
+    let mut duration_ms = candidate.duration_ms;
+    let mut cover = None;
+    if let Ok(facts) = crate::probe::probe(&candidate.path) {
+        if facts.duration_ms > 0 {
+            let _ = library.record_duration(&candidate.file_id, facts.duration_ms);
+            if duration_ms <= 0 {
+                duration_ms = facts.duration_ms;
+            }
+        }
+        cover = facts.cover_stream;
+    }
+    if let Some(stream) = cover
+        && let Ok(poster) = extract_cover(&candidate.path, stream)
+    {
+        return Ok(poster);
+    }
+    extract_poster(&candidate.path, sample_position_ms(duration_ms))
+}
+
 /// Extracts one frame, falling back to the start of the file.
 ///
 /// The fallback matters for a file whose stored duration is wrong: a seek past
@@ -109,6 +205,7 @@ pub fn extract_poster(path: &Path, at_ms: i64) -> Result<Poster, String> {
                     width,
                     height,
                     sampled_at_ms: attempt,
+                    cover: false,
                 });
             }
             Ok(_) => last_reason = format!("No frame could be read at {attempt} ms."),
@@ -120,9 +217,23 @@ pub fn extract_poster(path: &Path, at_ms: i64) -> Result<Poster, String> {
 
 /// Runs one ffmpeg invocation under a deadline.
 fn run(path: &Path, at_ms: i64) -> Result<Vec<u8>, String> {
-    let mut child = command_for(path, at_ms)
+    capture(
+        command_for(path, at_ms),
+        MAX_POSTER_BYTES,
+        "Reading a frame",
+    )
+}
+
+/// Runs a media tool under a deadline, returning at most `cap` bytes of stdout.
+///
+/// Shared by the frame extractor and the container probe: both read untrusted
+/// files, so both get the same wall clock, the same output cap and the same
+/// guarantee that a stalled child is killed and reaped rather than left behind.
+pub(crate) fn capture(mut command: Command, cap: usize, what: &str) -> Result<Vec<u8>, String> {
+    let program = command.get_program().to_string_lossy().to_string();
+    let mut child = command
         .spawn()
-        .map_err(|error| format!("ffmpeg could not be started: {error}"))?;
+        .map_err(|error| format!("{program} could not be started: {error}"))?;
 
     // The reader is its own thread so a full pipe buffer can never deadlock the
     // deadline, and it stops reading at the cap rather than at end of file.
@@ -130,10 +241,7 @@ fn run(path: &Path, at_ms: i64) -> Result<Vec<u8>, String> {
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         if let Some(mut stream) = stdout {
-            let _ = stream
-                .by_ref()
-                .take(MAX_POSTER_BYTES as u64 + 1)
-                .read_to_end(&mut bytes);
+            let _ = stream.by_ref().take(cap as u64 + 1).read_to_end(&mut bytes);
         }
         bytes
     });
@@ -154,22 +262,20 @@ fn run(path: &Path, at_ms: i64) -> Result<Vec<u8>, String> {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = reader.join();
-                return Err(format!("ffmpeg could not be waited on: {error}"));
+                return Err(format!("{program} could not be waited on: {error}"));
             }
         }
     };
 
     let bytes = reader
         .join()
-        .map_err(|_| "the frame reader stopped unexpectedly".to_string())?;
+        .map_err(|_| "the output reader stopped unexpectedly".to_string())?;
     match status {
-        None => Err("Reading a frame took too long and was stopped.".to_string()),
+        None => Err(format!("{what} took too long and was stopped.")),
         Some(status) if !status.success() && bytes.is_empty() => {
-            Err("ffmpeg could not read this file.".to_string())
+            Err(format!("{program} could not read this file."))
         }
-        Some(_) if bytes.len() > MAX_POSTER_BYTES => {
-            Err("The frame was too large to keep.".to_string())
-        }
+        Some(_) if bytes.len() > cap => Err("The output was too large to keep.".to_string()),
         Some(_) => Ok(bytes),
     }
 }
@@ -248,8 +354,7 @@ impl Extractor {
         std::thread::spawn(move || {
             while let Ok(job) = queue.recv() {
                 let candidate = job.candidate;
-                let outcome =
-                    extract_poster(&candidate.path, sample_position_ms(candidate.duration_ms));
+                let outcome = best_poster(&library, &candidate);
                 let event = match outcome {
                     Ok(poster) => match library.store_artwork(
                         &candidate.work_id,
@@ -325,6 +430,17 @@ mod tests {
         assert_eq!(args.last().map(String::as_str), Some("pipe:1"));
         // No shell is involved, so the semicolon in the name stays a character.
         assert!(command.get_program().to_string_lossy().ends_with("ffmpeg"));
+    }
+
+    #[test]
+    fn a_tool_is_found_outside_a_minimal_launch_path() {
+        // The installed bundle's PATH; ffmpeg is never in it on this machine.
+        let found = tool("ffmpeg");
+        if found.is_absolute() {
+            assert!(found.is_file());
+        } else {
+            assert_eq!(found, PathBuf::from("ffmpeg"));
+        }
     }
 
     #[test]

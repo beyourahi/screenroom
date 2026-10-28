@@ -16,6 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
@@ -36,6 +37,7 @@ use screenroom_player::{
 use crate::artwork::{ArtworkEvent, Extractor};
 use crate::design::{self, Level};
 use crate::playback::PlaybackTracker;
+use crate::probe::{DurationPass, spawn_duration_pass};
 use crate::video_surface::{Frame, VideoSurface};
 
 /// How often the player is polled for frames and position.
@@ -398,6 +400,11 @@ pub struct App {
     /// How many works came back without a drawable frame, shown honestly.
     artwork_failures: usize,
     extractor: Option<Extractor>,
+    /// The background pass that stores runtimes for files nobody has played yet.
+    durations: Option<DurationPass>,
+    /// Held while a file is open, so the duration pass never shares the drive
+    /// with a viewing.
+    probe_paused: Arc<AtomicBool>,
     /// Whether this instance may run background work at all.
     ///
     /// A launch may: extraction is what makes the grid drawable. A test may not:
@@ -688,6 +695,7 @@ impl App {
         // first screen's posters are queued here: without this, extraction would
         // not start until the viewer happened to navigate somewhere.
         app.ensure_artwork();
+        app.start_durations();
         (app, task)
     }
 
@@ -760,6 +768,8 @@ impl App {
             artwork_failed: HashSet::new(),
             artwork_failures: 0,
             extractor: None,
+            durations: None,
+            probe_paused: Arc::new(AtomicBool::new(false)),
             background_work: false,
             player: None,
             snapshot: PlayerSnapshot::default(),
@@ -1028,6 +1038,44 @@ impl App {
             if extractor.request(candidate) {
                 self.artwork_queued.insert(work_id);
             }
+        }
+    }
+
+    /// Starts the duration pass unless one is running or background work is off.
+    fn start_durations(&mut self) {
+        if self.background_work && self.durations.is_none() {
+            self.durations = Some(spawn_duration_pass(
+                Arc::clone(&self.library),
+                Arc::clone(&self.probe_paused),
+            ));
+        }
+    }
+
+    /// Shows new runtimes as the pass stores them, and notes when it has ended.
+    fn drain_durations(&mut self) {
+        self.probe_paused
+            .store(self.active.is_some(), Ordering::Relaxed);
+        let Some(pass) = &self.durations else { return };
+        let mut stored = false;
+        let mut ended = false;
+        loop {
+            match pass.reports.try_recv() {
+                Ok(count) => stored |= count > 0,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    ended = true;
+                    break;
+                }
+            }
+        }
+        if ended {
+            self.durations = None;
+        }
+        // Not while a file plays: the player screen draws none of these lists.
+        if stored && self.screen != Screen::Player {
+            self.reload_home();
+            self.reload_browse();
+            self.refresh_detail();
         }
     }
 
@@ -1359,6 +1407,7 @@ impl App {
 
     fn poll(&mut self) {
         self.drain_scan();
+        self.drain_durations();
         // A finished extraction frees a queue slot; fill it in the same tick, or the
         // rest of the visible page never gets a poster. Not on every tick: the
         // refill asks the database which works still need one.
@@ -2290,6 +2339,9 @@ impl App {
             self.scan_token = None;
             self.scan_started_ms = None;
             self.reload();
+            // A scan adds files with no known runtime; probe them now rather than
+            // at the next launch.
+            self.start_durations();
         }
     }
 

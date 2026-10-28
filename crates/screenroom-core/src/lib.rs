@@ -37,7 +37,7 @@ pub use filename::{ParsedName, parse_filename};
 pub use fingerprint::media_fingerprint;
 pub use library::{
     Artwork, ArtworkCandidate, BackupInfo, BackupReport, Checkpoint, Ingest, Library, LibraryQuery,
-    PathSemantics, Preferences, RestoreReport, Sort,
+    PathSemantics, Preferences, RestoreReport, Sort, UnprobedFile,
 };
 pub use paths::{PathStyle, location_key};
 pub use scanner::{

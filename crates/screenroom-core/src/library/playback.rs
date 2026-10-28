@@ -17,7 +17,7 @@ use crate::domain::PlaybackSession;
 use crate::error::{CoreError, Result};
 
 /// Longest duration a checkpoint will accept: seven days, in milliseconds.
-const MAX_DURATION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+pub(crate) const MAX_DURATION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 /// One progress report from the player.
 #[derive(Debug, Clone, Copy)]
