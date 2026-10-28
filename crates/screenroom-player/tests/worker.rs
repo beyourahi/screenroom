@@ -155,10 +155,29 @@ fn seek_moves_the_playhead() {
     player.load(&path);
     wait_for(&player, Duration::from_secs(20), |snapshot| snapshot.loaded);
 
-    player.seek(1.4);
+    let seek_serial = player.seek(1.4);
     let sought = wait_for(&player, Duration::from_secs(10), |snapshot| {
-        snapshot.position >= 1.2
+        snapshot.position_ready && snapshot.seek_serial >= seek_serial && snapshot.position >= 1.2
     });
+    assert!(sought.position >= 1.2, "position was {}", sought.position);
+}
+
+#[test]
+fn rapid_seeks_confirm_only_after_the_latest_target_lands() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = clip(&directory);
+    let Some(player) = player() else { return };
+
+    player.load(&path);
+    wait_for(&player, Duration::from_secs(20), |snapshot| {
+        snapshot.position_ready
+    });
+    let _superseded = player.seek(0.7);
+    let latest = player.seek(1.4);
+    let sought = wait_for(&player, Duration::from_secs(10), |snapshot| {
+        snapshot.seek_serial >= latest && snapshot.position >= 1.2
+    });
+    assert_eq!(sought.seek_serial, latest);
     assert!(sought.position >= 1.2, "position was {}", sought.position);
 }
 
@@ -168,14 +187,113 @@ fn resume_position_is_honoured_when_loading() {
     let path = clip(&directory);
     let Some(player) = player() else { return };
 
-    player.load_at(&path, Some(1.2));
+    let load_id = player.load_at(&path, Some(1.2));
     let resumed = wait_for(&player, Duration::from_secs(20), |snapshot| {
-        snapshot.loaded && snapshot.position > 0.9
+        snapshot.load_id == load_id
+            && snapshot.loaded
+            && snapshot.position_ready
+            && snapshot.position > 0.9
     });
     assert!(
         resumed.position > 0.9,
         "resume did not take effect: {}",
         resumed.position
+    );
+}
+
+#[test]
+fn a_new_load_leaves_ended_state_and_plays_again() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = clip(&directory);
+    let Some(player) = player() else { return };
+
+    let first_load = player.load_at(&path, None);
+    wait_for(&player, Duration::from_secs(20), |snapshot| {
+        snapshot.load_id == first_load && snapshot.state == PlayerState::Ended
+    });
+    let second_load = player.load_at(&path, None);
+    let restarted = wait_for(&player, Duration::from_secs(20), |snapshot| {
+        snapshot.load_id == second_load
+            && snapshot.loaded
+            && snapshot.position_ready
+            && snapshot.state == PlayerState::Playing
+    });
+    assert_ne!(first_load, second_load);
+    assert_eq!(restarted.load_id, second_load);
+}
+
+#[test]
+fn a_new_load_recovers_from_a_failed_state() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = clip(&directory);
+    let Some(player) = player() else { return };
+
+    let missing = directory.path().join("missing.mp4");
+    let failed_load = player.load_at(&missing, None);
+    let failed = wait_for(&player, Duration::from_secs(5), |snapshot| {
+        snapshot.load_id == failed_load && snapshot.state == PlayerState::Failed
+    });
+    assert!(failed.failure.is_some());
+
+    let recovered_load = player.load_at(&path, None);
+    let recovered = wait_for(&player, Duration::from_secs(20), |snapshot| {
+        snapshot.load_id == recovered_load
+            && snapshot.loaded
+            && snapshot.position_ready
+            && snapshot.state == PlayerState::Playing
+    });
+    assert_eq!(recovered.load_id, recovered_load);
+}
+
+#[test]
+fn anamorphic_video_renders_at_its_display_aspect_without_letterbox_rows() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = directory.path().join("anamorphic.mp4");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-nostdin",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=1440x1080:rate=24:duration=3",
+            "-vf",
+            "setsar=4/3",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&path)
+        .status()
+        .expect("ffmpeg should be installed");
+    assert!(
+        status.success(),
+        "ffmpeg could not build the anamorphic clip"
+    );
+    let Some(player) = player() else { return };
+
+    let load_id = player.load_at(&path, None);
+    let rendered = wait_for(&player, Duration::from_secs(20), |snapshot| {
+        snapshot.load_id == load_id && snapshot.position_ready && snapshot.frame.is_some()
+    });
+    let frame = rendered.frame.expect("a rendered frame");
+    assert_eq!((frame.width, frame.height), (1920, 1080));
+    assert!((frame.width as f64 / frame.height as f64 - 16.0 / 9.0).abs() < 0.002);
+    let edge_band_has_picture = |rows: std::ops::Range<u32>| {
+        rows.into_iter().any(|y| {
+            (0..frame.width).step_by(16).any(|x| {
+                frame
+                    .pixel(x, y)
+                    .is_some_and(|[r, g, b, _]| r > 8 || g > 8 || b > 8)
+            })
+        })
+    };
+    assert!(
+        edge_band_has_picture(0..54) && edge_band_has_picture(frame.height - 54..frame.height),
+        "render has internal black bars"
     );
 }
 
@@ -500,30 +618,52 @@ fn audio_is_consumed_in_real_time_without_drifting() {
         "the audio clock never advanced past zero, so nothing was played"
     );
 
-    // Twelve one-second samples; the first two are discarded as start-up.
     let began = Instant::now();
     let mut series: Vec<(f64, f64, f64)> = Vec::new();
-    for _ in 0..12 {
-        std::thread::sleep(Duration::from_secs(1));
+    let mut last_audio = None;
+    while began.elapsed() < Duration::from_secs(10) {
         let snapshot = player.snapshot();
         let Some(audio) = snapshot.audio_pts else {
-            break;
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
         };
-        series.push((began.elapsed().as_secs_f64(), snapshot.position, audio));
+        if last_audio != Some(audio) {
+            series.push((began.elapsed().as_secs_f64(), snapshot.position, audio));
+            last_audio = Some(audio);
+        }
+        std::thread::sleep(Duration::from_millis(5));
     }
     assert!(
-        series.len() >= 6,
-        "only {} audio samples were collected",
+        series.len() >= 12,
+        "only {} distinct audio clock changes were collected",
         series.len()
     );
 
-    let steady = &series[2..];
-    let first = steady.first().expect("a first sample");
-    let last = steady.last().expect("a last sample");
+    let first = series.first().expect("a first sample");
+    let last = series.last().expect("a last sample");
     let audio_advanced = last.2 - first.2;
     let video_advanced = last.1 - first.1;
     let wall_advanced = last.0 - first.0;
-    let rate = audio_advanced / video_advanced.max(0.001);
+    let mean_wall = series.iter().map(|point| point.0).sum::<f64>() / series.len() as f64;
+    let mean_audio = series.iter().map(|point| point.2).sum::<f64>() / series.len() as f64;
+    let covariance = series
+        .iter()
+        .map(|point| (point.0 - mean_wall) * (point.2 - mean_audio))
+        .sum::<f64>();
+    let wall_variance = series
+        .iter()
+        .map(|point| (point.0 - mean_wall).powi(2))
+        .sum::<f64>();
+    let rate = covariance / wall_variance.max(0.001);
+    let intercept = mean_audio - rate * mean_wall;
+    let max_residual = series
+        .iter()
+        .map(|point| (point.2 - (intercept + rate * point.0)).abs())
+        .fold(0.0_f64, f64::max);
+    let max_gap = series
+        .windows(2)
+        .map(|pair| pair[1].0 - pair[0].0)
+        .fold(0.0_f64, f64::max);
     let early_gap_ms = (first.2 - first.1) * 1000.0;
     let late_gap_ms = (last.2 - last.1) * 1000.0;
     let drift_ms = late_gap_ms - early_gap_ms;
@@ -532,10 +672,12 @@ fn audio_is_consumed_in_real_time_without_drifting() {
     // is behind the playhead" is ambiguous until it is known which of the two is
     // actually at real time.
     println!(
-        "audio: {} steady samples; clock advanced {audio_advanced:.2}s against {video_advanced:.2}s \
-         of video ({rate:.3}x); gap went from {early_gap_ms:+.1} ms to {late_gap_ms:+.1} ms \
+        "audio: {} distinct clock changes; OLS {rate:.4}x, max residual {:.1} ms, \
+         max observation gap {max_gap:.3}s; clock advanced {audio_advanced:.2}s against \
+         {video_advanced:.2}s of video; gap {early_gap_ms:+.1} to {late_gap_ms:+.1} ms \
          (drift {drift_ms:+.1} ms)",
-        steady.len()
+        series.len(),
+        max_residual * 1000.0
     );
     println!(
         "  against {wall_advanced:.2}s of wall clock: audio {:.4}x, video {:.4}x",
@@ -578,15 +720,19 @@ fn audio_is_consumed_in_real_time_without_drifting() {
         "libmpv adjusted sync by {total_ms:?} ms over one short file"
     );
 
-    // The audio output clock must advance at real-time rate, against the wall clock,
-    // because that is what "samples are being consumed" means. Five percent allows a
-    // debug build under the test harness's own load to pass while still failing on a
-    // stalled or free-running output.
-    let audio_rate_wall = audio_advanced / wall_advanced.max(0.001);
+    // Distinct clock observations are fitted against the wall clock so callback
+    // scheduling jitter does not turn a quantized property into a false rate failure.
     assert!(
-        (audio_rate_wall - 1.0).abs() < 0.05,
-        "the audio output consumed samples at {audio_rate_wall:.3}x wall-clock rate, which is \
-         not playback"
+        (rate - 1.0).abs() < 0.05,
+        "the audio output consumed samples at {rate:.3}x wall-clock rate, which is not playback"
+    );
+    assert!(
+        max_gap < 0.5,
+        "audio clock observation gap was {max_gap:.3}s"
+    );
+    assert!(
+        max_residual < 0.150,
+        "audio clock residual was {max_residual:.3}s"
     );
     // Observed, not asserted: see the doc comment for why this gap is not sync.
     println!(

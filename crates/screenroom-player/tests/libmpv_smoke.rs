@@ -54,7 +54,7 @@ fn libmpv_opens_a_real_file_and_reports_its_duration() {
     );
 
     let library = LibMpv::load().expect("libmpv loads");
-    let player = Mpv::new(&library).expect("mpv core initialises");
+    let mut player = Mpv::new(&library).expect("mpv core initialises");
     // Decode without a video output: this exercises demux and decode, not display.
     player.set_option("vo", "null").expect("vo=null");
     player.set_option("ao", "null").expect("ao=null");

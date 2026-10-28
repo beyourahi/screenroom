@@ -53,11 +53,13 @@ const ID_TOTAL_AVSYNC_CHANGE: u64 = 7;
 const ID_MISTIMED_FRAMES: u64 = 8;
 const ID_VOLUME: u64 = 9;
 const ID_MUTE: u64 = 10;
+const ID_TRACK_LIST: u64 = 11;
 
 /// `mpv_format` values used when observing properties (`mpv/client.h`).
 const FORMAT_FLAG: i32 = 3;
 const FORMAT_INT64: i32 = 4;
 const FORMAT_DOUBLE: i32 = 5;
+const FORMAT_NODE: i32 = 6;
 
 /// An `mpv_event_property` (`mpv/client.h`).
 #[repr(C)]
@@ -72,6 +74,13 @@ struct RawProperty {
 struct RawEndFile {
     reason: i32,
     error: i32,
+    playlist_entry_id: i64,
+}
+
+/// An `mpv_event_start_file` (`mpv/client.h`).
+#[repr(C)]
+struct RawStartFile {
+    playlist_entry_id: i64,
 }
 
 /// `MPV_END_FILE_REASON_*` (`mpv/client.h`).
@@ -92,6 +101,12 @@ pub struct PlayerFailure {
 /// Everything the interface may know about the player at one instant.
 #[derive(Debug, Clone)]
 pub struct PlayerSnapshot {
+    /// Monotonic identity for the load request that produced this snapshot.
+    pub load_id: u64,
+    /// True after libmpv confirms the starting position with PLAYBACK_RESTART.
+    pub position_ready: bool,
+    /// Highest seek serial confirmed by a subsequent PLAYBACK_RESTART.
+    pub seek_serial: u64,
     /// Lifecycle state.
     pub state: PlayerState,
     /// Playhead in seconds.
@@ -146,6 +161,9 @@ pub struct PlayerSnapshot {
 impl Default for PlayerSnapshot {
     fn default() -> Self {
         Self {
+            load_id: 0,
+            position_ready: false,
+            seek_serial: 0,
             state: PlayerState::Idle,
             position: 0.0,
             duration: 0.0,
@@ -257,13 +275,15 @@ pub const NO_TRACK: i64 = 0;
 pub enum PlayerCommand {
     /// Open a local file and start playing it, optionally resuming at `resume`.
     Load {
+        /// Monotonic request identity returned by `Player::load_at`.
+        load_id: u64,
         /// File to play.
         path: PathBuf,
         /// Position in seconds to jump to once the file is loaded.
         resume: Option<f64>,
     },
     /// Seek to an absolute position in seconds.
-    Seek(f64),
+    Seek { seconds: f64, serial: u64 },
     /// Pause or resume.
     SetPaused(bool),
     /// Stop playback and release the file.
@@ -310,6 +330,8 @@ pub struct Player {
     shared: Arc<Mutex<PlayerSnapshot>>,
     commands: Sender<PlayerCommand>,
     thread: Option<JoinHandle<()>>,
+    next_load_id: std::sync::atomic::AtomicU64,
+    next_seek_serial: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for Player {
@@ -341,6 +363,8 @@ impl Player {
                 shared,
                 commands,
                 thread: Some(handle),
+                next_load_id: std::sync::atomic::AtomicU64::new(0),
+                next_seek_serial: std::sync::atomic::AtomicU64::new(0),
             }),
             Ok(Err(error)) => {
                 let _ = handle.join();
@@ -365,17 +389,30 @@ impl Player {
         self.load_at(path, None);
     }
 
-    /// Opens `path` and resumes at `resume` seconds once it is loaded.
-    pub fn load_at(&self, path: impl AsRef<Path>, resume: Option<f64>) {
+    /// Opens `path` and resumes at `resume` seconds once libmpv applies its per-file start.
+    ///
+    /// Returns the load identity carried by snapshots for this request.
+    pub fn load_at(&self, path: impl AsRef<Path>, resume: Option<f64>) -> u64 {
+        let load_id = self
+            .next_load_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         self.send(PlayerCommand::Load {
+            load_id,
             path: path.as_ref().to_path_buf(),
             resume,
         });
+        load_id
     }
 
-    /// Seeks to an absolute position in seconds.
-    pub fn seek(&self, seconds: f64) {
-        self.send(PlayerCommand::Seek(seconds));
+    /// Seeks to an absolute position in seconds and returns its confirmation serial.
+    pub fn seek(&self, seconds: f64) -> u64 {
+        let serial = self
+            .next_seek_serial
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        self.send(PlayerCommand::Seek { seconds, serial });
+        serial
     }
 
     /// Pauses or resumes.
@@ -483,8 +520,6 @@ struct Runner {
     position: f64,
     duration: f64,
     loaded: bool,
-    /// Position to jump to once the next file finishes loading.
-    pending_resume: Option<f64>,
     /// Tracks reported for the current file, in the order libmpv listed them.
     tracks: Vec<MediaTrack>,
     /// The audio output's clock in seconds; `None` when no audio is playing.
@@ -507,6 +542,14 @@ struct Runner {
     volume: Option<f64>,
     /// Whether output is muted, as libmpv reports it.
     muted: Option<bool>,
+    load_id: u64,
+    position_ready: bool,
+    current_entry_id: Option<i64>,
+    expected_entry_id: Option<i64>,
+    seek_serial: u64,
+    pending_seek_serial: Option<u64>,
+    queued_seek: Option<(f64, u64)>,
+    seek_started: bool,
 }
 
 impl Runner {
@@ -557,6 +600,7 @@ impl Runner {
         // than what it last asked for.
         core.observe("volume", FORMAT_DOUBLE, ID_VOLUME)?;
         core.observe("mute", FORMAT_FLAG, ID_MUTE)?;
+        core.observe("track-list", FORMAT_NODE, ID_TRACK_LIST)?;
 
         Ok(Self {
             renderer,
@@ -567,7 +611,6 @@ impl Runner {
             position: 0.0,
             duration: 0.0,
             loaded: false,
-            pending_resume: None,
             tracks: Vec::new(),
             audio_pts: None,
             avsync: None,
@@ -577,6 +620,14 @@ impl Runner {
             subtitle_position: None,
             volume: None,
             muted: None,
+            load_id: 0,
+            position_ready: false,
+            current_entry_id: None,
+            expected_entry_id: None,
+            seek_serial: 0,
+            pending_seek_serial: None,
+            queued_seek: None,
+            seek_started: false,
         })
     }
 
@@ -599,6 +650,15 @@ impl Runner {
             if let Some(raw) = self.core.wait_event_raw(WAIT_SLICE) {
                 self.handle_event(raw, shared);
             }
+            while let Some(raw) = self.core.wait_event_raw(0.0) {
+                self.handle_event(raw, shared);
+            }
+
+            if self.pending_seek_serial.is_none()
+                && let Some((seconds, serial)) = self.queued_seek.take()
+            {
+                self.seek(seconds, serial, shared);
+            }
 
             if self.renderer.take_dirty() {
                 self.present(shared);
@@ -608,8 +668,20 @@ impl Runner {
 
     fn handle_command(&mut self, command: PlayerCommand, shared: &Arc<Mutex<PlayerSnapshot>>) {
         match command {
-            PlayerCommand::Load { path, resume } => self.load(&path, resume, shared),
-            PlayerCommand::Seek(seconds) => self.seek(seconds, shared),
+            PlayerCommand::Load {
+                load_id,
+                path,
+                resume,
+            } => self.load(load_id, &path, resume, shared),
+            PlayerCommand::Seek { seconds, serial } => {
+                if self.pending_seek_serial.is_some() {
+                    // A libmpv playback-restart event carries no request ID. Keep
+                    // later seeks queued until the earlier serial is confirmed.
+                    self.queued_seek = Some((seconds, serial));
+                } else {
+                    self.seek(seconds, serial, shared);
+                }
+            }
             PlayerCommand::SetPaused(paused) => self.set_paused(paused, shared),
             PlayerCommand::SelectTrack { kind, id } => self.select_track(kind, id, shared),
             PlayerCommand::SetSubtitleStyle { scale, position } => {
@@ -622,7 +694,44 @@ impl Runner {
         }
     }
 
-    fn load(&mut self, path: &Path, resume: Option<f64>, shared: &Arc<Mutex<PlayerSnapshot>>) {
+    fn load(
+        &mut self,
+        load_id: u64,
+        path: &Path,
+        resume: Option<f64>,
+        shared: &Arc<Mutex<PlayerSnapshot>>,
+    ) {
+        self.load_id = load_id;
+        self.position_ready = false;
+        self.current_entry_id = None;
+        self.expected_entry_id = None;
+        self.pending_seek_serial = None;
+        self.queued_seek = None;
+        self.seek_started = false;
+        self.position = 0.0;
+        self.duration = 0.0;
+        self.loaded = false;
+        self.tracks.clear();
+        self.audio_pts = None;
+        self.avsync = None;
+        self.total_avsync_change = None;
+        self.mistimed_frames = None;
+        let load_id_for_snapshot = self.load_id;
+        publish(shared, |snapshot| {
+            snapshot.load_id = load_id_for_snapshot;
+            snapshot.position_ready = false;
+            snapshot.loaded = false;
+            snapshot.position = 0.0;
+            snapshot.duration = 0.0;
+            snapshot.tracks.clear();
+            snapshot.audio_pts = None;
+            snapshot.avsync = None;
+            snapshot.total_avsync_change = None;
+            snapshot.mistimed_frames = None;
+            snapshot.failure = None;
+            snapshot.ended = false;
+            snapshot.frame = None;
+        });
         // Checked up front so a missing file is reported as such, not as a
         // generic decoder failure.
         if !path.is_file() {
@@ -641,30 +750,26 @@ impl Runner {
             );
             return;
         };
-        self.position = 0.0;
-        self.duration = 0.0;
-        self.loaded = false;
-        // The previous file's tracks and audio clock must not survive into the
-        // next one, or the interface would offer streams that are already gone.
-        self.tracks.clear();
-        self.audio_pts = None;
-        self.avsync = None;
-        self.total_avsync_change = None;
-        self.mistimed_frames = None;
-        self.pending_resume = resume.filter(|seconds| seconds.is_finite() && *seconds > 0.5);
+        let resume = resume.filter(|seconds| seconds.is_finite() && *seconds > 0.5);
+        // Ended and Failed intentionally have no ordinary outgoing transitions;
+        // a new explicit load starts a fresh lifecycle.
+        self.state = PlayerState::Idle;
         self.set_state(PlayerState::Resolving, shared);
-        if let Err(error) = self.core.command(&["loadfile", path, "replace"]) {
+        let command = if let Some(position) = resume {
+            let options = format!("start={position:.3}");
+            self.core
+                .command(&["loadfile", path, "replace", "-1", &options])
+        } else {
+            self.core.command(&["loadfile", path, "replace"])
+        };
+        if let Err(error) = command {
             self.fail("load_failed", error.to_string(), shared);
             return;
         }
-        publish(shared, |snapshot| {
-            snapshot.failure = None;
-            snapshot.ended = false;
-            snapshot.frame = None;
-        });
+        self.expected_entry_id = self.core.get_i64("playlist/0/id").ok();
     }
 
-    fn seek(&mut self, seconds: f64, shared: &Arc<Mutex<PlayerSnapshot>>) {
+    fn seek(&mut self, seconds: f64, serial: u64, shared: &Arc<Mutex<PlayerSnapshot>>) {
         if !self.loaded {
             return;
         }
@@ -676,11 +781,16 @@ impl Runner {
         } else {
             seconds
         };
+        self.pending_seek_serial = None;
+        self.seek_started = false;
         if let Err(error) = self
             .core
             .command(&["seek", &format!("{target:.3}"), "absolute"])
         {
+            self.queued_seek = None;
             self.fail("seek_failed", error.to_string(), shared);
+        } else {
+            self.pending_seek_serial = Some(serial);
         }
     }
 
@@ -764,6 +874,10 @@ impl Runner {
         let _ = self.core.command(&["stop"]);
         self.state = PlayerState::Idle;
         self.loaded = false;
+        self.position_ready = false;
+        self.pending_seek_serial = None;
+        self.queued_seek = None;
+        self.seek_started = false;
         self.position = 0.0;
         self.duration = 0.0;
         self.tracks.clear();
@@ -772,6 +886,8 @@ impl Runner {
         self.total_avsync_change = None;
         self.mistimed_frames = None;
         publish(shared, |snapshot| {
+            snapshot.load_id = self.load_id;
+            snapshot.position_ready = false;
             snapshot.state = PlayerState::Idle;
             snapshot.loaded = false;
             snapshot.position = 0.0;
@@ -789,18 +905,59 @@ impl Runner {
     fn handle_event(&mut self, raw: crate::RawEvent, shared: &Arc<Mutex<PlayerSnapshot>>) {
         match raw.event_id {
             event::PROPERTY_CHANGE => self.apply_property(raw, shared),
-            event::START_FILE => self.set_state(PlayerState::Resolving, shared),
-            event::FILE_LOADED => self.on_loaded(shared),
+            event::START_FILE => {
+                if !raw.data.is_null() {
+                    // Safety: START_FILE always carries an `mpv_event_start_file`.
+                    let entry_id =
+                        unsafe { (*(raw.data as *const RawStartFile)).playlist_entry_id };
+                    if self
+                        .expected_entry_id
+                        .is_some_and(|expected| expected != entry_id)
+                    {
+                        return;
+                    }
+                    self.expected_entry_id = None;
+                    self.current_entry_id = Some(entry_id);
+                    self.position_ready = false;
+                    self.set_state(PlayerState::Resolving, shared);
+                }
+            }
+            event::FILE_LOADED if self.current_entry_id.is_some() => self.on_loaded(shared),
             event::END_FILE => self.on_end_file(raw, shared),
-            // A new file replaces the track list, and a switch changes which entry
-            // is selected; both are re-read so the snapshot shows libmpv's state.
-            event::TRACKS_CHANGED | event::TRACK_SWITCHED => self.refresh_tracks(shared),
+            event::SEEK => {
+                if self.pending_seek_serial.is_some() {
+                    self.seek_started = true;
+                }
+            }
+            event::PLAYBACK_RESTART if self.loaded => {
+                self.position_ready = true;
+                self.position = self
+                    .core
+                    .get_f64("time-pos")
+                    .ok()
+                    .filter(|position| position.is_finite() && *position >= 0.0)
+                    .unwrap_or(self.position);
+                if self.seek_started {
+                    if let Some(serial) = self.pending_seek_serial.take() {
+                        self.seek_serial = serial;
+                    }
+                    self.seek_started = false;
+                }
+                self.publish_snapshot(shared);
+            }
+            event::VIDEO_RECONFIG if self.loaded => self.update_target(),
             event::SHUTDOWN => {}
             _ => {}
         }
     }
 
     fn apply_property(&mut self, raw: crate::RawEvent, shared: &Arc<Mutex<PlayerSnapshot>>) {
+        if self.current_entry_id.is_none() && !matches!(raw.reply_userdata, ID_VOLUME | ID_MUTE) {
+            return;
+        }
+        if !self.loaded && !matches!(raw.reply_userdata, ID_PAUSE | ID_VOLUME | ID_MUTE) {
+            return;
+        }
         if raw.data.is_null() {
             return;
         }
@@ -818,7 +975,7 @@ impl Runner {
         match raw.reply_userdata {
             ID_TIME_POS => {
                 let value = unsafe { *(property.data as *const f64) };
-                if value.is_finite() && value >= 0.0 {
+                if self.position_ready && value.is_finite() && value >= 0.0 {
                     self.position = value;
                 }
             }
@@ -874,6 +1031,7 @@ impl Runner {
             ID_MUTE => {
                 self.muted = Some(unsafe { *(property.data as *const i32) } != 0);
             }
+            ID_TRACK_LIST => self.tracks = read_tracks(&self.core),
             _ => {}
         }
         self.publish_snapshot(shared);
@@ -913,20 +1071,7 @@ impl Runner {
         self.loaded = true;
         self.duration = self.core.get_f64("duration").unwrap_or(0.0).max(0.0);
         self.tracks = read_tracks(&self.core);
-
-        let width = self.core.get_i64("width").unwrap_or(0).max(0) as u32;
-        let height = self.core.get_i64("height").unwrap_or(0).max(0) as u32;
-        let (width, height) = target_size(width, height, MAX_DIMENSION);
-        self.renderer.set_target(width, height);
-
-        if let Some(position) = self.pending_resume.take()
-            && position > 0.5
-        {
-            let _ = self
-                .core
-                .command(&["seek", &format!("{position:.3}"), "absolute"]);
-            self.position = position;
-        }
+        self.update_target();
 
         self.set_state(
             if self.paused {
@@ -940,14 +1085,39 @@ impl Runner {
         self.publish_snapshot(shared);
     }
 
+    fn update_target(&mut self) {
+        let display_width = self.core.get_i64("dwidth").unwrap_or(0).max(0) as u32;
+        let display_height = self.core.get_i64("dheight").unwrap_or(0).max(0) as u32;
+        let width = if display_width == 0 {
+            self.core.get_i64("width").unwrap_or(0).max(0) as u32
+        } else {
+            display_width
+        };
+        let height = if display_height == 0 {
+            self.core.get_i64("height").unwrap_or(0).max(0) as u32
+        } else {
+            display_height
+        };
+        let (width, height) = target_size(width, height, MAX_DIMENSION);
+        self.renderer.set_target(width, height);
+    }
+
     fn on_end_file(&mut self, raw: crate::RawEvent, shared: &Arc<Mutex<PlayerSnapshot>>) {
-        let (reason, error) = if raw.data.is_null() {
-            (end_reason::EOF, 0)
+        let (reason, error, playlist_entry_id) = if raw.data.is_null() {
+            (
+                end_reason::EOF,
+                0,
+                self.current_entry_id.unwrap_or_default(),
+            )
         } else {
             // Safety: END_FILE always carries an `mpv_event_end_file`.
             let end = unsafe { &*(raw.data as *const RawEndFile) };
-            (end.reason, end.error)
+            (end.reason, end.error, end.playlist_entry_id)
         };
+        if self.current_entry_id != Some(playlist_entry_id) {
+            return;
+        }
+        self.current_entry_id = None;
         match reason {
             end_reason::EOF => {
                 self.set_state(PlayerState::Ended, shared);
@@ -964,6 +1134,9 @@ impl Runner {
     }
 
     fn present(&mut self, shared: &Arc<Mutex<PlayerSnapshot>>) {
+        if !self.loaded || self.current_entry_id.is_none() {
+            return;
+        }
         trace!("present: checking update flags");
         let flags = match self.renderer.update_flags() {
             Ok(flags) => flags,
@@ -986,7 +1159,11 @@ impl Runner {
                     frame.generation,
                     began.elapsed()
                 );
-                publish(shared, |snapshot| snapshot.frame = Some(frame))
+                let load_id = self.load_id;
+                publish(shared, |snapshot| {
+                    snapshot.load_id = load_id;
+                    snapshot.frame = Some(frame);
+                })
             }
             Ok(None) => {}
             Err(error) => self.fail("render_failed", error.to_string(), shared),
@@ -997,13 +1174,30 @@ impl Runner {
         let previous = self.state;
         self.state = self.state.transition(next);
         if self.state != previous {
-            publish(shared, |snapshot| snapshot.state = self.state);
+            let (load_id, position_ready, state) = (self.load_id, self.position_ready, self.state);
+            publish(shared, |snapshot| {
+                snapshot.load_id = load_id;
+                snapshot.position_ready = position_ready;
+                snapshot.state = state;
+            });
         }
     }
 
     fn fail(&mut self, code: &str, message: String, shared: &Arc<Mutex<PlayerSnapshot>>) {
         self.state = PlayerState::Failed;
+        let (load_id, position_ready, position, duration, loaded) = (
+            self.load_id,
+            self.position_ready,
+            self.position,
+            self.duration,
+            self.loaded,
+        );
         publish(shared, |snapshot| {
+            snapshot.load_id = load_id;
+            snapshot.position_ready = position_ready;
+            snapshot.position = if position_ready { position } else { 0.0 };
+            snapshot.duration = duration;
+            snapshot.loaded = loaded;
             snapshot.state = PlayerState::Failed;
             snapshot.failure = Some(PlayerFailure {
                 code: code.to_string(),
@@ -1020,8 +1214,13 @@ impl Runner {
             (self.avsync, self.total_avsync_change, self.mistimed_frames);
         let (subtitle_scale, subtitle_position) = (self.subtitle_scale, self.subtitle_position);
         let (volume, muted) = (self.volume, self.muted);
+        let (load_id, position_ready, seek_serial) =
+            (self.load_id, self.position_ready, self.seek_serial);
         publish(shared, |snapshot| {
-            snapshot.position = position;
+            snapshot.load_id = load_id;
+            snapshot.position_ready = position_ready;
+            snapshot.seek_serial = seek_serial;
+            snapshot.position = if position_ready { position } else { 0.0 };
             snapshot.duration = duration;
             snapshot.state = state;
             snapshot.loaded = loaded;

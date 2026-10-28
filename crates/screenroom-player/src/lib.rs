@@ -652,7 +652,7 @@ impl Mpv {
     }
 
     /// Blocks for the next event and returns it, or `None` on timeout.
-    pub(crate) fn wait_event_raw(&self, timeout_seconds: f64) -> Option<RawEvent> {
+    pub(crate) fn wait_event_raw(&mut self, timeout_seconds: f64) -> Option<RawEvent> {
         let event =
             unsafe { (self.library.symbols.wait_event)(self.handle.as_ptr(), timeout_seconds) };
         if event.is_null() {
@@ -783,7 +783,7 @@ impl Mpv {
     /// Blocks for the next event, returning its raw identifier.
     ///
     /// `MPV_EVENT_NONE` (0) means the timeout elapsed.
-    pub fn wait_event(&self, timeout_seconds: f64) -> i32 {
+    pub fn wait_event(&mut self, timeout_seconds: f64) -> i32 {
         let event =
             unsafe { (self.library.symbols.wait_event)(self.handle.as_ptr(), timeout_seconds) };
         if event.is_null() {
@@ -809,12 +809,14 @@ pub mod event {
     pub const END_FILE: i32 = 7;
     /// The file was opened and its streams are known.
     pub const FILE_LOADED: i32 = 8;
-    /// The set of tracks changed (a new file, or an external track was added).
-    pub const TRACKS_CHANGED: i32 = 12;
-    /// The selected tracks changed.
-    pub const TRACK_SWITCHED: i32 = 20;
     /// An observed property changed.
     pub const PROPERTY_CHANGE: i32 = 22;
+    /// Video output or filters were reconfigured.
+    pub const VIDEO_RECONFIG: i32 = 17;
+    /// A seek or initial playback position has settled and playback restarted.
+    pub const PLAYBACK_RESTART: i32 = 21;
+    /// A seek was initiated.
+    pub const SEEK: i32 = 20;
 }
 
 /// Playback lifecycle shared by every platform adapter.
