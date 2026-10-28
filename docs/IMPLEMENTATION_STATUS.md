@@ -607,6 +607,15 @@ profile exists and is active (`screenroom`); no certificate material was inspect
 Gate G5 is **PARTIAL** — see `TIZEN_DEVICE_HANDOFF.md` for what the set itself reported; the checklist and the questions only the
 TV can settle are in [`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md).
 
+**2026-10-29 — the set was reachable again and the fixed build went on it.** Package
+`01d60176…d2231`, 160,680 bytes, `install completed`, launched, and the TV's own record
+reads `canvases=1 size=1920x1080 css=1920px/1080px client=1920x1080 viewport=1920x1080
+dpr=1 mounted=1` — the blank screen is gone at the engine level. The owner then reported
+the **home screen with readable text and cards**, so item 1 now passes on both halves.
+Items 3–12 (drive, scan, playback, tracks, subtitles, next episode, focus, restart,
+reinstall) remain open and need the remote in a hand: this firmware accepts no synthetic
+key press, exposes no screenshot and no `dlog` over TCP.
+
 ### Test totals after the M3 work (2026-10-28)
 
 ```bash
@@ -654,7 +663,7 @@ Headless scripts, which are not part of `cargo test`:
 | Windows 4K/HDR/hardware decode | BLOCKED | same |
 | Physical Samsung UA50AU8000RXER — install | **PASS** (2026-10-28) | connected at `192.168.0.172:26101`; `sdb capability` reports `vendor_name:Samsung`, `profile_name:tv`, `platform_version:6.0`, `cpu_arch:armv7`. The distributor chain is Samsung-issued with exactly one `deviceid` binding, and the DUID the set reports matches it (compared by hash; neither value printed). `vd_appinstall` reached `install completed` and `vd_applist` lists `PlYByk3psw.ScreenroomTV` 0.1.0 |
 | Physical Samsung UA50AU8000RXER — playback, USB, durability | NOT YET RUN | needs a person with the remote: this firmware accepts no synthetic key press, exposes no screenshot, no `dlog` over TCP and no inspector port. Items 3–7 of G5 |
-| Lightning 3 on the Tizen 6.0 engine | **PARTIAL** (2026-10-28) | the set's own record: `host=tizen avplay=1 filesystem=1 inputdevice=1 storage=1 keys=9/refused=0 model=UAU8000 firmware=T-NKLAUABC-2310.0` and `canvases=1 size=1920x1080 mounted=1`, no `error` or `rejection` entries, engine `76.0.3809.146`. The bundle executes and Lightning mounts a correctly sized surface. Nobody has seen the screen, and WebGL capability and frame pacing are not measured |
+| Lightning 3 on the Tizen 6.0 engine | **PASS on the engine, PARTIAL on measurement** (2026-10-29) | the set's own record: `host=tizen avplay=1 filesystem=1 inputdevice=1 storage=1 keys=9/refused=0 model=UAU8000 firmware=T-NKLAUABC-2310.0` and `canvases=1 size=1920x1080 css=1920px/1080px client=1920x1080 viewport=1920x1080 dpr=1 mounted=1`, no `error` or `rejection` entries, engine `76.0.3809.146`. The bundle executes, Lightning mounts a full-size surface, and the **owner has seen the home screen with readable text and cards**. WebGL capability and frame pacing are still not measured |
 | Audible output heard by a person | NOT YET VERIFIED | the audio clock and `avsync` are measured; nobody has listened |
 | macOS bundle signing and notarization for distribution | BLOCKED | Command Line Tools only, no full Xcode; not required for a personal install |
 

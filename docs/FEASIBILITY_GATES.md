@@ -20,7 +20,7 @@ Current summary:
 | G3 libmpv frame presented through wgpu in an iced window | **PASSED on macOS** (30 fps, correct aspect, transport and resume verified in the window); Windows path **BLOCKED** |
 | G3b Audio output and audio/video sync | **PARTIAL** — audio clock and `avsync` measured (0.982× real time, 0.0 ms); not heard by a person |
 | G4 Desktop playback quality on owner hardware | **BLOCKED** (no Windows hardware) |
-| G5 Samsung Tizen physical device | **PARTIAL** — the signed package installs on the owner's set, the bundle executes there, and the TV itself reports a mounted 1920×1080 canvas; AVPlay is present; no drive has been walked and no frame, sound or remote press has been observed yet |
+| G5 Samsung Tizen physical device | **PARTIAL** — the signed package installs on the owner's set, the bundle executes there, the TV reports a mounted 1920×1080 canvas, and the owner has **seen the home screen with readable text and cards from the sofa** (2026-10-29); AVPlay is present; no drive has been walked, no file played and no remote press has been observed through this host |
 | G6 Other TV platforms | **RETIRED** (LG webOS / Android TV out of scope, ADR-004) |
 | G7 iOS | **RETIRED** (out of scope, ADR-003) |
 | G8 Android TV + Media3 | **RETIRED** (out of scope, ADR-004) |
@@ -184,7 +184,7 @@ otherwise an installed, launched app is indistinguishable from a working one.
 
 | What | Receipt |
 | --- | --- |
-| The signed `.wgt` installs | `vd_appinstall` reached `install completed`; `vd_applist` then lists `PlYByk3psw.ScreenroomTV` 0.1.0, 157,986 bytes — the packaged size, to the byte |
+| The signed `.wgt` installs | `vd_appinstall` reached `install completed`; `vd_applist` then lists `PlYByk3psw.ScreenroomTV` 0.1.0 — on 2026-10-29 the reinstall of the 160,680-byte package reached `install completed` the same way |
 | The app launches | `was_execute` → `launched`; the TV's own `use_count` increments per launch |
 | **The bundle executes** | the set wrote its own `boot` record: `host=tizen avplay=1 filesystem=1 inputdevice=1 storage=1 keys=9/refused=0 model=UAU8000 firmware=T-NKLAUABC-2310.0 product=3.7` |
 | **Lightning mounts a render surface** | the set wrote `canvases=1 size=1920x1080 mounted=1`, and **no** `error` or `rejection` entries |
@@ -192,12 +192,18 @@ otherwise an installed, launched app is indistinguishable from a working one.
 | The remote's extra keys | registration accepted **9 of 9** media/Info keys and refused none |
 | AVPlay is present | `avplay=1` after the namespace fix below |
 
-**Not yet observed on the set, and not claimed:** a single frame seen by a person,
-frame pacing or WebGL capability measured, a drive walked, any file played, a seek, a
-track change, a subtitle, a resume, focus at couch distance, or survival of a power
-cycle. Those are items 1 (visual part), 3, 4, 5, 6 and 7, and they need a person with
-the remote — the checklist in [`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md) is
-written for exactly that, with the observable that settles each one.
+**Observed by a person (2026-10-29).** After the blank-screen fix, the owner reported the
+home screen drawn with **text and cards readable from where they sit** — the visual half
+of item 1. That is the owner's statement about one screen on one set, not a
+measurement: no frame pacing, no WebGL capability and no colour accuracy is claimed from
+it.
+
+**Not yet observed on the set, and not claimed:** frame pacing or WebGL capability
+measured, a drive walked, any file played, a seek, a track change, a subtitle, a resume,
+focus at couch distance, or survival of a power cycle. Those are items 3–7, and they need
+a person with the remote — the checklist in
+[`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md) is written for exactly that, with the
+observable that settles each one.
 
 ### Three defects only the television could find (fixed, 2026-10-28)
 

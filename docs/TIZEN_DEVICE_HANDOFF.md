@@ -4,12 +4,16 @@
 Tizen 6.0 web engine. This is the only TV in scope
 ([ADR-004](ADR-004_PERSONAL_EDITION_SCOPE.md)).
 
-**State (2026-10-28): the client is installed on the set and it runs there.** The
-signed package is installed, the television executes the bundle, Lightning mounts a
-1920×1080 canvas, AVPlay is present, and all nine extra remote keys were accepted — all
-of that read back from the TV itself, not inferred. **Nothing visual has been observed
-by a person, no drive has been walked and no file has played.** Checklist items 1
-(visual half), 3–7 are still open, and this document does not pretend otherwise.
+**State (2026-10-29): the client is installed on the set, it runs there, and the owner
+has seen it.** The current package — 160,680 bytes,
+sha256 `01d601765a779e7b31b03c4301b50a1fa4245d5f5df8eeccb6d9d005e2fd2231` — installed with
+`install completed` and launched, and the set's own record reads
+`boot host=tizen avplay=1 filesystem=1 inputdevice=1 storage=1 keys=9/refused=0
+model=UAU8000 firmware=T-NKLAUABC-2310.0` plus
+`render canvases=1 size=1920x1080 css=1920px/1080px client=1920x1080 viewport=1920x1080 dpr=1
+mounted=1`. The owner then reported the **home screen drawn with text and cards readable
+from the sofa**, which closes the visual half of item 1. **Items 3–12 are open: no drive
+has been walked and no file has played.**
 
 The rule it exists to follow: a packaged `.wgt`, a signed package, a Tizen Studio
 install, a simulated filesystem or a television emulator is **not** a TV test. Only the
@@ -33,7 +37,7 @@ pnpm build                   # typecheck + Vite + the Tizen staging step
 | `pnpm test` | **183 tests, 0 failures** — the focus machine, the progress guard, the store and its durability rules, the scanner's rules, a whole-drive walk over a simulated Tizen filesystem, filename interpretation, the track menu and next-episode rule, decoder preferences, the remote-key wiring of every screen, relative-locator validation, AVPlay's display-rect maths and track reading, the design tokens and the card geometry. Per-suite counts are in [`TEST_PLAN.md`](TEST_PLAN.md) |
 | `pnpm build` | one 462,142-byte `main.js` and a 1,391-byte `index.html`; no code splitting (a widget has no server to fetch a second chunk from) |
 | `apps/tv/build/widget/` | the staged widget: `config.xml`, `icon.png`, `index.html`, `main.js`, and the Tizen project metadata. The staging step refuses to continue if the bundle is unlinked, missing, or referenced by an absolute path |
-| Signed package | **built and installed.** `apps/tv/build/ScreenroomTV-0.1.0.wgt`, 158,500 bytes on 2026-10-28; earlier builds of the same day were 157,202 → 157,986 → 158,079 → 158,101 → 158,462 bytes as the three device defects below were fixed. The hash changes with every one of those; quote the one the TV actually has (see section 2) |
+| Signed package | **built and installed.** `apps/tv/build/ScreenroomTV-0.1.0.wgt`, **160,680 bytes, sha256 `01d60176…d2231` (2026-10-29)**; earlier builds were 157,202 → 157,986 → 158,079 → 158,101 → 158,462 → 158,500 bytes as the device defects below were fixed. The hash changes with every one of those; quote the one the TV actually has (see section 2) |
 | The packaged bundle | byte-identical to the tested one, checked on every build: the `main.js` digest inside the `.wgt` equals the digest of `dist/main.js` printed by the staging step |
 | Package contents | exactly `author-signature.xml`, `config.xml`, `icon.png`, `index.html`, `main.js`, `signature1.xml` — nothing stray, and three privileges (`tv.inputdevice`, `filesystem.read`, `productinfo`) in the manifest |
 | Signing profile | one profile exists and is **active**: `screenroom` (name read only; no certificate material was inspected) |
@@ -160,6 +164,13 @@ app.
 install, and `localStorage` for the widget goes with it — profiles, positions and scan
 results included. Take a copy of anything worth keeping first, and see item 7.
 
+**Observed on 2026-10-29, and it contradicts the usual claim:** the reinstall of this
+build did **not** clear the widget's data. The `boot` and `render` lines written by the
+previous day's build (epoch `1793160…`) were still in `Local Storage/leveldb` after the
+new one had booted (`1793211…`). So on this firmware, installing over the app via
+`vd_appinstall` preserved the data directory — recorded as an observation of one
+reinstall, not a guarantee, and item 12 still has to be signed off by the owner.
+
 ---
 
 ## 3. Install and run
@@ -185,12 +196,17 @@ Each numbered item is a separate receipt for gate G5
 ([`FEASIBILITY_GATES.md`](FEASIBILITY_GATES.md)). Record the model, the firmware the TV
 reports, the package hash above, and what was observed — not what was expected.
 
-**Where this stands (2026-10-28).** Item **2 passes** (installed, and the certificate
-provably authorises this set). Item **1 is half done**: the engine runs the bundle and
-the TV reports `canvases=1 size=1920x1080 mounted=1` with no JS errors, but nobody has
-*looked* at the screen — that is the half only a person can sign. Items **3–12 are
-open** and every one of them needs the remote in a hand, because this firmware accepts
-no synthetic key press.
+**Where this stands (2026-10-29).** Item **2 passes** (installed, and the certificate
+provably authorises this set). Item **1 passes**: the engine runs the bundle, the TV
+reports `canvases=1 size=1920x1080 mounted=1` with no JS errors, and the **owner has seen
+the home screen with readable text and cards**. Items **3–12 are open** and every one of
+them needs the remote in a hand, because this firmware accepts no synthetic key press.
+
+The owner's USB drive holds **movies and shows in nested folders**, not loose files at the
+drive root. That is what the walker is built for: it is breadth-first and descends to 16
+levels (`MAX_DEPTH` in `core/scan.ts`), skips hidden folders, and `folderHintOf` strips a
+`Season NN` folder so the show's own folder is the identity an episode joins. Deeper than
+16 levels is reported as `depth_limit` rather than silently dropped.
 
 | # | G5 item | What to do on the TV | What counts as the receipt |
 | --- | --- | --- | --- |
