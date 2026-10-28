@@ -37,7 +37,7 @@ export default Blits.Application({
     }
   },
   template: `
-    <Element w="1920" h="1080" color="$background">
+    <Element w="1920" h="1080" :color="$background">
       <RouterView w="1920" h="1080" />
     </Element>
   `,

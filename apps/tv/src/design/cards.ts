@@ -30,6 +30,7 @@ export interface GridGeometry {
   readonly columns: number
   readonly rows: number
   readonly originX: number
+  /** Where the first row starts: the vertical bound the caller asked for. */
   readonly originY: number
   readonly cardWidth: number
   readonly cardHeight: number
@@ -38,6 +39,18 @@ export interface GridGeometry {
   /** How wide the video/art area inside a card is. */
   readonly artWidth: number
   readonly artHeight: number
+  /** Where the title line starts, measured from the card's own top. */
+  readonly titleY: number
+  /** Where the sub-title line starts, measured from the card's own top. */
+  readonly subtitleY: number
+}
+
+/** The vertical band a grid has to fit into, in app pixels. */
+export interface GridBounds {
+  /** The first pixel the grid may use; the screen's header ends here. */
+  readonly top: number
+  /** The last pixel the grid may use; the footer starts here. */
+  readonly bottom: number
 }
 
 /**
@@ -53,6 +66,10 @@ export function gridFor(
   rows: number,
   tokens: Tokens = TOKENS,
   width: number = APP_WIDTH,
+  bounds: GridBounds = {
+    top: Math.round(TOKENS.spacing.shellPad),
+    bottom: APP_HEIGHT - Math.round(TOKENS.spacing.shellPad),
+  },
 ): GridGeometry {
   // Every count is sanitised, not merely floored: `Math.max(1, Math.trunc(NaN))` is
   // `NaN`, which would propagate into every card's width and place the whole grid at
@@ -62,19 +79,32 @@ export function gridFor(
   const safeRows = countOrOne(rows)
   const safeWidth = Number.isFinite(width) && width > 0 ? width : APP_WIDTH
   const originX = Math.round(tokens.spacing.shellPad)
-  const originY = Math.round(tokens.spacing.shellPad)
+  const originY = Number.isFinite(bounds.top) ? Math.round(bounds.top) : 0
+  const bottom = Number.isFinite(bounds.bottom) ? Math.round(bounds.bottom) : APP_HEIGHT
 
-  // The art is 16:9, which is what every file in the library is expected to be; a
-  // title strip sits under it.
-  const titleStrip = Math.round(tokens.type.body * 2.4)
+  // The two lines the card has to hold, and therefore the strip beneath the art. It is
+  // derived from the type scale rather than guessed: a strip sized independently of the
+  // text inside it clips the title, which is what the first TV build did — the title and
+  // its subtitle were drawn past the card's own bottom edge.
+  const titleGap = Math.round(tokens.type.caption * 1.2)
+  const titleLine = Math.round(tokens.type.bodyLg * 1.5)
+  const subtitleLine = Math.round(tokens.type.caption * 1.6)
+  const titleStrip = titleGap + titleLine + subtitleLine
+
   const usable = safeWidth - originX * 2
   const sectionGap = Math.round(tokens.spacing.section / 2)
   const gapX = Math.max(sectionGap, Math.round(tokens.type.body * 1.5))
-  const gapY = Math.max(sectionGap, Math.round(tokens.type.body * 1.5))
-  const cardWidth = Math.max(
-    1,
-    Math.floor((usable - gapX * (safeColumns - 1)) / safeColumns),
-  )
+  const gapY = gapX
+
+  // A grid has to fit in *both* directions. Sizing from the width alone is how a third
+  // row ends up drawn below the television's bottom edge; the height bound is what the
+  // caller's footer implies.
+  const byWidth = Math.floor((usable - gapX * (safeColumns - 1)) / safeColumns)
+  const usableHeight = Math.max(1, bottom - originY)
+  const rowSpace = (usableHeight - gapY * (safeRows - 1)) / safeRows
+  const byHeight = Math.floor((rowSpace - titleStrip) * (16 / 9))
+  const cardWidth = Math.max(1, Math.min(byWidth, byHeight))
+
   const artWidth = cardWidth
   const artHeight = Math.round((artWidth * 9) / 16)
   const cardHeight = artHeight + titleStrip
@@ -90,6 +120,8 @@ export function gridFor(
     gapY,
     artWidth,
     artHeight,
+    titleY: artHeight + titleGap,
+    subtitleY: artHeight + titleGap + titleLine,
   }
 }
 

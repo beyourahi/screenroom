@@ -20,8 +20,15 @@ import type { LibraryItem, MediaKind, ResumeEntry } from './contract.ts'
 /** Cells across a 1920-wide grid at 10-foot distance. Fewer and larger, not denser. */
 export const COLUMNS = 5
 
-/** Rows per page: a full screen plus a hint of the next, so the grid reads as scrolling. */
-export const ROWS = 3
+/**
+ * Rows per page.
+ *
+ * Two, not three. A page of five-by-three only fits if the cards are shrunk until the
+ * 42-pixel title no longer fits inside its own card; `design/cards.ts` sizes the grid
+ * to the band between the header and the footer, and at this type scale that band holds
+ * two rows of five readable cards. A third row was drawn below the bottom of the set.
+ */
+export const ROWS = 2
 
 /** Items per page, always a whole number of rows. */
 export const PAGE_SIZE = COLUMNS * ROWS

@@ -98,6 +98,36 @@ test('the art is 16:9 and the card is taller than its art', () => {
   assert.ok(geometry.cardHeight > geometry.artHeight, 'there is a title strip under the art')
 })
 
+test('a card is tall enough for both lines it draws, and a page fits the band it is given', () => {
+  // The first TV build sized the title strip from a guess (`body * 2.4`) while the two
+  // text lines under the art needed more, so the title and its subtitle were drawn past
+  // the card's own bottom edge and were cut off. The same guess let a third row land
+  // below the set. Both are geometry, so both are checked here rather than by eye.
+  const bands = [
+    { columns: 4, rows: 2, top: 232, bottom: 992 },
+    { columns: 5, rows: 2, top: 204, bottom: 992 },
+    { columns: 3, rows: 3, top: 32, bottom: 1048 },
+  ]
+  for (const band of bands) {
+    const geometry = gridFor(band.columns, band.rows, TOKENS, APP_WIDTH, {
+      top: band.top,
+      bottom: band.bottom,
+    })
+    const lastLineBottom = geometry.subtitleY + Math.round(TOKENS.type.caption * 1.6)
+    assert.ok(
+      lastLineBottom <= geometry.cardHeight,
+      `${band.columns}x${band.rows}: the sub-title ends at ${lastLineBottom}, past the card's ${geometry.cardHeight}`,
+    )
+    const last = cellPosition(band.columns * band.rows - 1, geometry)
+    assert.ok(
+      last.y + geometry.cardHeight <= band.bottom,
+      `${band.columns}x${band.rows}: the last row ends at ${last.y + geometry.cardHeight}, past ${band.bottom}`,
+    )
+    assert.ok(last.y >= band.top, 'the first row starts inside the band')
+    assert.ok(geometry.cardWidth > 0 && geometry.artHeight > 0)
+  }
+})
+
 test('a card carries the exact values the template asks for', () => {
   const geometry = gridFor(3, 2)
   const cards = buildCards([item(), item({ id: 'item-2', title: 'Another' })], 0, geometry)

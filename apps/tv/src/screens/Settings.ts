@@ -64,6 +64,8 @@ interface Row {
   readonly actionable: boolean
   /** What Enter does, or `null` for a row that only reports. */
   readonly action: Action | null
+  /** False for a row outside the visible window, which is not drawn at all. */
+  readonly visible: boolean
 }
 
 /** One line of the row list, before it is placed. */
@@ -96,39 +98,40 @@ function sinceMs(timestampMs: number, nowMs: number): string {
 
 export default Blits.Component('Settings', {
   template: `
-    <Element w="1920" h="1080" color="$background">
-      <Text x="$pad" y="$pad" content="Settings" size="$titleSize" color="$foreground" />
-      <Text x="$pad" y="$subY" content="$subtitle" size="$bodySize" color="$muted" />
+    <Element w="1920" h="1080" :color="$background">
+      <Text :x="$pad" :y="$pad" content="Settings" :size="$titleSize" :color="$foreground" />
+      <Text :x="$pad" :y="$subY" :content="$subtitle" :size="$bodySize" :color="$muted" />
 
       <Element
         :for="row in $rows"
         key="$row.key"
+        :show="$row.visible"
         :x="$pad"
         :y="$row.y"
         :w="$listWidth"
-        h="$rowHeight"
+        :h="$rowHeight"
         :color="$row.fill"
-        rounded="$radius"
+        :rounded="$radius"
       >
         <Text
           :x="$fieldX"
           :y="$rowLabelY"
-          content="$row.label"
-          size="$bodySize"
-          color="$row.labelColor"
+          :content="$row.label"
+          :size="$bodySize"
+          :color="$row.labelColor"
         />
         <Text
           :x="$valueX"
           :y="$rowLabelY"
-          content="$row.value"
-          size="$captionSize"
-          color="$row.valueColor"
+          :content="$row.value"
+          :size="$captionSize"
+          :color="$row.valueColor"
           maxlines="1"
           textoverflow="ellipsis"
         />
       </Element>
 
-      <Text x="$pad" y="$footY" content="$footer" size="$captionSize" color="$disabled" />
+      <Text :x="$pad" :y="$footY" :content="$footer" :size="$captionSize" :color="$disabled" />
     </Element>
   `,
   state() {
@@ -388,6 +391,10 @@ export default Blits.Component('Settings', {
           focused,
           actionable: entry.action !== undefined,
           action: entry.action ?? null,
+          // Only the rows inside the window are drawn. The list is longer than the screen
+          // by design, and a row placed below the footer would otherwise be half visible
+          // under it — which reads as a clipped list rather than a scrolled one.
+          visible: index >= this.scroll && index < this.scroll + this.visibleRows,
         }
       })
       this.focusIndex = clampIndex(this.focusIndex, this.rows.length)
@@ -404,6 +411,7 @@ export default Blits.Component('Settings', {
           ...row,
           focused,
           y: layout.top + (index - this.scroll) * layout.rowGap,
+          visible: index >= this.scroll && index < this.scroll + this.visibleRows,
           fill: focused ? hex(TOKENS.palette.focusSurface) : hex(TOKENS.palette.surface1),
           labelColor: focused ? hex(TOKENS.palette.focusForeground) : hex(TOKENS.palette.foreground),
           valueColor: focused ? hex(TOKENS.palette.focusForeground) : hex(TOKENS.palette.inkMuted),

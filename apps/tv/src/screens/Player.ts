@@ -51,6 +51,17 @@ const JUMP_MS = 60_000
 /** How long the overlay stays up after the last key press. */
 const OVERLAY_MS = 4_000
 
+/** How far the scrim darkens the film while the overlay is up. */
+const SCRIM_ALPHA = 0.55
+
+/**
+ * How far it darkens when the message must stay.
+ *
+ * A failure is not an overlay that fades: if the file will not play, the sentence saying
+ * so has to remain until the owner leaves the screen.
+ */
+const SCRIM_ALPHA_STUCK = 0.8
+
 /** One row of the drawn menu. */
 interface MenuRow extends TrackMenuRow {
   readonly y: number
@@ -98,13 +109,20 @@ export default Blits.Component('Player', {
     fromStart: { default: false },
   },
   template: `
-    <Element w="1920" h="1080" color="$background" :alpha="$scrimAlpha">
+    <Element w="1920" h="1080">
+      <!--
+        The scrim is its own layer, and the screen itself is never transparent. Tying the
+        whole template's alpha to the overlay meant that a file which failed to open drew
+        its own explanation into an invisible node: the owner got a black screen and no
+        reason, on the one path where the reason is the only thing worth showing.
+      -->
+      <Element w="1920" h="1080" :color="$background" :alpha="$scrimAlpha" />
       <Text
         :x="$pad"
         :y="$titleY"
-        content="$title"
-        size="$titleSize"
-        color="$foreground"
+        :content="$title"
+        :size="$titleSize"
+        :color="$foreground"
         maxlines="1"
         textoverflow="ellipsis"
         maxwidth="1660"
@@ -113,9 +131,9 @@ export default Blits.Component('Player', {
       <Text
         :x="$pad"
         :y="$subY"
-        content="$status"
-        size="$bodySize"
-        color="$muted"
+        :content="$status"
+        :size="$bodySize"
+        :color="$muted"
         maxlines="2"
         wordwrap="true"
         maxwidth="1660"
@@ -126,34 +144,34 @@ export default Blits.Component('Player', {
         :x="$pad"
         :y="$barY"
         :w="$barWidth"
-        h="$barHeight"
-        color="$trackColor"
+        :h="$barHeight"
+        :color="$trackColor"
         :alpha="$overlayAlpha"
       />
       <Element
         :x="$pad"
         :y="$barY"
         :w="$barFill"
-        h="$barHeight"
-        color="$signal"
+        :h="$barHeight"
+        :color="$signal"
         :alpha="$overlayAlpha"
       />
 
       <Text
         :x="$pad"
         :y="$footY"
-        content="$footer"
-        size="$captionSize"
-        color="$disabled"
+        :content="$footer"
+        :size="$captionSize"
+        :color="$disabled"
         :alpha="$overlayAlpha"
       />
 
       <Text
         :x="$subtitleX"
         :y="$subtitleY"
-        content="$subtitleLine"
-        size="$subtitleSize"
-        color="$foreground"
+        :content="$subtitleLine"
+        :size="$subtitleSize"
+        :color="$foreground"
         align="center"
         maxlines="2"
         wordwrap="true"
@@ -166,15 +184,15 @@ export default Blits.Component('Player', {
         :y="$menuY"
         :w="$menuWidth"
         :h="$menuHeight"
-        color="$surface1"
-        rounded="$radius"
+        :color="$surface1"
+        :rounded="$radius"
       >
         <Text
           :x="$menuPad"
           y="0"
-          content="$menuTitle"
-          size="$menuTitleSize"
-          color="$foreground"
+          :content="$menuTitle"
+          :size="$menuTitleSize"
+          :color="$foreground"
           maxlines="1"
           textoverflow="ellipsis"
           :maxwidth="$menuTextWidth"
@@ -187,14 +205,14 @@ export default Blits.Component('Player', {
           :w="$menuWidth"
           :h="$menuRowHeight"
           :color="$row.fill"
-          rounded="$radius"
+          :rounded="$radius"
         >
           <Text
             :x="$menuPad"
             :y="$menuLabelOffset"
-            content="$row.label"
-            size="$bodySize"
-            color="$row.labelColor"
+            :content="$row.label"
+            :size="$bodySize"
+            :color="$row.labelColor"
             maxlines="1"
             textoverflow="ellipsis"
             :maxwidth="$menuTextWidth"
@@ -202,9 +220,9 @@ export default Blits.Component('Player', {
           <Text
             :x="$menuPad"
             :y="$row.detailY"
-            content="$row.detail"
-            size="$captionSize"
-            color="$row.detailColor"
+            :content="$row.detail"
+            :size="$captionSize"
+            :color="$row.detailColor"
             maxlines="1"
             textoverflow="ellipsis"
             :maxwidth="$menuTextWidth"
@@ -212,9 +230,9 @@ export default Blits.Component('Player', {
           <Text
             :x="$menuMarkX"
             :y="$menuLabelOffset"
-            content="$row.marker"
-            size="$bodySize"
-            color="$row.labelColor"
+            :content="$row.marker"
+            :size="$bodySize"
+            :color="$row.labelColor"
           />
         </Element>
       </Element>
@@ -399,7 +417,7 @@ export default Blits.Component('Player', {
           this.onEnded()
         },
         onError: (message: string) => {
-          this.status = `This file could not be played. ${message}`
+          this.reportFailure(`This file could not be played. ${message}`)
         },
         onSubtitleFile: (result: { offered: string | null; accepted: boolean }) => {
           if (result.offered === null) {
@@ -421,7 +439,7 @@ export default Blits.Component('Player', {
       const item = items().find((candidate) => candidate.id === wantedId)
       if (item === undefined) {
         this.title = 'That file is no longer in the library.'
-        this.status = 'Nothing was played. Go back and choose again.'
+        this.reportFailure('Nothing was played. Go back and choose again.')
         return
       }
       const startMs = routeBoolean(this.fromStart, false) ? 0 : item.positionMs
@@ -450,23 +468,27 @@ export default Blits.Component('Player', {
 
       const source = library().source(item.sourceId)
       if (source === null) {
-        this.status = 'The drive this file came from is no longer granted. Scan again from Settings.'
+        this.reportFailure(
+          'The drive this file came from is no longer granted. Scan again from Settings.',
+        )
         return
       }
       if (source.state !== 'available' || !item.available) {
-        this.status = 'That drive is not readable right now. Plug it back in and scan again from Settings.'
+        this.reportFailure(
+          'That drive is not readable right now. Plug it back in and scan again from Settings.',
+        )
         return
       }
       // The stored path is relative and is never trusted as-is: `resolveLocator` refuses
       // anything that would escape the granted root.
       const absolute = resolveLocator(source.rootPath, item.relativePath)
       if (absolute === null) {
-        this.status = "This file's stored path is not safe to open, so it was not opened."
+        this.reportFailure("This file's stored path is not safe to open, so it was not opened.")
         return
       }
       const resolved = fileUri(absolute)
       if (!resolved.ok) {
-        this.status = resolved.reason
+        this.reportFailure(resolved.reason)
         return
       }
 
@@ -526,13 +548,31 @@ export default Blits.Component('Player', {
     /** Raises the overlay and arms its own timeout. */
     showOverlay() {
       this.overlayAlpha = 1
+      this.scrimAlpha = SCRIM_ALPHA
       if (this.overlayTimer !== null) {
         this.$clearTimeout(this.overlayTimer)
       }
       this.overlayTimer = this.$setTimeout(() => {
         this.overlayAlpha = 0
+        this.scrimAlpha = 0
         this.overlayTimer = null
       }, OVERLAY_MS)
+    },
+    /**
+     * Says why nothing is playing, and keeps saying it.
+     *
+     * Every failure path on this screen goes through here, so a file that will not open
+     * is explained rather than leaving the owner looking at a black set. The message
+     * stays until they leave — there is nothing for them to press that would fix it.
+     */
+    reportFailure(message: string) {
+      if (this.overlayTimer !== null) {
+        this.$clearTimeout(this.overlayTimer)
+        this.overlayTimer = null
+      }
+      this.status = message
+      this.overlayAlpha = 1
+      this.scrimAlpha = SCRIM_ALPHA_STUCK
     },
     playPause() {
       if (this.menuOpen) {
@@ -666,6 +706,9 @@ export default Blits.Component('Player', {
       })
       this.menuHeight =
         layout.titleBlock + rows.length * layout.rowGap + Math.round(TOKENS.spacing.shellPad * 0.5)
+      // The menu is a key press, so it brings the overlay with it: the title above the
+      // panel is what tells the owner which file these tracks belong to.
+      this.showOverlay()
       this.menuOpen = true
     },
     /** Moves the menu cursor, clamped to the list. */

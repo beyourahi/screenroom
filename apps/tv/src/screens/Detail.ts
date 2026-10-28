@@ -40,31 +40,31 @@ export default Blits.Component('Detail', {
     id: { required: true },
   },
   template: `
-    <Element w="1920" h="1080" color="$background">
+    <Element w="1920" h="1080" :color="$background">
       <Text
-        x="$pad"
-        y="$pad"
-        content="$title"
-        size="$titleSize"
-        color="$foreground"
+        :x="$pad"
+        :y="$pad"
+        :content="$title"
+        :size="$titleSize"
+        :color="$foreground"
         maxlines="1"
         textoverflow="ellipsis"
         maxwidth="1660"
       />
-      <Text x="$pad" y="$subY" content="$subtitle" size="$bodySize" color="$muted" />
+      <Text :x="$pad" :y="$subY" :content="$subtitle" :size="$bodySize" :color="$muted" />
       <Element
-        x="$pad"
+        :x="$pad"
         :y="$barY"
-        w="$barWidth"
-        h="$barHeight"
-        color="$surface2"
+        :w="$barWidth"
+        :h="$barHeight"
+        :color="$surface2"
       />
       <Element
-        x="$pad"
+        :x="$pad"
         :y="$barY"
         :w="$barFill"
-        h="$barHeight"
-        color="$signal"
+        :h="$barHeight"
+        :color="$signal"
       />
 
       <Element
@@ -72,30 +72,30 @@ export default Blits.Component('Detail', {
         key="$action.key"
         :x="$pad"
         :y="$action.y"
-        w="$listWidth"
-        h="$rowHeight"
+        :w="$listWidth"
+        :h="$rowHeight"
         :color="$action.fill"
-        rounded="$radius"
+        :rounded="$radius"
       >
         <Text
           :x="$fieldX"
           :y="$rowLabelY"
-          content="$action.label"
-          size="$titleSize"
-          color="$action.labelColor"
+          :content="$action.label"
+          :size="$titleSize"
+          :color="$action.labelColor"
         />
         <Text
           :x="$fieldX"
           :y="$rowDetailY"
-          content="$action.detail"
-          size="$captionSize"
-          color="$action.detailColor"
+          :content="$action.detail"
+          :size="$captionSize"
+          :color="$action.detailColor"
           maxlines="1"
           textoverflow="ellipsis"
         />
       </Element>
 
-      <Text x="$pad" y="$footY" content="$footer" size="$captionSize" color="$disabled" />
+      <Text :x="$pad" :y="$footY" :content="$footer" :size="$captionSize" :color="$disabled" />
     </Element>
   `,
   state() {
@@ -116,6 +116,15 @@ export default Blits.Component('Detail', {
       barHeight: 6,
       barWidth: 1660,
       barFill: 0,
+      // The action list's numbers, copied out of `computed.layout` by `applyLayout` before
+      // the first paint. A template resolves `$name` against state only, so a value that
+      // lives on a computed object is `undefined` here and its node is never drawn.
+      listWidth: 1100,
+      rowHeight: 0,
+      fieldX: 0,
+      rowLabelY: 0,
+      rowDetailY: 0,
+      footY: 0,
       title: '',
       subtitle: '',
       footer: 'Enter selects · Back returns',
@@ -148,6 +157,7 @@ export default Blits.Component('Detail', {
   hooks: {
     ready() {
       this.$focus()
+      this.applyLayout()
       this.reload()
     },
   },
@@ -164,10 +174,21 @@ export default Blits.Component('Detail', {
     },
   },
   methods: {
+    /** Copies the derived geometry into state, where the template can see it. */
+    applyLayout(): void {
+      const layout = this.layout
+      this.listWidth = layout.listWidth
+      this.rowHeight = layout.rowHeight
+      this.fieldX = layout.fieldX
+      this.rowLabelY = layout.rowLabelY
+      this.rowDetailY = layout.rowDetailY
+      this.footY = layout.footY
+    },
     /** Rebuilds the header and the action list from the store. */
     reload() {
       const item = this.item
       if (item === null) {
+        this.focusIndex = 0
         // An id that is not in the store is a real case: a rescan between navigating
         // and arriving removes rows. Saying so beats an empty screen that looks broken.
         this.title = 'That file is no longer in the library.'
@@ -218,6 +239,10 @@ export default Blits.Component('Detail', {
         detail: 'Leaves this screen. Nothing is saved by leaving.',
       })
 
+      // Clamped *before* the rows are placed: a shorter list than the last render would
+      // otherwise leave the cursor past its end, and the screen would show no focused
+      // row until the next key press.
+      this.focusIndex = clampIndex(this.focusIndex, rows.length)
       const layout = this.layout
       this.actions = rows.map((row, index) => {
         const focused = index === this.focusIndex
@@ -232,7 +257,6 @@ export default Blits.Component('Detail', {
           y: layout.listTop + index * layout.rowGap,
         }
       })
-      this.focusIndex = clampIndex(this.focusIndex, this.actions.length)
     },
     subtitleFor(item: LibraryItem): string {
       const parts: string[] = []

@@ -71,11 +71,25 @@ function recordRender(): void {
       const canvases = Array.from(document.querySelectorAll('canvas'))
       const first = canvases[0]
       const painted = document.getElementById('app')?.childElementCount ?? 0
+      const ratio = globalThis.devicePixelRatio ?? 1
+      // The viewport is recorded because the attribute size alone does not say whether
+      // what was drawn *fits on the screen*: a 1920-wide canvas in a smaller CSS
+      // viewport shows only its top-left corner, which is exactly how the first working
+      // build appeared on the set.
+      const viewport = `${globalThis.innerWidth ?? 0}x${globalThis.innerHeight ?? 0}`
       recordEvidence(
         'render',
         first === undefined
-          ? `canvases=0 mounted=${painted}`
-          : `canvases=${canvases.length} size=${first.width}x${first.height} mounted=${painted}`,
+          ? `canvases=0 mounted=${painted} viewport=${viewport} dpr=${ratio}`
+          : [
+              `canvases=${canvases.length}`,
+              `size=${first.width}x${first.height}`,
+              `css=${first.style.width || 'unset'}/${first.style.height || 'unset'}`,
+              `client=${first.clientWidth}x${first.clientHeight}`,
+              `viewport=${viewport}`,
+              `dpr=${ratio}`,
+              `mounted=${painted}`,
+            ].join(' '),
       )
     } catch (error) {
       recordEvidence('render', `probe failed: ${error instanceof Error ? error.message : 'unknown'}`)

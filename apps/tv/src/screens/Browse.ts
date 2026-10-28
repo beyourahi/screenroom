@@ -20,7 +20,7 @@ import Blits from '@lightningjs/blits'
 
 import { COLUMNS, emptyState, pageCount, pageItems, ROWS } from '../core/browse.ts'
 import { clampIndex, moveFocus, restoreFocus, type Direction } from '../core/focus.ts'
-import { buildCards, gridFor } from '../design/cards.ts'
+import { APP_WIDTH, buildCards, gridFor } from '../design/cards.ts'
 import { hex, TOKENS } from '../design/tokens.ts'
 import type { LibraryItem } from '../core/contract.ts'
 import {
@@ -35,44 +35,44 @@ const ROUTE = '/browse'
 
 export default Blits.Component('Browse', {
   template: `
-    <Element w="1920" h="1080" color="$background">
-      <Text x="$pad" y="$pad" content="$heading" size="$headingSize" color="$foreground" />
-      <Text x="$pad" y="$subY" content="$subheading" size="$bodySize" color="$muted" />
+    <Element w="1920" h="1080" :color="$background">
+      <Text :x="$pad" :y="$pad" :content="$heading" :size="$headingSize" :color="$foreground" />
+      <Text :x="$pad" :y="$subY" :content="$subheading" :size="$bodySize" :color="$muted" />
 
       <Element
         :for="card in $cards"
         key="$card.id"
-        x="$card.x"
-        y="$card.y"
-        w="$card.width"
-        h="$card.height"
+        :x="$card.x"
+        :y="$card.y"
+        :w="$card.width"
+        :h="$card.height"
         :color="$card.fill"
         :scale="$card.scale"
-        rounded="$radius"
+        :rounded="$radius"
       >
         <Element
           x="0"
           y="0"
-          w="$card.width"
-          h="$artHeight"
-          color="$surface2"
-          rounded="$radius"
+          :w="$card.width"
+          :h="$artHeight"
+          :color="$surface2"
+          :rounded="$radius"
         />
         <Text
-          x="$fieldX"
-          y="$titleY"
-          content="$card.title"
-          size="$titleSize"
-          color="$card.titleColor"
+          :x="$fieldX"
+          :y="$titleY"
+          :content="$card.title"
+          :size="$titleSize"
+          :color="$card.titleColor"
           maxlines="1"
           textoverflow="ellipsis"
         />
         <Text
-          x="$fieldX"
-          y="$subtitleY"
-          content="$card.subtitle"
-          size="$captionSize"
-          color="$card.subtitleColor"
+          :x="$fieldX"
+          :y="$subtitleY"
+          :content="$card.subtitle"
+          :size="$captionSize"
+          :color="$card.subtitleColor"
           maxlines="1"
           textoverflow="ellipsis"
         />
@@ -80,27 +80,27 @@ export default Blits.Component('Browse', {
           x="0"
           :y="$progressY"
           :w="$card.progressWidth"
-          h="$barHeight"
+          :h="$barHeight"
           :color="$card.progressColor"
           :show="$card.progressVisible"
         />
       </Element>
 
       <Element :show="$emptyTitle !== ''">
-        <Text x="$pad" y="$emptyY" content="$emptyTitle" size="$titleSize" color="$foreground" />
+        <Text :x="$pad" :y="$emptyY" :content="$emptyTitle" :size="$titleSize" :color="$foreground" />
         <Text
-          x="$pad"
-          y="$emptyDetailY"
-          content="$emptyDetail"
-          size="$bodySize"
-          color="$muted"
+          :x="$pad"
+          :y="$emptyDetailY"
+          :content="$emptyDetail"
+          :size="$bodySize"
+          :color="$muted"
           maxlines="3"
           wordwrap="true"
           maxwidth="1180"
         />
       </Element>
 
-      <Text x="$pad" y="$footY" content="$footer" size="$captionSize" color="$disabled" />
+      <Text :x="$pad" :y="$footY" :content="$footer" :size="$captionSize" :color="$disabled" />
     </Element>
   `,
   state() {
@@ -117,6 +117,18 @@ export default Blits.Component('Browse', {
       bodySize: Math.round(TOKENS.type.body),
       captionSize: Math.round(TOKENS.type.caption),
       subY: Math.round(TOKENS.spacing.shellPad + TOKENS.type.title * 1.4),
+      // The grid's numbers, copied out of `computed.metrics` by `applyLayout` before the
+      // first paint. A template resolves `$name` against state only, so a value that
+      // lives on a computed object is `undefined` here and its node is never drawn.
+      artHeight: 0,
+      fieldX: 0,
+      titleY: 0,
+      subtitleY: 0,
+      progressY: 0,
+      barHeight: 6,
+      emptyY: 0,
+      emptyDetailY: 0,
+      footY: 0,
       heading: 'Library',
       subheading: '',
       footer: '',
@@ -130,19 +142,29 @@ export default Blits.Component('Browse', {
     }
   },
   computed: {
+    /**
+     * The grid, sized to the band this screen actually leaves for it.
+     *
+     * The bound matters: `gridFor` shrinks the cards until they fit between the header
+     * and the footer, so a page cannot be drawn off the bottom of the television.
+     */
     grid() {
-      return gridFor(COLUMNS, ROWS)
+      return gridFor(COLUMNS, ROWS, TOKENS, APP_WIDTH, {
+        top: Math.round(
+          TOKENS.spacing.shellPad + TOKENS.type.title * 1.4 + TOKENS.type.body * 3,
+        ),
+        bottom: 1080 - Math.round(TOKENS.spacing.shellPad + TOKENS.type.body * 2),
+      })
     },
     metrics() {
       const geometry = this.grid
       return {
         artHeight: geometry.artHeight,
-        titleY: geometry.artHeight + Math.round(TOKENS.type.caption),
-        subtitleY: geometry.artHeight + Math.round(TOKENS.type.caption + TOKENS.type.bodyLg * 1.5),
+        titleY: geometry.titleY,
+        subtitleY: geometry.subtitleY,
         progressY: geometry.artHeight - 6,
         barHeight: 6,
         fieldX: Math.round(TOKENS.spacing.fieldX),
-        gridOffsetY: Math.round(TOKENS.spacing.shellPad + TOKENS.type.title * 1.4 + TOKENS.type.body * 3),
         emptyY: Math.round(TOKENS.spacing.shellPad + TOKENS.type.title * 2.6),
         emptyDetailY: Math.round(TOKENS.spacing.shellPad + TOKENS.type.title * 3.6),
         footY: 1080 - Math.round(TOKENS.spacing.shellPad + TOKENS.type.body * 2),
@@ -152,6 +174,7 @@ export default Blits.Component('Browse', {
   hooks: {
     ready() {
       this.$focus()
+      this.applyLayout()
       this.reload()
     },
     focus() {
@@ -186,6 +209,19 @@ export default Blits.Component('Browse', {
     },
   },
   methods: {
+    /** Copies the derived geometry into state, where the template can see it. */
+    applyLayout(): void {
+      const metrics = this.metrics
+      this.artHeight = metrics.artHeight
+      this.fieldX = metrics.fieldX
+      this.titleY = metrics.titleY
+      this.subtitleY = metrics.subtitleY
+      this.progressY = metrics.progressY
+      this.barHeight = metrics.barHeight
+      this.emptyY = metrics.emptyY
+      this.emptyDetailY = metrics.emptyDetailY
+      this.footY = metrics.footY
+    },
     /** Reads the store, clamps the page, and rebuilds the visible page. */
     reload() {
       const all = items()
@@ -222,14 +258,9 @@ export default Blits.Component('Browse', {
         ? 'Enter plays · ►| next page · |◄ previous page · Back returns'
         : 'Browser preview — nothing here proves TV playback'
     },
-    /** Places the page's cards, offset below this screen's header. */
+    /** Places the page's cards. The grid already starts below this screen's header. */
     build(visible: readonly LibraryItem[]): ReturnType<typeof buildCards> {
-      const geometry = this.grid
-      const offset = this.metrics.gridOffsetY - geometry.originY
-      return buildCards(visible, this.focusIndex, geometry, TOKENS).map((card) => ({
-        ...card,
-        y: card.y + offset,
-      }))
+      return buildCards(visible, this.focusIndex, this.grid, TOKENS)
     },
     /** Moves the cursor by one press, by the rules `core/focus.ts` tests. */
     move(direction: Direction) {
