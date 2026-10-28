@@ -1061,6 +1061,12 @@ fn read_tracks(core: &Mpv) -> Vec<MediaTrack> {
             // and inventing a kind for it would put a dead control on screen.
             _ => continue,
         };
+        // Cover art is a video stream that holds one still frame (`image=yes` in
+        // `track-list`). It is not a picture to play: listing it would offer the
+        // viewer a video track that replaces the film with its own poster.
+        if kind == TrackKind::Video && field("image").as_deref() == Some("yes") {
+            continue;
+        }
         let Some(id) = core.get_i64(&format!("track-list/{index}/id")).ok() else {
             continue;
         };

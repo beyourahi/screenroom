@@ -943,6 +943,18 @@ impl App {
     /// and the disk, and a poster can wait — which is also the rule that keeps
     /// watching from being interrupted by background work.
     fn ensure_artwork(&mut self) {
+        self.queue_artwork(false);
+    }
+
+    /// Queues posters for what is on screen, and optionally for the library.
+    ///
+    /// `visible_only` is what the poll loop uses to refill a freed queue slot: a
+    /// page of cards must not sit blank while the viewer waits, but the queue must
+    /// not turn into an idle marathon either — extracting a poster for every work
+    /// in a 309-work library is minutes of ffmpeg and disk, which is not something
+    /// to start behind the viewer's back. The rest of the library fills in a few at
+    /// a time as they navigate.
+    fn queue_artwork(&mut self, visible_only: bool) {
         if self.screen == Screen::Player {
             return;
         }
@@ -986,6 +998,9 @@ impl App {
             Err(error) => return self.report(&error),
         };
         if candidates.is_empty() {
+            if visible_only {
+                return;
+            }
             // Nothing on screen needs a poster, so the queue takes a few others
             // and the library fills in while the viewer reads.
             candidates = match self.library.artwork_candidates(ARTWORK_IDLE_BATCH) {
@@ -1017,11 +1032,18 @@ impl App {
     }
 
     /// Takes whatever the extractor finished since the last tick.
-    fn drain_artwork(&mut self) {
+    ///
+    /// Returns how many events were handled. The caller uses that to refill the
+    /// queue: the queue is 16 deep and a Browse page shows more than 16 works, so
+    /// without a refill the cards past the sixteenth stayed blank until the viewer
+    /// pressed a key.
+    fn drain_artwork(&mut self) -> usize {
         let Some(extractor) = &self.extractor else {
-            return;
+            return 0;
         };
+        let mut handled = 0_usize;
         for event in extractor.poll() {
+            handled += 1;
             match event {
                 ArtworkEvent::Stored { work_id } => {
                     self.artwork_queued.remove(&work_id);
@@ -1050,6 +1072,7 @@ impl App {
                 }
             }
         }
+        handled
     }
 
     /// Keeps the keyboard cursor inside the loaded page.
@@ -1336,7 +1359,12 @@ impl App {
 
     fn poll(&mut self) {
         self.drain_scan();
-        self.drain_artwork();
+        // A finished extraction frees a queue slot; fill it in the same tick, or the
+        // rest of the visible page never gets a poster. Not on every tick: the
+        // refill asks the database which works still need one.
+        if self.drain_artwork() > 0 {
+            self.queue_artwork(true);
+        }
         let Some(player) = &self.player else { return };
         let snapshot = player.snapshot();
         let changed_frame = snapshot.frame.as_ref().is_some_and(|frame| {
