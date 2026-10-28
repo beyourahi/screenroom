@@ -147,10 +147,15 @@ impl Library {
         let _ = std::fs::remove_file(&staging);
 
         // Scoped so the connection borrow ends before the file is moved.
-        {
+        let outcome = (|| -> Result<()> {
             let connection = self.connection();
             connection.execute("VACUUM INTO ?1", [staging.to_string_lossy().to_string()])?;
             stamp(&staging)?;
+            Ok(())
+        })();
+        if let Err(error) = outcome {
+            let _ = std::fs::remove_file(&staging);
+            return Err(error);
         }
 
         std::fs::rename(&staging, &destination).map_err(|error| {
@@ -416,7 +421,7 @@ fn safety_path(library: &Path) -> PathBuf {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "library".to_string());
-    library.with_file_name(format!("{name}.before-restore"))
+    library.with_file_name(format!("{name}.{}.before-restore", new_id()))
 }
 
 /// True when both paths name the same file on disk.

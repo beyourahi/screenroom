@@ -335,6 +335,47 @@ fn a_restore_keeps_the_previous_library_beside_it() {
 }
 
 #[test]
+fn restore_safety_copies_are_unique_and_safe_to_restore_from() {
+    let directory = TempDir::new().expect("temp dir");
+    let (library, _source) = populated(&directory);
+    let backup_path = directory.path().join("copy.db");
+    library.backup_to(&backup_path).expect("backup");
+
+    let first = library
+        .restore_from(&backup_path)
+        .unwrap()
+        .previous_saved_to
+        .unwrap();
+    let first_count = Library::open(&first)
+        .unwrap()
+        .count(&screenroom_core::LibraryQuery::default())
+        .unwrap();
+    library.restore_from(&first).unwrap();
+    assert_eq!(
+        Library::open(&first)
+            .unwrap()
+            .count(&screenroom_core::LibraryQuery::default())
+            .unwrap(),
+        first_count,
+        "restoring from a safety copy must leave that source intact"
+    );
+    let second = library
+        .restore_from(&backup_path)
+        .unwrap()
+        .previous_saved_to
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(
+        Library::open(&first)
+            .unwrap()
+            .count(&screenroom_core::LibraryQuery::default())
+            .unwrap(),
+        first_count,
+        "a later restore must not overwrite an earlier recovery copy"
+    );
+}
+
+#[test]
 fn a_backup_refuses_to_write_over_the_library_itself() {
     let directory = TempDir::new().expect("temp dir");
     let (library, _source) = populated(&directory);
@@ -453,12 +494,23 @@ fn inspecting_a_backup_does_not_change_it() {
 fn a_failed_backup_leaves_no_partial_file_behind() {
     let directory = TempDir::new().expect("temp dir");
     let (library, _source) = populated(&directory);
-    // A folder cannot be replaced by a file, so the final move fails.
-    let blocked = directory.path().join("blocked");
-    fs::create_dir(&blocked).unwrap();
+    let live = library.path().unwrap();
+    drop(library);
+    let connection = rusqlite::Connection::open(&live).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_backup_stamp BEFORE INSERT ON settings
+             BEGIN SELECT RAISE(ABORT, 'test stamp failure'); END;",
+        )
+        .unwrap();
+    drop(connection);
+    let library = Library::open(&live).unwrap();
 
-    let error = library.backup_to(&blocked).unwrap_err();
-    assert_eq!(error.code(), "backup_is_folder");
+    assert!(
+        library
+            .backup_to(directory.path().join("failed.db"))
+            .is_err()
+    );
     let leftovers: Vec<_> = fs::read_dir(directory.path())
         .unwrap()
         .filter_map(|entry| entry.ok())
