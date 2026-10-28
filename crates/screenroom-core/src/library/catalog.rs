@@ -7,7 +7,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use rusqlite::types::Value;
-use rusqlite::{Row, params, params_from_iter};
+use rusqlite::{OptionalExtension, Row, params, params_from_iter};
 
 use super::{Library, LibraryQuery, new_id, now_ms};
 use crate::domain::{LibraryItem, MediaKind};
@@ -155,7 +155,8 @@ impl Library {
             let mut rows = statement.query([offset])?;
             while let Some(row) = rows.next()? {
                 found += 1;
-                for label in serde_json::from_str::<Vec<String>>(&row.get::<_, String>(0)?)? {
+                let genres = row.get::<_, String>(0)?;
+                for label in serde_json::from_str::<Vec<String>>(&genres).unwrap_or_default() {
                     let label = label.trim().to_string();
                     if !label.is_empty() && !labels.contains(&label) {
                         labels.push(label);
@@ -442,7 +443,7 @@ impl Library {
                 params![identity_key, parsed.kind.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .ok();
+            .optional()?;
         let (work_id, work_is_new) = match &existing_work {
             Some((work_id, _)) => (work_id.clone(), false),
             None => {
@@ -499,7 +500,7 @@ impl Library {
                     params![work_id, season],
                     |row| row.get(0),
                 )
-                .ok()
+                .optional()?
             {
                 Some(id) => id,
                 None => {
@@ -519,7 +520,7 @@ impl Library {
                         params![season_id, number],
                         |row| row.get(0),
                     )
-                    .ok()
+                    .optional()?
                 {
                     Some(id) => id,
                     None => {
@@ -552,10 +553,10 @@ impl Library {
         Ok(file_id)
     }
 
-    /// Completes a scan, clearing availability for files this scan did not see.
+    /// Completes a scan, clearing availability for unseen or confirmed-missing files.
     ///
-    /// Only a *complete* traversal may withdraw availability; a bounded or
-    /// cancelled scan must not hide files it never reached.
+    /// Partial scans only stat unseen locators while the source root resolves;
+    /// bounded and cancelled scans never hide files they could not reach.
     pub fn finish_scan(
         &self,
         source_id: &str,
@@ -586,17 +587,43 @@ impl Library {
                 "The source changed while scanning. Restart the scan.",
             ));
         }
+        let root = Path::new(&root_path);
+        let Ok(resolved_root) = std::fs::canonicalize(root) else {
+            tx.commit()?;
+            return Ok(());
+        };
+        if self.path_key(&resolved_root) != self.path_key(root) {
+            tx.commit()?;
+            return Ok(());
+        }
         if complete {
             tx.execute(
                 "UPDATE files SET available = 0
                  WHERE source_id = ?1 AND (last_scan_id IS NULL OR last_scan_id != ?2)",
                 params![source_id, scan_id],
             )?;
+            tx.execute(
+                "UPDATE sources SET state = 'available', last_scan_ms = ?1 WHERE id = ?2",
+                params![now_ms(), source_id],
+            )?;
+        } else {
+            let mut statement = tx.prepare(
+                "SELECT id, relative_path FROM files WHERE source_id = ?1 AND available = 1
+                 AND (last_scan_id IS NULL OR last_scan_id != ?2)",
+            )?;
+            let locators = statement
+                .query_map(params![source_id, scan_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            for (id, relative_path) in locators {
+                if matches!(std::fs::metadata(root.join(relative_path)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+                {
+                    tx.execute("UPDATE files SET available = 0 WHERE id = ?1", [id])?;
+                }
+            }
         }
-        tx.execute(
-            "UPDATE sources SET state = 'available', last_scan_ms = ?1 WHERE id = ?2",
-            params![now_ms(), source_id],
-        )?;
         tx.commit()?;
         Ok(())
     }
@@ -774,4 +801,41 @@ fn item_from_row(row: &Row<'_>) -> rusqlite::Result<LibraryItem> {
         watchlisted: row.get::<_, i64>("watchlisted")? == 1,
         manual_match: row.get::<_, i64>("manual_match")? == 1,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Ingest;
+
+    #[test]
+    fn malformed_genres_do_not_hide_other_known_genres() {
+        let directory = tempfile::tempdir().unwrap();
+        let library = Library::open_in_memory().unwrap();
+        let source = library.add_source(directory.path(), None).unwrap();
+        let parsed = parse_filename("Film.2020.mkv", None);
+        library
+            .ingest_file(Ingest {
+                source_id: &source.id,
+                relative_path: "Film.2020.mkv",
+                fingerprint: "film",
+                size: 1,
+                modified_ms: 1,
+                scan_id: "test",
+                parsed: Some(&parsed),
+                expected_root: Some(&source.root_path),
+            })
+            .unwrap();
+        let work = library
+            .items(&LibraryQuery::page(1))
+            .unwrap()
+            .remove(0)
+            .work_id;
+        library
+            .connection()
+            .execute("UPDATE works SET genres = '{' WHERE id = ?1", [&work])
+            .unwrap();
+
+        assert!(library.known_genres().unwrap().is_empty());
+    }
 }

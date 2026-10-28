@@ -8,8 +8,8 @@
 //!   is reported and skipped, not imported in half-written form.
 //! * Failures are per-entry [`ScanIssue`] values; one unreadable folder does not
 //!   abort the walk, and the scan reports whether results are complete.
-//! * Only a complete scan may withdraw availability, so a cancelled or bounded
-//!   scan can never make the library look empty.
+//! * A partial scan withdraws availability only for locators confirmed missing
+//!   while the root still resolves; cancellation and bounds never withdraw rows.
 //! * Nothing on disk is modified, moved or deleted.
 
 use std::collections::VecDeque;
@@ -94,7 +94,7 @@ pub struct ScanSummary {
     pub cancelled: bool,
     /// Whether the walk saw every entry and raised no issue.
     ///
-    /// Only a complete scan may withdraw availability from missing files.
+    /// Complete scans withdraw every unseen file; partial scans only stat locators.
     pub complete: bool,
 }
 
@@ -250,7 +250,11 @@ impl<'a> LibraryScanner<'a> {
                     issues.push_at(&path, &root, "outside_root");
                     continue;
                 };
-                let relative = relative.to_string_lossy().to_string();
+                let Some(relative) = relative.to_str() else {
+                    issues.push_at(&path, &root, "invalid_name");
+                    continue;
+                };
+                let relative = relative.to_string();
                 let Ok(file_type) = entry.file_type() else {
                     issues.push(&relative, "read_failed");
                     continue;
@@ -272,12 +276,14 @@ impl<'a> LibraryScanner<'a> {
                 if !file_type.is_file() || is_hidden_name(&entry.file_name()) || !is_media(&path) {
                     continue;
                 }
-                if !entry_has_utf8_name(&path) {
-                    issues.push(&relative, "invalid_name");
-                    continue;
-                }
-
-                match self.import(source_id, &root, &relative, &scan_id, token) {
+                match self.import(
+                    source_id,
+                    &root,
+                    &source.root_path,
+                    &relative,
+                    &scan_id,
+                    token,
+                ) {
                     Ok(()) => {
                         imported += 1;
                         on_update(&ScanUpdate {
@@ -336,6 +342,7 @@ impl<'a> LibraryScanner<'a> {
         &self,
         source_id: &str,
         root: &Path,
+        expected_root: &str,
         relative: &str,
         scan_id: &str,
         token: &ScanToken,
@@ -396,7 +403,7 @@ impl<'a> LibraryScanner<'a> {
             modified_ms,
             scan_id,
             parsed: Some(&parsed),
-            expected_root: Some(&root.to_string_lossy()),
+            expected_root: Some(expected_root),
         })?;
         Ok(())
     }
@@ -439,12 +446,6 @@ fn is_media(path: &Path) -> bool {
     path.extension()
         .map(|extension| extension.to_string_lossy().to_lowercase())
         .is_some_and(|extension| MEDIA_EXTENSIONS.contains(&extension.as_str()))
-}
-
-fn entry_has_utf8_name(path: &Path) -> bool {
-    path.file_name()
-        .map(|name| name.to_str().is_some())
-        .unwrap_or(false)
 }
 
 fn is_season_folder(name: &str) -> bool {

@@ -54,6 +54,63 @@ fn scans_media_and_reports_skipped_entries() {
 }
 
 #[test]
+fn scan_ingest_accepts_the_stored_root_spelling() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("media");
+    fs::create_dir_all(&root).unwrap();
+    write_settled(&root.join("Film.2020.mkv"), b"film");
+    let db = dir.path().join("library.db");
+    let library = Library::open(&db).unwrap();
+    let source = library.add_source(&root, None).unwrap();
+    drop(library);
+
+    let alternate = format!("{}//media", root.parent().unwrap().display());
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute(
+            "UPDATE sources SET root_path = ?1 WHERE id = ?2",
+            rusqlite::params![alternate.to_string_lossy(), source.id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let library = Library::open(&db).unwrap();
+    let summary = scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+    assert_eq!(summary.imported, 1, "issues: {:?}", summary.issues);
+    assert!(summary.complete, "issues: {:?}", summary.issues);
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_parent_directory_is_skipped_as_invalid_name() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = TempDir::new().unwrap();
+    let mut folder = b"bad".to_vec();
+    folder.push(0xff);
+    let path = dir.path().join(std::ffi::OsStr::from_bytes(&folder));
+    if let Err(error) = fs::create_dir(&path) {
+        eprintln!("SKIP: filesystem rejected a non-UTF-8 path component: {error}");
+        return;
+    }
+    write_settled(&path.join("Film.2020.mkv"), b"film");
+    let library = Library::open_in_memory().unwrap();
+    let source = library.add_source(dir.path(), None).unwrap();
+    let summary = scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+    assert!(
+        summary
+            .issues
+            .iter()
+            .any(|issue| issue.code == "invalid_name")
+    );
+    assert_eq!(summary.imported, 0);
+}
+
+#[test]
 fn apple_double_companions_are_not_media() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
@@ -205,6 +262,47 @@ fn complete_rescan_withdraws_availability_without_losing_progress() {
         ..LibraryQuery::page(10)
     };
     assert_eq!(library.count(&only_available).unwrap(), 1);
+}
+
+#[test]
+fn partial_scan_withdraws_only_locators_that_are_confirmed_missing() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write_settled(&root.join("Gone.2020.mkv"), b"gone");
+    write_settled(&root.join("Keep.2020.mkv"), b"keep");
+    let library = Library::open_in_memory().unwrap();
+    let source = library.add_source(root, None).unwrap();
+    scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+    let last_scan = library.source(&source.id).unwrap().last_scan_ms;
+    std::thread::sleep(Duration::from_millis(2));
+
+    fs::remove_file(root.join("Gone.2020.mkv")).unwrap();
+    write_settled(&root.join("Downloading.2020.mkv"), b"partial");
+    fs::write(root.join("Downloading.2020.mkv.part"), b"downloading").unwrap();
+    let summary = scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+
+    assert!(!summary.complete);
+    let items = library.items(&LibraryQuery::page(10)).unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .find(|item| item.filename.starts_with("Gone"))
+            .unwrap()
+            .available,
+        false
+    );
+    assert!(
+        items
+            .iter()
+            .find(|item| item.filename.starts_with("Keep"))
+            .unwrap()
+            .available
+    );
+    assert_eq!(library.source(&source.id).unwrap().last_scan_ms, last_scan);
 }
 
 #[test]
