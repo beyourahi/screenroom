@@ -27,7 +27,7 @@
 
 import type { TrackChoice } from '../core/tracks.ts'
 import { readTracks, toDisplayRect } from './avplay-pure.ts'
-import { tizenGlobal, type AvPlay } from './tizen.ts'
+import { webapisGlobal, type AvPlay } from './tizen.ts'
 
 /** Which implementation is running. */
 export type PlaybackBackend = 'avplay' | 'video'
@@ -537,7 +537,9 @@ export function startPlayback(
   events: PlaybackEvents,
   options: StartOptions = {},
 ): PlaybackSession {
-  const player = tizenGlobal()?.webapis?.avplay
+  // `webapis` is a sibling of `tizen` on a TV. Reading `tizen.webapis.avplay` returned
+  // `undefined` on the owner's set, which silently selected the `<video>` fallback.
+  const player = webapisGlobal()?.avplay
   if (player !== undefined) {
     return createAvPlaySession(player, uri, startMs, events, options)
   }

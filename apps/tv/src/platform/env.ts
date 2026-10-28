@@ -11,7 +11,7 @@
  * present and usable, and the notes carry the limits the booleans cannot.
  */
 
-import { tizenGlobal } from './tizen.ts'
+import { tizenGlobal, webapisGlobal } from './tizen.ts'
 
 /** Which host the bundle is executing in. */
 export type HostKind =
@@ -37,12 +37,22 @@ export interface HostCapabilities {
   readonly notes: readonly string[]
 }
 
-/** The Tizen system info the app may read, when the host provides it. */
+/** The device's own identity, as the host reports it. Every field degrades to `null`. */
 export interface DeviceInfo {
-  /** The TV model code, as the platform reports it, or `null`. */
+  /** The TV model, as the platform reports it (e.g. `UAU8000`), or `null`. */
   readonly model: string | null
   readonly firmwareVersion: string | null
+  /**
+   * The Tizen platform version, from `tizen.systeminfo` only.
+   *
+   * It is deliberately *not* filled from `productinfo.getVersion()`: on the owner's set
+   * that call answers `3.7`, which is the television's product version, and printing it
+   * under a "Tizen version" label would be a false receipt on a set whose engine is
+   * Tizen 6.0. A field that cannot be answered stays `null` and says so.
+   */
   readonly platformVersion: string | null
+  /** The product version the Samsung API reports, which is a different thing. */
+  readonly productVersion: string | null
 }
 
 /**
@@ -67,7 +77,10 @@ function probeLocalStorage(): boolean {
 /** Reads the host capabilities. Called once, and its result is what Settings shows. */
 export function detectHost(): HostCapabilities {
   const tizen = tizenGlobal()
-  const avplay = tizen?.webapis?.avplay !== undefined
+  // AVPlay lives on `window.webapis`, not on `window.tizen` — reading the wrong one
+  // reported `avplay=0` on the owner's television and sent playback to a `<video>`
+  // fallback that cannot open a local file on a TV.
+  const avplay = webapisGlobal()?.avplay !== undefined
   const filesystem = tizen?.filesystem !== undefined
   const inputdevice = tizen?.tvinputdevice !== undefined
   const durableStorage = probeLocalStorage()
@@ -116,8 +129,32 @@ export function hostSummary(capabilities: HostCapabilities): string {
   return 'Desktop browser preview: AVPlay is absent, so nothing here proves TV playback.'
 }
 
-/** Reads what the platform says about the device. Every field degrades to `null`. */
+/**
+ * Reads what the platform says about the device. Every field degrades to `null`.
+ *
+ * The source is `webapis.productinfo`, which is the Samsung API that actually answers
+ * on a TV; the Tizen `systeminfo` property names this code used first return nothing on
+ * the owner's set (its own boot record read `model=unknown`). `systeminfo` is kept as a
+ * fallback rather than deleted, because a host that has it and no product API is still
+ * better served by an answer than by `null`.
+ */
 export function readDeviceInfo(): DeviceInfo {
+  const product = webapisGlobal()?.productinfo
+  const fromProduct = (name: 'getModel' | 'getFirmware' | 'getVersion'): string | null => {
+    const read = product?.[name]
+    if (typeof read !== 'function') {
+      return null
+    }
+    try {
+      // Called on the object, not detached: the platform's implementation is a native
+      // binding and a bare function reference loses `this`.
+      const value = read.call(product)
+      return typeof value === 'string' && value.length > 0 ? value : null
+    } catch {
+      return null
+    }
+  }
+
   const systeminfo = tizenGlobal()?.systeminfo
   const read = (key: string): string | null => {
     if (systeminfo === undefined) {
@@ -132,8 +169,10 @@ export function readDeviceInfo(): DeviceInfo {
     }
   }
   return {
-    model: read('http://tizen.org/system/model_name'),
-    firmwareVersion: read('http://tizen.org/system/build_version'),
+    model: fromProduct('getModel') ?? read('http://tizen.org/system/model_name'),
+    firmwareVersion:
+      fromProduct('getFirmware') ?? read('http://tizen.org/system/build_version'),
     platformVersion: read('http://tizen.org/system/platform.version'),
+    productVersion: fromProduct('getVersion'),
   }
 }

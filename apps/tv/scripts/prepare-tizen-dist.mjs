@@ -12,9 +12,19 @@
  *
  * * `main.js` exists and is referenced by `index.html`. A bundle that is built but not
  *   linked is a white screen with no error.
+ * * **`main.js` is loaded as a classic deferred script, not as a module.** Vite emits
+ *   `<script type="module" crossorigin src=”./main.js”>`, and a widget runs from a
+ *   `file://` origin where Chromium refuses module scripts on CORS grounds. The result
+ *   is an installed app that launches, shows nothing, and reports nothing — which is
+ *   exactly what the first build of this client did on the owner's TV. `defer` keeps
+ *   the execution order a module would have had (after the document is parsed, so the
+ *   mounted element exists), which is why the tag is rewritten rather than dropped.
  * * no reference is absolute. The widget has no origin, so `/assets/main.js` resolves
  *   against nothing. Vite is configured for relative output, and this verifies it
  *   rather than trusting the config.
+ * * the bundle contains no module-only syntax. `import.meta` and a top-level
+ *   `import`/`export` are parse-time errors in a classic script, so one leftover would
+ *   turn the whole bundle into the same blank screen by a different route.
  * * `config.xml` names the same `index.html`, and carries the version this build was
  *   made from. A widget whose declared version drifts from its code cannot be told
  *   apart from the previous one once it is installed.
@@ -68,6 +78,17 @@ async function main() {
   if (!/<script[^>]+src=["']\.\/main\.js["']/.test(html)) {
     fail('dist/index.html does not load ./main.js relatively; the widget would load nothing.')
   }
+
+  // Rewrite the module tag Vite emits into one a `file://` widget can actually run.
+  const stagedHtml = html
+    .replace(/<script[^>]*\bsrc=["']\.\/main\.js["'][^>]*><\/script>/, '<script defer src="./main.js"></script>')
+    .replace(/\s*<link[^>]*rel=["']modulepreload["'][^>]*>/g, '')
+  if (!stagedHtml.includes('<script defer src="./main.js"></script>')) {
+    fail('could not rewrite the bundle tag to a classic deferred script; the widget would load nothing.')
+  }
+  if (/type=["']module["']/.test(stagedHtml)) {
+    fail('index.html still contains a module script; a widget cannot run one from file://.')
+  }
   // An absolute URL here would work in the dev server and fail in the widget, which is
   // exactly the kind of difference that survives until the TV.
   const absolute = [...html.matchAll(/(?:src|href)=["'](\/[^"']*)["']/g)].map((match) => match[1])
@@ -91,7 +112,7 @@ async function main() {
   await mkdir(stageDir, { recursive: true })
   // Only the built page and the widget's own metadata: anything else in the directory
   // is something the TV would download for no reason, or something that must not ship.
-  await copyFile(join(distDir, 'index.html'), join(stageDir, 'index.html'))
+  await writeFile(join(stageDir, 'index.html'), stagedHtml, 'utf8')
   await copyFile(join(distDir, 'main.js'), join(stageDir, 'main.js'))
   if (existsSync(join(distDir, 'assets'))) {
     await copyTree(join(distDir, 'assets'), join(stageDir, 'assets'))
@@ -109,6 +130,13 @@ async function main() {
   }
 
   const bundle = await readFile(join(stageDir, 'main.js'))
+  const text = bundle.toString('utf8')
+  if (text.includes('import.meta')) {
+    fail('main.js contains import.meta, which is a parse error in a classic script.')
+  }
+  if (/^\s*(?:import|export)\s/m.test(text)) {
+    fail('main.js contains a top-level import/export, which a classic script cannot parse.')
+  }
   const digest = createHash('sha256').update(bundle).digest('hex')
   console.log(`prepare-tizen-dist: staged ${stageDir}`)
   console.log(

@@ -22,7 +22,68 @@
 import Blits from '@lightningjs/blits'
 
 import App from './App.ts'
+import { recordEvidence } from './platform/evidence.ts'
 import { REMOTE_KEYMAP } from './platform/keys.ts'
+
+/**
+ * Records anything that would otherwise only reach a console nobody can read.
+ *
+ * A retail TV gives this Mac no log, no screenshot and no inspector, so an uncaught
+ * error is indistinguishable from a blank screen with the app still "running" — which
+ * is exactly the first install's failure. These two listeners turn that silence into a
+ * line in the app's own storage, readable after an `sdb pull`.
+ *
+ * Registered before `Blits.Launch`, so a failure *during* launch is caught too, and
+ * the handlers never throw: an error reporter that breaks the app it reports on is
+ * worse than no reporter.
+ */
+function recordFailures(): void {
+  const target = globalThis as {
+    addEventListener?: (type: string, listener: (event: unknown) => void) => void
+  }
+  if (typeof target.addEventListener !== 'function') {
+    return
+  }
+  target.addEventListener('error', (event) => {
+    const detail = event as { message?: string; filename?: string; lineno?: number; error?: unknown }
+    const message = detail.message ?? (detail.error instanceof Error ? detail.error.message : 'error')
+    const where = detail.filename ? ` at ${detail.filename.split('/').pop()}:${detail.lineno ?? 0}` : ''
+    recordEvidence('error', `${message}${where}`)
+  })
+  target.addEventListener('unhandledrejection', (event) => {
+    const reason = (event as { reason?: unknown }).reason
+    const message = reason instanceof Error ? reason.message : String(reason)
+    recordEvidence('rejection', message)
+  })
+}
+
+/**
+ * Records what the renderer actually produced, shortly after launch.
+ *
+ * The canvas is the evidence that Lightning mounted and the GPU surface exists: a blank
+ * screen with a correctly sized canvas and no `error` entry is a drawing problem, while
+ * a blank screen with no canvas is a launch problem, and those have different fixes.
+ * The check is deferred because the element is created during launch.
+ */
+function recordRender(): void {
+  globalThis.setTimeout(() => {
+    try {
+      const canvases = Array.from(document.querySelectorAll('canvas'))
+      const first = canvases[0]
+      const painted = document.getElementById('app')?.childElementCount ?? 0
+      recordEvidence(
+        'render',
+        first === undefined
+          ? `canvases=0 mounted=${painted}`
+          : `canvases=${canvases.length} size=${first.width}x${first.height} mounted=${painted}`,
+      )
+    } catch (error) {
+      recordEvidence('render', `probe failed: ${error instanceof Error ? error.message : 'unknown'}`)
+    }
+  }, 700)
+}
+
+recordFailures()
 
 Blits.Launch(App, 'app', {
   w: 1920,
@@ -48,3 +109,5 @@ Blits.Launch(App, 'app', {
     baseline: 20,
   },
 })
+
+recordRender()

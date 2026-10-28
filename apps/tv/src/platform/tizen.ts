@@ -149,9 +149,26 @@ export interface TizenApplicationManager {
   getCurrentApplication(): { exit(): void }
 }
 
+/**
+ * The Samsung product API: what the set calls itself.
+ *
+ * This is the TV's own identity, and it is reported by `webapis.productinfo` rather
+ * than by `tizen.systeminfo` — the system-info property names the reference lists
+ * return nothing on a TV web widget. Every member is optional and read through a
+ * guard, because the API differs by model year.
+ */
+export interface TizenProductInfo {
+  getModel?(): string
+  getModelCode?(): string
+  getFirmware?(): string
+  getVersion?(): string
+  getDuid?(): string
+}
+
 /** The slice of `webapis` this client uses. */
 export interface TizenWebApis {
   readonly avplay?: AvPlay
+  readonly productinfo?: TizenProductInfo
 }
 
 /** The Tizen global, with only the used members. */
@@ -175,9 +192,28 @@ export function tizenGlobal(): TizenGlobal | null {
   return typeof candidate === 'object' && candidate !== null ? (candidate as TizenGlobal) : null
 }
 
+/**
+ * The `webapis` global, which is where AVPlay and the product API live.
+ *
+ * **This is a sibling of `tizen`, not a member of it.** `$WEBAPIS/webapis/webapis.js`
+ * installs `window.webapis`, while the device APIs live on `window.tizen`; reading
+ * `tizen.webapis.avplay` therefore returns `undefined` on every real television, and
+ * the client concluded it was running in a browser and fell back to a `<video>`
+ * element. That is what the first installed build reported from the TV itself
+ * (`avplay=0` with `filesystem=1`), and it would have meant no local playback at all.
+ * The nested form is still accepted as a fallback for hosts that expose it that way.
+ */
+export function webapisGlobal(): TizenWebApis | null {
+  const candidate = (globalThis as { webapis?: unknown }).webapis
+  if (typeof candidate === 'object' && candidate !== null) {
+    return candidate as TizenWebApis
+  }
+  return tizenGlobal()?.webapis ?? null
+}
+
 /** True when this host exposes AVPlay. */
 export function hasAvPlay(): boolean {
-  return tizenGlobal()?.webapis?.avplay !== undefined
+  return webapisGlobal()?.avplay !== undefined
 }
 
 /**

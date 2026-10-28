@@ -20,7 +20,7 @@ Current summary:
 | G3 libmpv frame presented through wgpu in an iced window | **PASSED on macOS** (30 fps, correct aspect, transport and resume verified in the window); Windows path **BLOCKED** |
 | G3b Audio output and audio/video sync | **PARTIAL** — audio clock and `avsync` measured (0.982× real time, 0.0 ms); not heard by a person |
 | G4 Desktop playback quality on owner hardware | **BLOCKED** (no Windows hardware) |
-| G5 Samsung Tizen physical device | **BLOCKED on the device** — the client now scans a drive, catalogues it and plays with a track menu off-device; nothing has run on a Tizen engine |
+| G5 Samsung Tizen physical device | **PARTIAL** — the signed package installs on the owner's set, the bundle executes there, and the TV itself reports a mounted 1920×1080 canvas; AVPlay is present; no drive has been walked and no frame, sound or remote press has been observed yet |
 | G6 Other TV platforms | **RETIRED** (LG webOS / Android TV out of scope, ADR-004) |
 | G7 iOS | **RETIRED** (out of scope, ADR-003) |
 | G8 Android TV + Media3 | **RETIRED** (out of scope, ADR-004) |
@@ -162,9 +162,9 @@ Each numbered item is its own receipt. Guessing at any of them is prohibited.
 
 ### What is settled without the device (2026-10-28)
 
-None of the seven items above is closer to passing, and none of them is being claimed.
-What did change is the **size of the unknown**: the parts that a Mac could answer are
-answered.
+Item 2 now passes on the television, and item 1 passes in its mechanism (the engine runs
+the bundle and mounts a correctly sized canvas) while its visual half is still open.
+Items 3–7 are untouched. What a Mac could answer, it answered:
 
 | Question the gate depends on | State |
 | --- | --- |
@@ -172,14 +172,52 @@ answered.
 | Is the client's own logic exercised? | **161 tests, 0 failures**, off-device and in `pnpm test`: the D-pad rule index-for-index against the desktop's, the progress guard, the store's durability rules, locator validation, AVPlay's display-rect maths and track reading, the scan rules and a simulated-Tizen walk of a whole drive, the track menu and next-episode rules, decoder preferences, the remote-key wiring of every screen, tokens and grid geometry |
 | Does the widget manifest ask for the right things? | **The privileges are the ones the code uses** — remote-key and filesystem-read, and the template's unused `application.launch` request is gone. The TV is still the only authority on whether it grants them, and a refused `listDirectory` is reported verbatim on the Settings screen rather than shown as an empty drive |
 | Can a signed package be produced? | **Yes.** `build/ScreenroomTV-0.1.0.wgt`, 157,202 bytes, sha256 `b7d82c49755ae1501bffe62040cd2263aaa181510d477d3c4196d8b5710ecc51`, produced by the `tizen-build-project` runner with **no** default-developer-certificate warning, and containing a `main.js` byte-identical to the tested bundle (`9b7cbda…97c4`) |
-| Is the TV authorised to install it? | **Unknown, and it is the first thing to check.** The `screenroom` signing profile is active; whether its distributor certificate lists this television's DUID is not something the Mac can see, and the TV will reject the chain if it does not |
-| Can the television be reached at all right now? | **No, checked rather than assumed (2026-10-28).** `remote-device-cli scan` swept `192.168.0.0/24` on SDB port 26101 and found **0 devices**; `sdb devices` lists nothing; Device Manager's saved-remote list holds **0 entries**, so there is no stored address to retry. The set is off, on another network, or out of developer mode — each of which the owner can settle in one step |
+| Is the TV authorised to install it? | **Yes, verified without printing either value.** The distributor chain is Samsung-issued (`CN=VD DEVELOPER Public CA Class` ← `VD DEVELOPER Public Root Class`), leaf valid 2026-10-27 → 2027-10-27, carrying exactly **one** `deviceid` binding; the DUID the set reports through `cert-manager acquire-duid` matches that binding (compared by hash, 2026-10-28) |
+| Can the television be reached? | **Yes.** Connected at `192.168.0.172:26101`; `sdb capability` reports `vendor_name:Samsung`, `profile_name:tv`, `platform_version:6.0`, `cpu_arch:armv7` |
 
-So item 2 is *approached* rather than passed: a package exists, but "signed `.wgt`
-installs" needs the television to accept it. Items 1 and 4–7 need it to run. Item 3
-needs a drive in it. **The remaining work is on the TV, not in the build** — the exact
-steps and the observable that settles each open question are in
-[`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md).
+### What has actually run on the television (2026-10-28)
+
+Measurements below are the television's own, read back with `sdb pull` — not the Mac's.
+The client writes them into its own `localStorage` because this firmware exposes no
+screenshot, no `dlog` over the network, no inspector port and no key injection, so
+otherwise an installed, launched app is indistinguishable from a working one.
+
+| What | Receipt |
+| --- | --- |
+| The signed `.wgt` installs | `vd_appinstall` reached `install completed`; `vd_applist` then lists `PlYByk3psw.ScreenroomTV` 0.1.0, 157,986 bytes — the packaged size, to the byte |
+| The app launches | `was_execute` → `launched`; the TV's own `use_count` increments per launch |
+| **The bundle executes** | the set wrote its own `boot` record: `host=tizen avplay=1 filesystem=1 inputdevice=1 storage=1 keys=9/refused=0 model=UAU8000 firmware=T-NKLAUABC-2310.0 product=3.7` |
+| **Lightning mounts a render surface** | the set wrote `canvases=1 size=1920x1080 mounted=1`, and **no** `error` or `rejection` entries |
+| The engine | `Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) … 76.0.3809.146/6.0 TV` — Chromium 76, which is why the bundle targets `es2019` |
+| The remote's extra keys | registration accepted **9 of 9** media/Info keys and refused none |
+| AVPlay is present | `avplay=1` after the namespace fix below |
+
+**Not yet observed on the set, and not claimed:** a single frame seen by a person,
+frame pacing or WebGL capability measured, a drive walked, any file played, a seek, a
+track change, a subtitle, a resume, focus at couch distance, or survival of a power
+cycle. Those are items 1 (visual part), 3, 4, 5, 6 and 7, and they need a person with
+the remote — the checklist in [`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md) is
+written for exactly that, with the observable that settles each one.
+
+### Three defects only the television could find (fixed, 2026-10-28)
+
+1. **The widget loaded its bundle as a module and drew nothing.** Vite emitted
+   `<script type="module" crossorigin src="./main.js">`, and a widget runs from a
+   `file://` origin where Chromium refuses module scripts on CORS grounds. Proven both
+   ways in the same origin class: the module build yields `0` canvases with
+   `blocked by CORS policy` on `main.js`, the fixed build mounts a 1920×1080 canvas. The
+   staged page now loads `<script defer src="./main.js">`, `import.meta.url` is
+   compiled away, and the staging step **fails the build** if a module script or
+   module-only syntax survives.
+2. **AVPlay was looked for in the wrong namespace.** The client read
+   `tizen.webapis.avplay`; `webapis` is a **sibling** of `tizen` on `window`. The set
+   reported `avplay=0 filesystem=1` — the contradiction that gave it away — and playback
+   would have used a `<video>` element that cannot open a local file on a TV.
+3. **The set's identity was unreachable.** `webapis.productinfo` needs its own
+   privilege (`http://developer.samsung.com/privilege/productinfo`); without it every
+   read returned nothing and the boot record said `model=unknown`. The value it returns
+   is now kept honestly: `product=3.7` is the **product** version and is no longer shown
+   under a "Tizen version" label, which would have been a confident false receipt.
 
 What this client now does off-device, and therefore does not have to be discovered on
 the television: it walks a mounted drive, parses film and episode identities from

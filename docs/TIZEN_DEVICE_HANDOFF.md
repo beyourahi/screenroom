@@ -4,11 +4,12 @@
 Tizen 6.0 web engine. This is the only TV in scope
 ([ADR-004](ADR-004_PERSONAL_EDITION_SCOPE.md)).
 
-**State: gate G5 is BLOCKED on the device, and the client is now a real local-media
-client off-device.** It lists the TV's drives, walks them, catalogues what it finds,
-plays a file through AVPlay with an audio/subtitle menu, remembers a position and
-offers the next episode. None of that has happened on a television, and this document
-does not pretend otherwise.
+**State (2026-10-28): the client is installed on the set and it runs there.** The
+signed package is installed, the television executes the bundle, Lightning mounts a
+1920×1080 canvas, AVPlay is present, and all nine extra remote keys were accepted — all
+of that read back from the TV itself, not inferred. **Nothing visual has been observed
+by a person, no drive has been walked and no file has played.** Checklist items 1
+(visual half), 3–7 are still open, and this document does not pretend otherwise.
 
 The rule it exists to follow: a packaged `.wgt`, a signed package, a Tizen Studio
 install, a simulated filesystem or a television emulator is **not** a TV test. Only the
@@ -29,12 +30,12 @@ pnpm build                   # typecheck + Vite + the Tizen staging step
 | Check | Result (2026-10-28) |
 | --- | --- |
 | `pnpm typecheck` | clean. Application source typechecks with **no ambient types at all** (`"types": []`), so a Node-only global cannot typecheck inside a component that has to run in a web widget; the tests are the only files that see Node's globals |
-| `pnpm test` | **161 tests, 0 failures** — the focus machine, the progress guard, the store and its durability rules, the scanner's rules, a whole-drive walk over a simulated Tizen filesystem, filename interpretation, the track menu and next-episode rule, decoder preferences, the remote-key wiring of every screen, relative-locator validation, AVPlay's display-rect maths and track reading, the design tokens and the card geometry. Per-suite counts are in [`TEST_PLAN.md`](TEST_PLAN.md) |
+| `pnpm test` | **180 tests, 0 failures** — the focus machine, the progress guard, the store and its durability rules, the scanner's rules, a whole-drive walk over a simulated Tizen filesystem, filename interpretation, the track menu and next-episode rule, decoder preferences, the remote-key wiring of every screen, relative-locator validation, AVPlay's display-rect maths and track reading, the design tokens and the card geometry. Per-suite counts are in [`TEST_PLAN.md`](TEST_PLAN.md) |
 | `pnpm build` | one 462,142-byte `main.js` and a 1,391-byte `index.html`; no code splitting (a widget has no server to fetch a second chunk from) |
 | `apps/tv/build/widget/` | the staged widget: `config.xml`, `icon.png`, `index.html`, `main.js`, and the Tizen project metadata. The staging step refuses to continue if the bundle is unlinked, missing, or referenced by an absolute path |
-| Signed package | **built.** `apps/tv/build/ScreenroomTV-0.1.0.wgt`, 157,202 bytes, sha256 `b7d82c49755ae1501bffe62040cd2263aaa181510d477d3c4196d8b5710ecc51` |
-| The packaged bundle | byte-identical to the tested one: `main.js` sha256 `9b7cbdaea4a9bc2b5b3b3855d6382593742a751032c8153b3c917176bae597c4` inside the `.wgt` and in `dist/` |
-| Package contents | exactly `author-signature.xml`, `config.xml`, `icon.png`, `index.html`, `main.js`, `signature1.xml` — nothing stray, and two privileges (`tv.inputdevice`, `filesystem.read`) in the manifest |
+| Signed package | **built and installed.** `apps/tv/build/ScreenroomTV-0.1.0.wgt`, 158,500 bytes on 2026-10-28; earlier builds of the same day were 157,202 → 157,986 → 158,079 → 158,101 → 158,462 bytes as the three device defects below were fixed. The hash changes with every one of those; quote the one the TV actually has (see section 2) |
+| The packaged bundle | byte-identical to the tested one, checked on every build: the `main.js` digest inside the `.wgt` equals the digest of `dist/main.js` printed by the staging step |
+| Package contents | exactly `author-signature.xml`, `config.xml`, `icon.png`, `index.html`, `main.js`, `signature1.xml` — nothing stray, and three privileges (`tv.inputdevice`, `filesystem.read`, `productinfo`) in the manifest |
 | Signing profile | one profile exists and is **active**: `screenroom` (name read only; no certificate material was inspected) |
 
 The package was produced through the `tizen-build-project` runner
@@ -62,7 +63,50 @@ emulator only.
 
 ---
 
-## 2. Device discovery, attempted and reported (2026-10-28)
+## 2. The set was reached (2026-10-28, supersedes the blocked report below)
+
+The television is on and in developer mode. `remote-device-cli connect` returned
+`connected` at `192.168.0.172:26101`, and `sdb capability` identifies it as
+`vendor_name:Samsung`, `profile_name:tv`, `platform_version:6.0`, `cpu_arch:armv7`.
+
+The distributor certificate was then checked **without printing certificate material
+or the DUID**: the package's chain is Samsung-issued, its leaf carries exactly one
+`deviceid` binding, and the DUID the set reports through `cert-manager acquire-duid`
+matches it. That is why the install was accepted rather than rejected with
+`Invalid certificate chain`.
+
+### What this firmware does *not* give a developer, and what replaced it
+
+| Wanted | Available? | Consequence |
+| --- | --- | --- |
+| `sdb shell 0 <anything>` | **No** — a short whitelist only (`applist`, `getduid`, `vd_applist`, `vd_appinstall`, `was_execute`) | no `ps`, no file listing, no `dmesg` |
+| Screenshot (`screenshot`, `capture`, `vd_screenshot`) | **No** | the screen cannot be photographed from a Mac |
+| `sdb dlog` over TCP | **No** — returns 0 lines | no console output |
+| Remote Web Inspector on port 9222 | **No** — `app_launcher` is absent, so an app cannot be debug-launched | no CDP, no DOM inspection |
+| Key injection (`sendkey`) | **No** | the remote must be pressed by a person |
+
+**The one channel that works is the app's own storage.** `sdb pull
+/opt/usr/home/owner/apps_rw/PlYByk3psw/data` returns the widget's Chromium profile,
+including `Local Storage/leveldb`, and the client writes a bounded evidence record
+there (`core/evidence.ts`). A `boot` line and a `render` line are what turned "it
+launched" into `host=tizen avplay=1 … canvases=1 size=1920x1080 mounted=1`.
+
+```bash
+CLI=~/.codex/plugins/cache/tizen-platform/tizen-sdk-skills/1.6.1/lib/cli/remote-device-cli.js
+node "$CLI" connect 192.168.0.172:26101
+SDB=~/.local/share/screenroom-toolchains/tizen/tools/sdb
+"$SDB" -s 192.168.0.172:26101 push apps/tv/build/ScreenroomTV-0.1.0.wgt \
+  /home/owner/share/tmp/sdk_tools/ScreenroomTV-0.1.0.wgt
+# `sdb install` only pushes on this firmware; the TV needs vd_appinstall.
+"$SDB" -s 192.168.0.172:26101 shell 0 vd_appinstall PlYByk3psw.ScreenroomTV \
+  /home/owner/share/tmp/sdk_tools/ScreenroomTV-0.1.0.wgt
+"$SDB" -s 192.168.0.172:26101 shell 0 was_execute PlYByk3psw.ScreenroomTV
+# read the set's own record:
+"$SDB" -s 192.168.0.172:26101 pull /opt/usr/home/owner/apps_rw/PlYByk3psw/data /tmp/sr-tv
+strings -a /tmp/sr-tv/data/Local\ Storage/leveldb/* | grep -E "^host=|canvases="
+```
+
+### The blocked report this replaces, kept for the audit trail
 
 The previous session's connection could not be recovered from here. What was checked,
 through the toolchain that is already configured rather than by hand:
@@ -120,6 +164,13 @@ with its type/state and whether this app will scan it, and what the last scan di
 Each numbered item is a separate receipt for gate G5
 ([`FEASIBILITY_GATES.md`](FEASIBILITY_GATES.md)). Record the model, the firmware the TV
 reports, the package hash above, and what was observed — not what was expected.
+
+**Where this stands (2026-10-28).** Item **2 passes** (installed, and the certificate
+provably authorises this set). Item **1 is half done**: the engine runs the bundle and
+the TV reports `canvases=1 size=1920x1080 mounted=1` with no JS errors, but nobody has
+*looked* at the screen — that is the half only a person can sign. Items **3–12 are
+open** and every one of them needs the remote in a hand, because this firmware accepts
+no synthetic key press.
 
 | # | G5 item | What to do on the TV | What counts as the receipt |
 | --- | --- | --- | --- |

@@ -242,6 +242,14 @@ export default Blits.Component('Settings', {
           value: info.platformVersion ?? 'not reported by this host',
         },
         {
+          // Separate from the Tizen version on purpose: the TV's product version is a
+          // different number (3.7 on this set), and showing it as the platform version
+          // would be exactly the kind of confident-but-wrong receipt this app avoids.
+          key: 'product',
+          label: 'Product version',
+          value: info.productVersion ?? 'not reported by this host',
+        },
+        {
           key: 'playback',
           label: 'Playback path',
           value: capabilities.avplay ? 'AVPlay (the TV decoder)' : '<video> element (browser preview)',

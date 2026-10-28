@@ -36,6 +36,7 @@ import {
 } from '../platform/media-roots.ts'
 import { walkRoot } from '../platform/scan.ts'
 import { createDeviceStorage } from '../platform/persist.ts'
+import { recordEvidence } from '../platform/evidence.ts'
 
 /** The library service, one per app run. */
 let service: LibraryService | null = null
@@ -80,7 +81,7 @@ export function keys(): KeyRegistration {
 
 /** The device identity, or an all-`null` reading on a host that reports none. */
 export function device(): DeviceInfo {
-  deviceInfo ??= { model: null, firmwareVersion: null, platformVersion: null }
+  deviceInfo ??= { model: null, firmwareVersion: null, platformVersion: null, productVersion: null }
   return deviceInfo
 }
 
@@ -171,6 +172,36 @@ export function prepare(): void {
   deviceInfo = readDeviceInfo()
   keyRegistration = registerRemoteKeys()
   startStorageWatch()
+  recordEvidence('boot', bootDetail())
+}
+
+/**
+ * The boot facts, as one line.
+ *
+ * This is the receipt a session that has no screenshot channel can actually read: it
+ * says whether the bundle ran at all, which engine ran it, whether the three platform
+ * APIs the client depends on were present, how many remote keys the set accepted, and
+ * what the set calls itself. A blank screen and a refused bundle look identical from
+ * the sofa; after a `sdb pull` they do not.
+ */
+function bootDetail(): string {
+  const caps = host()
+  const info = device()
+  const keysAccepted = keys()
+  const flag = (value: boolean): string => (value ? '1' : '0')
+  return [
+    `host=${caps.kind}`,
+    `avplay=${flag(caps.avplay)}`,
+    `filesystem=${flag(caps.filesystem)}`,
+    `inputdevice=${flag(caps.inputdevice)}`,
+    `storage=${flag(caps.durableStorage)}`,
+    `keys=${keysAccepted.registered.length}/refused=${keysAccepted.refused.length}`,
+    `model=${info.model ?? 'unknown'}`,
+    `firmware=${info.firmwareVersion ?? 'unknown'}`,
+    `platform=${info.platformVersion ?? 'unknown'}`,
+    `product=${info.productVersion ?? 'unknown'}`,
+    `ua=${caps.userAgent}`,
+  ].join(' ')
 }
 
 /**
@@ -235,6 +266,38 @@ export function onTv(): boolean {
   return host().kind === 'tizen'
 }
 
+/**
+ * The storage answer, as one line, for the evidence record.
+ *
+ * The labels are quoted exactly as the set spelled them, because the handoff's open
+ * question about drive naming is settled by the label the platform reports and by
+ * nothing else. A refused listing carries the platform's own message, which is how a
+ * privilege problem is told apart from an empty drive.
+ */
+function describeRoots(result: RootsResult): string {
+  if (!result.ok) {
+    return `ok=0 reason=${result.reason}`
+  }
+  const parts = result.roots.map((root) => {
+    const chosen = root.scannable ? 'scanned' : 'skipped'
+    return `${root.label || '(no label)'}[${root.type},${root.state},${chosen}]`
+  })
+  return `ok=1 count=${result.roots.length} ${parts.join(' ') || 'none'}`
+}
+
+/** What a finished scan did, as one line, for the evidence record. */
+function describeReport(report: ScanReport): string {
+  return [
+    `sources=${report.scannedSources}`,
+    `imported=${report.imported}`,
+    `withdrawn=${report.withdrawn}`,
+    `complete=${report.complete ? '1' : '0'}`,
+    `bounded=${report.bounded ? '1' : '0'}`,
+    `issues=${report.issues.length}`,
+    `reason=${report.reason ?? 'none'}`,
+  ].join(' ')
+}
+
 /** Asks the walk to stop at the next folder boundary. */
 export function cancelScan(): void {
   scanCancelled = true
@@ -269,6 +332,7 @@ export async function scanDrives(): Promise<ScanReport> {
   const startedMs = Date.now()
   try {
     const discovered = await refreshMediaRoots()
+    recordEvidence('storage', describeRoots(discovered))
     if (!discovered.ok) {
       const report: ScanReport = {
         scannedSources: 0,
@@ -281,6 +345,7 @@ export async function scanDrives(): Promise<ScanReport> {
         reason: discovered.reason,
       }
       library().recordScan(report)
+      recordEvidence('scan', describeReport(report))
       return report
     }
 
@@ -370,6 +435,7 @@ export async function scanDrives(): Promise<ScanReport> {
         : source,
     )
     library().applyScan({ items: catalog, sources: stamped, report })
+    recordEvidence('scan', describeReport(report))
     return report
   } finally {
     scanning = false

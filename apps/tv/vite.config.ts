@@ -19,10 +19,34 @@ import { defineConfig } from 'vite'
  *
  * `emptyOutDir` is left on so a stale file from an earlier build cannot be packaged
  * into the widget by mistake.
+ *
+ * **`import.meta.url` is defined away, and that is not cosmetic.** The widget loads from
+ * a `file://` origin, where Chromium blocks `type="module"` scripts for CORS reasons —
+ * the script never runs and the app paints nothing, with no error a screen could show.
+ * So the staged page loads the bundle as a classic deferred script instead (see
+ * `scripts/prepare-tizen-dist.mjs`). `import.meta` is a *parse-time* error outside a
+ * module, so the one occurrence inside Blits' version probe has to be replaced before
+ * the bundle can be loaded that way at all.
  */
+/**
+ * Replaces the one module-only expression in the bundle.
+ *
+ * `define` does not rewrite `import.meta.url`, and the staging step refuses to package
+ * a bundle containing it, so it is replaced here — in `renderChunk`, after everything
+ * is bundled and before the file is written. `location.href` is the same value for a
+ * widget-loaded script, and the surrounding code is a guarded version probe whose
+ * `catch` already handles being unable to answer.
+ */
+const classicBundle = {
+  name: 'screenroom-tv-classic-bundle',
+  renderChunk(code: string) {
+    return code.includes('import.meta') ? code.replace(/import\.meta\.url/g, 'window.location.href') : code
+  },
+}
+
 export default defineConfig({
   base: './',
-  plugins: [...blits],
+  plugins: [...blits, classicBundle],
   build: {
     target: 'es2019',
     outDir: 'dist',

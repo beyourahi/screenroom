@@ -31,6 +31,13 @@
    <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"></tizen:privilege>
    <!-- Enumerating removable storage. Deliberately read-only: media is never written. -->
    <tizen:privilege name="http://tizen.org/privilege/filesystem.read"></tizen:privilege>
+   <!--
+     Reading the set's own identity: model, firmware and Tizen version from
+     `webapis.productinfo`. Without this the API is present but every read returns
+     nothing, which is how the first installed build reported `model=unknown` on a
+     television whose model was printed on its own box.
+   -->
+   <tizen:privilege name="http://developer.samsung.com/privilege/productinfo"></tizen:privilege>
    <tizen:metadata key="http://samsung.com/tv/metadata/prelaunch.support" value="true"></tizen:metadata>
    <tizen:profile name="tv-samsung"></tizen:profile>
 </widget>
