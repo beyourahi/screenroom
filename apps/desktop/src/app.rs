@@ -469,6 +469,8 @@ pub struct App {
     audio_input: String,
     /// Folder whose removal is waiting for confirmation.
     armed_remove: Option<String>,
+    /// Profile whose removal is waiting for confirmation.
+    armed_profile: Option<String>,
 
     /// Text field for granting a new media root.
     new_root: String,
@@ -682,6 +684,19 @@ fn ticks(interval: Duration) -> Subscription<Message> {
     })
 }
 
+/// The profile a library opens with: the stored choice while it still exists,
+/// otherwise the first profile.
+fn opening_profile(library: &Library, preferences: &Preferences) -> String {
+    let profiles = library.profiles().unwrap_or_default();
+    preferences
+        .default_profile
+        .as_ref()
+        .filter(|id| profiles.iter().any(|profile| &profile.id == *id))
+        .cloned()
+        .or_else(|| profiles.into_iter().next().map(|profile| profile.id))
+        .unwrap_or_default()
+}
+
 impl App {
     fn new() -> (Self, Task<Message>) {
         // A launch is what gives the menu bar's Quit its budget to be re-pointed at
@@ -742,15 +757,10 @@ impl App {
     /// Builds the application around an existing library, for tests.
     pub fn with_library(library: Library, error: Option<String>, library_label: String) -> Self {
         let library = Arc::new(library);
-        let profile_id = library
-            .profiles()
-            .ok()
-            .and_then(|profiles| profiles.into_iter().next())
-            .map(|profile| profile.id)
-            .unwrap_or_default();
         // A preference read must never keep the library from opening, so an
         // unreadable preferences row falls back to the defaults.
         let preferences = library.preferences().unwrap_or_default();
+        let profile_id = opening_profile(&library, &preferences);
         let mut app = Self {
             library,
             library_label,
@@ -794,6 +804,7 @@ impl App {
             subtitle_input: String::new(),
             audio_input: String::new(),
             armed_remove: None,
+            armed_profile: None,
             new_root: String::new(),
             scan_token: None,
             scan_events: None,
@@ -807,16 +818,20 @@ impl App {
             quit_routing: crate::quit::QuitRouting::Unsupported,
             quit_check: None,
         };
-        // The language fields start from what is stored, so the screen never
-        // shows an empty box for a preference that is actually set.
-        app.subtitle_input = app
+        app.sync_language_inputs();
+        app.reload();
+        app
+    }
+
+    /// The language fields start from what is stored, so the screen never shows
+    /// an empty box for a preference that is actually set.
+    fn sync_language_inputs(&mut self) {
+        self.subtitle_input = self
             .preferences
             .subtitle_language
             .clone()
             .unwrap_or_default();
-        app.audio_input = app.preferences.audio_language.clone().unwrap_or_default();
-        app.reload();
-        app
+        self.audio_input = self.preferences.audio_language.clone().unwrap_or_default();
     }
 
     // ---------------------------------------------------------------- loading
@@ -1264,6 +1279,10 @@ impl App {
 
     /// Opens a file: session first, then the player, then the resume seek.
     fn open_player(&mut self, file_id: &str, from_start: bool) {
+        // A session still open here would be replaced without its final position.
+        if self.active.is_some() {
+            self.finish_active();
+        }
         let origin = match self.screen {
             Screen::Detail => Screen::Detail,
             _ => Screen::Browse,
@@ -1349,6 +1368,23 @@ impl App {
     }
 
     /// Stores progress and closes the session, then returns to the library.
+    /// Ends any viewing before another screen takes the window.
+    ///
+    /// The header's Home, Library and Settings buttons (and ⌘1–3) are reachable
+    /// from the player. Without this they swapped the screen while libmpv kept
+    /// playing out of sight, and the next title replaced the open session without
+    /// storing where the viewer had got to.
+    fn end_viewing(&mut self) -> Task<Message> {
+        if self.active.is_none() && self.screen != Screen::Player {
+            return Task::none();
+        }
+        self.stop_playback();
+        if self.fullscreen {
+            return self.toggle_fullscreen();
+        }
+        Task::none()
+    }
+
     fn leave_player(&mut self) {
         let origin = self
             .active
@@ -1803,7 +1839,11 @@ impl App {
         }
     }
 
-    /// Removes a profile and everything it watched.
+    /// Removes a profile and everything it watched, on the second press.
+    ///
+    /// It deletes a viewer's whole history, so it asks twice like removing a
+    /// folder or restoring a backup. The last profile is refused by the store
+    /// straight away, so that refusal needs no confirmation.
     fn remove_profile(&mut self, profile_id: String) {
         let name = self
             .profiles
@@ -1811,26 +1851,31 @@ impl App {
             .find(|profile| profile.id == profile_id)
             .map(|profile| profile.name.clone())
             .unwrap_or_else(|| "that profile".to_string());
+        if self.profiles.len() > 1 && self.armed_profile.as_deref() != Some(profile_id.as_str()) {
+            self.armed_profile = Some(profile_id);
+            self.status = Some(format!(
+                "Press Remove again to delete {name} with its progress, favourites and watchlist."
+            ));
+            return;
+        }
+        self.armed_profile = None;
         if let Err(error) = self.library.remove_profile(&profile_id) {
             return self.report(&error);
         }
-        // The removed profile cannot stay the active one, and a stored default
-        // pointing at it would fail the next preference save.
-        let fallback = self
-            .library
-            .profiles()
-            .ok()
-            .and_then(|profiles| profiles.into_iter().next())
-            .map(|profile| profile.id);
-        let preferences = Preferences {
-            default_profile: fallback.clone().filter(|id| *id != self.profile_id),
-            ..self.preferences.clone()
-        };
-        self.save_preferences(preferences);
-        if self.profile_id == profile_id
-            && let Some(fallback) = fallback
+        let removed_active = self.profile_id == profile_id;
+        if removed_active {
+            self.profile_id = opening_profile(&self.library, &Preferences::default());
+        }
+        // A stored default pointing at the removed profile would fail the next
+        // preference save; any other stored choice is the viewer's and is kept.
+        if removed_active
+            || self.preferences.default_profile.as_deref() == Some(profile_id.as_str())
         {
-            self.profile_id = fallback;
+            let preferences = Preferences {
+                default_profile: Some(self.profile_id.clone()).filter(|id| !id.is_empty()),
+                ..self.preferences.clone()
+            };
+            self.save_preferences(preferences);
         }
         self.status = Some(format!("Removed {name} and its watch history."));
         self.reload();
@@ -2102,6 +2147,11 @@ impl App {
         self.armed_restore = None;
         match self.library.restore_from(PathBuf::from(&raw)) {
             Ok(report) => {
+                // A restore replaces the settings table too. Everything held in
+                // memory from it is re-read, or the next preference save would
+                // write the pre-restore set back over the restored one.
+                self.preferences = self.library.preferences().unwrap_or_default();
+                self.sync_language_inputs();
                 // The active profile may not exist in the restored data, so the
                 // session is re-derived rather than left pointing at a profile
                 // that is gone.
@@ -2111,14 +2161,14 @@ impl App {
                     .map(|profiles| profiles.iter().any(|profile| profile.id == self.profile_id))
                     .unwrap_or(false)
                 {
-                    self.profile_id = self
-                        .library
-                        .profiles()
-                        .ok()
-                        .and_then(|profiles| profiles.into_iter().next())
-                        .map(|profile| profile.id)
-                        .unwrap_or_default();
+                    self.profile_id = opening_profile(&self.library, &self.preferences);
                 }
+                // Posters belong to works, and the restored works are other rows.
+                self.artwork.clear();
+                self.artwork_aspect.clear();
+                self.artwork_queued.clear();
+                self.artwork_failed.clear();
+                self.artwork_failures = 0;
                 self.detail = None;
                 self.reload();
                 let safety = report
@@ -2396,14 +2446,18 @@ impl App {
         }
         match message {
             Message::GoHome => {
+                let leave = self.end_viewing();
                 self.screen = Screen::Home;
                 self.focus = 0;
                 self.reload_home();
+                return leave;
             }
             Message::GoBrowse => {
+                let leave = self.end_viewing();
                 self.screen = Screen::Browse;
                 self.focus = 0;
                 self.reload_browse();
+                return leave;
             }
             Message::Back => self.back(),
             Message::Refresh => {
@@ -2515,11 +2569,14 @@ impl App {
             Message::RelinkSource => self.relink_source(),
 
             Message::GoSettings => {
+                let leave = self.end_viewing();
                 self.screen = Screen::Settings;
                 self.focus = 0;
                 self.armed_remove = None;
                 self.armed_restore = None;
+                self.armed_profile = None;
                 self.reload_administration();
+                return leave;
             }
             Message::ProfileChosen(profile_id) => self.choose_profile(profile_id),
             Message::NewProfileChanged(value) => self.new_profile = value,
@@ -3649,10 +3706,19 @@ impl App {
             // than present and failing.
             if self.profiles.len() > 1 {
                 row = row.push(
-                    button(text("Remove").size(tokens.type_scale.label))
-                        .on_press(Message::RemoveProfile(profile.id.clone()))
-                        .style(design::danger_style(false))
-                        .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+                    button(
+                        text(
+                            if self.armed_profile.as_deref() == Some(profile.id.as_str()) {
+                                "Confirm remove"
+                            } else {
+                                "Remove"
+                            },
+                        )
+                        .size(tokens.type_scale.label),
+                    )
+                    .on_press(Message::RemoveProfile(profile.id.clone()))
+                    .style(design::danger_style(false))
+                    .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
                 );
             }
             viewers = viewers.push(row);
@@ -5592,6 +5658,58 @@ mod tests {
     }
 
     #[test]
+    fn a_restore_brings_back_the_backups_preferences_and_keeps_them() {
+        let (mut app, _directory) = app_with(1);
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let backup = directory.path().join("prefs.db");
+        let _ = app.update(Message::SubtitleLanguageChanged("bn".to_string()));
+        let _ = app.update(Message::ApplySubtitleLanguage);
+        app.library.backup_to(&backup).expect("backup");
+        let _ = app.update(Message::SubtitleLanguageChanged("fr".to_string()));
+        let _ = app.update(Message::ApplySubtitleLanguage);
+
+        app.restore_path = backup.to_string_lossy().to_string();
+        let _ = app.update(Message::RestoreNow);
+        let _ = app.update(Message::RestoreNow);
+        assert!(app.error.is_none(), "unexpected error: {:?}", app.error);
+        assert_eq!(app.preferences.subtitle_language.as_deref(), Some("bn"));
+        assert_eq!(app.subtitle_input, "bn", "the field shows the restored value");
+        // The next unrelated save must not write the pre-restore set back.
+        let _ = app.update(Message::ToggleAutoplay(false));
+        assert_eq!(
+            app.library.preferences().unwrap().subtitle_language.as_deref(),
+            Some("bn")
+        );
+    }
+
+    #[test]
+    fn removing_a_profile_asks_first_and_the_choice_survives_a_reopen() {
+        let (mut app, _directory) = app_with(1);
+        let first = app.profile_id.clone();
+        app.new_profile = "Second".to_string();
+        let _ = app.update(Message::AddProfile);
+        let second = app.profile_id.clone();
+        assert_ne!(first, second, "adding a profile switches to it");
+        assert_eq!(
+            opening_profile(&app.library, &app.library.preferences().unwrap()),
+            second,
+            "a reopened library starts with the chosen profile"
+        );
+
+        let _ = app.update(Message::RemoveProfile(first.clone()));
+        assert_eq!(app.profiles.len(), 2, "the first press only asks");
+        assert_eq!(app.armed_profile.as_deref(), Some(first.as_str()));
+        let _ = app.update(Message::RemoveProfile(first.clone()));
+        assert_eq!(app.profiles.len(), 1, "the second press removes it");
+        assert_eq!(app.profile_id, second, "the active viewer is untouched");
+        assert_eq!(
+            app.library.preferences().unwrap().default_profile.as_deref(),
+            Some(second.as_str()),
+            "removing another viewer leaves the stored choice alone"
+        );
+    }
+
+    #[test]
     fn inspecting_a_backup_reports_what_it_holds_without_restoring() {
         let (mut app, _directory) = app_with(2);
         let directory = tempfile::TempDir::new().expect("temp dir");
@@ -5657,6 +5775,36 @@ mod tests {
         let reopened =
             PlaybackTracker::open(&app.library, &app.profile_id, &item.id).expect("a new session");
         assert_eq!(reopened.resume_from_ms, 42_500);
+    }
+
+    #[test]
+    fn leaving_the_player_by_the_header_stores_the_viewing() {
+        for go in [Message::GoHome, Message::GoBrowse, Message::GoSettings] {
+            let (mut app, _directory) = app_with(1);
+            let item = app.browse.items[0].clone();
+            let opened =
+                PlaybackTracker::open(&app.library, &app.profile_id, &item.id).expect("a session");
+            app.active = Some(Active {
+                tracker: opened.tracker,
+                file_id: item.id.clone(),
+                title: item.title.clone(),
+                resume_from_ms: opened.resume_from_ms,
+                origin: Screen::Browse,
+            });
+            app.screen = Screen::Player;
+            app.snapshot = App::playing_snapshot(30.0, 100.0);
+
+            let _ = app.update(go);
+
+            assert!(app.active.is_none(), "navigating away ends the viewing");
+            assert_ne!(app.screen, Screen::Player);
+            let watching = app
+                .library
+                .continue_watching(&app.profile_id, 5)
+                .expect("continue watching");
+            assert_eq!(watching.len(), 1);
+            assert_eq!(watching[0].position_ms, 30_000);
+        }
     }
 
     #[test]
