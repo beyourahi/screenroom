@@ -231,6 +231,43 @@ impl KindFilter {
     }
 }
 
+/// The watched-state filter offered in Browse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchFilter {
+    /// Watched or not.
+    Any,
+    /// Not yet finished by this profile.
+    Unwatched,
+    /// Finished by this profile.
+    Watched,
+}
+
+impl WatchFilter {
+    const ALL: [Self; 3] = [Self::Any, Self::Unwatched, Self::Watched];
+
+    /// The stored state this filter selects, if any.
+    fn watched(self) -> Option<bool> {
+        match self {
+            Self::Any => None,
+            Self::Unwatched => Some(false),
+            Self::Watched => Some(true),
+        }
+    }
+}
+
+impl std::fmt::Display for WatchFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Any => "Watched or not",
+            Self::Unwatched => "Unwatched",
+            Self::Watched => "Watched",
+        })
+    }
+}
+
+/// The genre picker's entry for "no genre filter".
+const ANY_GENRE: &str = "Any genre";
+
 /// A sort choice with its menu label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortChoice {
@@ -280,6 +317,7 @@ struct Browse {
     text: String,
     kind: KindFilter,
     genre: Option<String>,
+    watch: WatchFilter,
     sort: SortChoice,
     watchlist_only: bool,
     favorites_only: bool,
@@ -296,6 +334,7 @@ impl Browse {
             text: String::new(),
             kind: KindFilter::All,
             genre: None,
+            watch: WatchFilter::Any,
             sort: SortChoice::Title,
             watchlist_only: false,
             favorites_only: false,
@@ -324,6 +363,7 @@ impl Browse {
         !self.text.trim().is_empty()
             || self.kind != KindFilter::All
             || self.genre.is_some()
+            || self.watch != WatchFilter::Any
             || self.watchlist_only
             || self.favorites_only
             || self.available_only
@@ -338,6 +378,8 @@ struct Detail {
     episodes: Vec<LibraryItem>,
     /// Distinct season numbers of the work.
     seasons: Vec<i64>,
+    /// The screen and card the viewer came from, so Back returns to that card.
+    origin: (Screen, usize),
 }
 
 /// The viewing session currently open, and the policy around it.
@@ -475,6 +517,8 @@ pub struct App {
     /// Text field for granting a new media root.
     new_root: String,
     scan_token: Option<ScanToken>,
+    /// Folders waiting for the running scan to end.
+    pending_scans: Vec<String>,
     scan_events: Option<Receiver<ScanEvent>>,
     /// Entries walked and files imported by the running scan, for its progress row.
     scan_visited: u64,
@@ -514,6 +558,8 @@ pub enum Message {
     KindChanged(KindFilter),
     /// The genre filter changed.
     GenreChanged(Option<String>),
+    /// Watched-state filter changed.
+    WatchChanged(WatchFilter),
     /// The sort order changed.
     SortChanged(SortChoice),
     /// Toggle the watchlist-only filter.
@@ -807,6 +853,7 @@ impl App {
             armed_profile: None,
             new_root: String::new(),
             scan_token: None,
+            pending_scans: Vec::new(),
             scan_events: None,
             scan_visited: 0,
             scan_imported: 0,
@@ -886,7 +933,11 @@ impl App {
             text: self.browse.text.clone(),
             kind: self.browse.kind.kind(),
             genre: self.browse.genre.clone(),
+            watched: self.browse.watch.watched(),
             available_only: self.browse.available_only,
+            // One card per film or series. Per file, a show of 149 episodes was
+            // 149 cards with the same title; its Detail lists the episodes.
+            group_by_work: true,
             watchlist_only: self.browse.watchlist_only,
             favorites_only: self.browse.favorites_only,
             sort: self.browse.sort.sort(),
@@ -1249,32 +1300,49 @@ impl App {
             Err(error) => return self.report(&error),
         };
 
-        let mut episodes = Vec::new();
         let mut seasons = Vec::new();
-        if item.kind == MediaKind::Series {
-            if let Ok(found) = self.library.seasons_for_work(&item.work_id) {
-                seasons = found;
-            }
-            let query = LibraryQuery {
-                profile_id: Some(self.profile_id.clone()),
-                work_id: Some(item.work_id.clone()),
-                sort: Sort::Title,
-                ..LibraryQuery::page(500)
-            };
-            match self.library.items(&query) {
-                Ok(found) => episodes = found,
-                Err(error) => return self.report(&error),
-            }
+        if item.kind == MediaKind::Series
+            && let Ok(found) = self.library.seasons_for_work(&item.work_id)
+        {
+            seasons = found;
         }
+        let episodes = match self.episodes_of(&item) {
+            Ok(found) => found,
+            Err(error) => return self.report(&error),
+        };
 
+        // Opening one episode of a series from inside its own Detail keeps the
+        // original way back; anything else returns to the card it came from.
+        let origin = match (&self.detail, self.screen) {
+            (Some(detail), Screen::Detail) => detail.origin,
+            _ => (self.screen, self.focus),
+        };
+        // The cursor starts on the file that was opened, so Enter plays it.
+        self.focus = episodes
+            .iter()
+            .position(|episode| episode.id == item.id)
+            .unwrap_or(0);
         self.detail = Some(Detail {
             item,
             episodes,
             seasons,
+            origin,
         });
-        self.focus = 0;
         self.screen = Screen::Detail;
         self.ensure_artwork();
+    }
+
+    /// Sibling episodes of a series, freshly read for the active profile.
+    fn episodes_of(&self, item: &LibraryItem) -> Result<Vec<LibraryItem>, CoreError> {
+        if item.kind != MediaKind::Series {
+            return Ok(Vec::new());
+        }
+        self.library.items(&LibraryQuery {
+            profile_id: Some(self.profile_id.clone()),
+            work_id: Some(item.work_id.clone()),
+            sort: Sort::Title,
+            ..LibraryQuery::page(500)
+        })
     }
 
     /// Opens a file: session first, then the player, then the resume seek.
@@ -1404,10 +1472,16 @@ impl App {
         let Some(file_id) = self.detail.as_ref().map(|detail| detail.item.id.clone()) else {
             return;
         };
-        if let Ok(Some(item)) = self.library.item(&file_id, Some(&self.profile_id))
-            && let Some(detail) = self.detail.as_mut()
-        {
-            detail.item = item;
+        if let Ok(Some(item)) = self.library.item(&file_id, Some(&self.profile_id)) {
+            // The episode rows carry watched state and positions too; re-reading
+            // only the opened file left the rest of the list showing the old ones.
+            let episodes = self.episodes_of(&item).ok();
+            if let Some(detail) = self.detail.as_mut() {
+                detail.item = item;
+                if let Some(episodes) = episodes {
+                    detail.episodes = episodes;
+                }
+            }
         }
     }
 
@@ -2295,6 +2369,19 @@ impl App {
 
     /// Starts a bounded background scan for one source.
     fn start_scan(&mut self, source_id: String) {
+        // One walk at a time. A second one used to replace the first's token and
+        // channel, so the first could no longer be cancelled or reported; now it
+        // waits its turn and starts when the running one ends.
+        if self.scan_token.is_some() {
+            if !self.pending_scans.contains(&source_id) {
+                self.pending_scans.push(source_id);
+            }
+            self.status = Some(format!(
+                "A scan is running; {} more queued.",
+                self.pending_scans.len()
+            ));
+            return;
+        }
         let token = ScanToken::new();
         self.scan_token = Some(token.clone());
         self.scan_visited = 0;
@@ -2392,6 +2479,10 @@ impl App {
             // A scan adds files with no known runtime; probe them now rather than
             // at the next launch.
             self.start_durations();
+            if !self.pending_scans.is_empty() {
+                let next = self.pending_scans.remove(0);
+                self.start_scan(next);
+            }
         }
     }
 
@@ -2477,6 +2568,11 @@ impl App {
             }
             Message::GenreChanged(genre) => {
                 self.browse.genre = genre;
+                self.browse.page = 0;
+                self.reload_browse();
+            }
+            Message::WatchChanged(watch) => {
+                self.browse.watch = watch;
                 self.browse.page = 0;
                 self.reload_browse();
             }
@@ -2642,6 +2738,8 @@ impl App {
                 self.error = None;
             }
             Message::CancelScan => {
+                // Cancel means stop scanning, not "start the next one".
+                self.pending_scans.clear();
                 if let Some(token) = &self.scan_token {
                     token.cancel();
                     self.status = Some("Stopping the scan…".to_string());
@@ -2710,7 +2808,15 @@ impl App {
                 .items
                 .get(self.focus)
                 .map(|item| item.id.clone()),
-            Screen::Detail => self.detail.as_ref().map(|detail| detail.item.id.clone()),
+            // The highlighted episode, not the one the screen was opened with.
+            Screen::Detail => self.detail.as_ref().map(|detail| {
+                detail
+                    .episodes
+                    .get(self.focus)
+                    .unwrap_or(&detail.item)
+                    .id
+                    .clone()
+            }),
             Screen::Player | Screen::Settings => None,
         };
         match (self.screen, file_id) {
@@ -2726,10 +2832,18 @@ impl App {
         match self.screen {
             Screen::Player => self.leave_player(),
             Screen::Detail => {
-                self.screen = Screen::Browse;
-                self.detail = None;
-                self.focus = 0;
-                self.reload_browse();
+                let (screen, focus) = self
+                    .detail
+                    .take()
+                    .map(|detail| detail.origin)
+                    .unwrap_or((Screen::Browse, 0));
+                self.screen = if screen == Screen::Home {
+                    Screen::Home
+                } else {
+                    Screen::Browse
+                };
+                self.focus = focus;
+                self.reload();
             }
             Screen::Browse | Screen::Settings => self.screen = Screen::Home,
             Screen::Home => {}
@@ -3198,12 +3312,24 @@ impl App {
                     Message::SortChanged
                 ),
                 pick_list(
-                    self.browse.genres.clone(),
-                    self.browse.genre.clone(),
-                    |genre: String| Message::GenreChanged(Some(genre)),
-                )
-                .placeholder("Any genre"),
+                    WatchFilter::ALL,
+                    Some(self.browse.watch),
+                    Message::WatchChanged
+                ),
             ]
+            // Genres come from enrichment, which a scanned library does not have
+            // yet, so the picker exists only once there is something to pick —
+            // and always offers the way back to every genre.
+            .push((!self.browse.genres.is_empty()).then(|| {
+                pick_list(
+                    std::iter::once(ANY_GENRE.to_string())
+                        .chain(self.browse.genres.iter().cloned())
+                        .collect::<Vec<_>>(),
+                    self.browse.genre.clone(),
+                    |genre: String| Message::GenreChanged((genre != ANY_GENRE).then_some(genre)),
+                )
+                .placeholder(ANY_GENRE)
+            }))
             .spacing(tokens.spacing.field_x)
             .align_y(Alignment::Center),
             row![
@@ -5313,6 +5439,65 @@ mod tests {
     }
 
     #[test]
+    fn detail_starts_on_the_opened_episode_and_back_returns_to_its_card() {
+        let (mut app, ids, _directory) = series_app();
+        app.screen = Screen::Browse;
+        app.reload_browse();
+        assert_eq!(
+            app.browse.items.len(),
+            1,
+            "a series is one card, not one per file"
+        );
+        assert_eq!(
+            app.browse.items[0].id, ids[0],
+            "represented by its first episode"
+        );
+        app.focus = 0;
+        app.activate();
+        assert_eq!(app.screen, Screen::Detail);
+        let detail = app.detail.as_ref().expect("detail");
+        assert_eq!(detail.episodes.len(), 2, "Detail lists every episode");
+        assert_eq!(
+            detail.episodes[app.focus].id, ids[0],
+            "the cursor starts on it"
+        );
+
+        // Reopened on the second episode, the cursor follows that one: Enter
+        // plays what is highlighted, not the file the screen happened to open.
+        app.open_detail(&ids[1]);
+        let detail = app.detail.as_ref().expect("detail");
+        assert_eq!(detail.episodes[app.focus].id, ids[1]);
+        assert_eq!(detail.origin, (Screen::Browse, 0), "the way back is kept");
+
+        app.back();
+        assert_eq!(app.screen, Screen::Browse);
+        assert_eq!(app.focus, 0, "Back keeps the viewer's place in the grid");
+    }
+
+    #[test]
+    fn back_from_detail_returns_to_the_card_and_the_watch_filter_narrows() {
+        let (mut app, _directory) = app_with(4);
+        app.focus = 2;
+        let opened = app.browse.items[2].id.clone();
+        app.activate();
+        assert_eq!(app.detail.as_ref().map(|d| d.item.id.clone()), Some(opened));
+        app.back();
+        assert_eq!((app.screen, app.focus), (Screen::Browse, 2));
+
+        let first = app.browse.items[0].clone();
+        app.library
+            .mark_watched(&app.profile_id, &first.edition_id, true)
+            .expect("mark watched");
+        let _ = app.update(Message::WatchChanged(WatchFilter::Watched));
+        assert_eq!(app.browse.total, 1);
+        assert!(app.browse.narrowed());
+        let _ = app.update(Message::WatchChanged(WatchFilter::Unwatched));
+        assert_eq!(app.browse.total, 3);
+        let _ = app.update(Message::WatchChanged(WatchFilter::Any));
+        assert_eq!(app.browse.total, 4);
+    }
+
+    #[test]
     fn autoplay_follows_the_next_verified_episode() {
         let (app, ids, _directory) = series_app();
         let next = app
@@ -5673,11 +5858,18 @@ mod tests {
         let _ = app.update(Message::RestoreNow);
         assert!(app.error.is_none(), "unexpected error: {:?}", app.error);
         assert_eq!(app.preferences.subtitle_language.as_deref(), Some("bn"));
-        assert_eq!(app.subtitle_input, "bn", "the field shows the restored value");
+        assert_eq!(
+            app.subtitle_input, "bn",
+            "the field shows the restored value"
+        );
         // The next unrelated save must not write the pre-restore set back.
         let _ = app.update(Message::ToggleAutoplay(false));
         assert_eq!(
-            app.library.preferences().unwrap().subtitle_language.as_deref(),
+            app.library
+                .preferences()
+                .unwrap()
+                .subtitle_language
+                .as_deref(),
             Some("bn")
         );
     }
@@ -5703,7 +5895,11 @@ mod tests {
         assert_eq!(app.profiles.len(), 1, "the second press removes it");
         assert_eq!(app.profile_id, second, "the active viewer is untouched");
         assert_eq!(
-            app.library.preferences().unwrap().default_profile.as_deref(),
+            app.library
+                .preferences()
+                .unwrap()
+                .default_profile
+                .as_deref(),
             Some(second.as_str()),
             "removing another viewer leaves the stored choice alone"
         );
@@ -5834,6 +6030,34 @@ mod tests {
         // The finishing tick reloads the catalogue after clearing the token, so one
         // more pass lets that reload land before the assertions read it.
         let _ = app.update(Message::Tick);
+    }
+
+    #[test]
+    fn a_second_scan_waits_for_the_first_instead_of_orphaning_it() {
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        for (folder, name) in [("a", "First.Film.2001.mkv"), ("b", "Second.Film.2002.mkv")] {
+            write_settled(
+                &directory.path().join(folder).join(name),
+                b"not really a video",
+            );
+        }
+        let library = Library::open_in_memory().expect("library");
+        let mut app = App::with_library(library, None, "test".into());
+        app.new_root = directory.path().join("a").to_string_lossy().to_string();
+        let _ = app.update(Message::AddFolder);
+        assert!(app.scan_token.is_some());
+        app.new_root = directory.path().join("b").to_string_lossy().to_string();
+        let _ = app.update(Message::AddFolder);
+        // Either still queued, or the first walk already finished and the second
+        // was started on the spot; never two walks sharing one progress row.
+        assert!(app.pending_scans.len() <= 1);
+        finish_scan(&mut app);
+        assert!(app.pending_scans.is_empty());
+        assert_eq!(
+            app.library.count(&LibraryQuery::default()).expect("count"),
+            2,
+            "both folders were scanned"
+        );
     }
 
     /// Adds a folder through the interface and waits for its first scan.
