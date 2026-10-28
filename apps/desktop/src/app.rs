@@ -419,6 +419,15 @@ pub struct App {
     /// pre-seek position one more time cannot skip twice.
     auto_skipped: Option<String>,
 
+    /// Whether the window is in the platform's fullscreen mode.
+    ///
+    /// Tracked here rather than asked of the window every frame: the mode is set
+    /// asynchronously and may be left by the system (⌃⌘F, the green button), so
+    /// this is what the app last asked for. The chrome is hidden on the strength
+    /// of it, and a viewer who leaves fullscreen with the platform's own control
+    /// gets the chrome back on the next toggle.
+    fullscreen: bool,
+
     /// Window width in logical pixels, updated from resize events.
     ///
     /// Held because the grid's column count is derived from it. Kept as a plain f32
@@ -604,6 +613,8 @@ pub enum Message {
     VolumeCommit,
     /// Mute or unmute the output.
     ToggleMute,
+    /// Enter or leave the platform's fullscreen mode.
+    ToggleFullscreen,
     /// Seek by a fixed step, positive forwards.
     SeekStep(f64),
     /// Choose a track, or turn a kind off with [`NO_TRACK`].
@@ -749,6 +760,7 @@ impl App {
             active: None,
             scrub: None,
             volume_drag: None,
+            fullscreen: false,
             markers: Vec::new(),
             mark_pending: None,
             auto_skipped: None,
@@ -2480,6 +2492,7 @@ impl App {
             Message::Volume(percent) => self.drag_volume(percent),
             Message::VolumeCommit => self.commit_volume(),
             Message::ToggleMute => self.toggle_mute(),
+            Message::ToggleFullscreen => return self.toggle_fullscreen(),
             Message::Scrub(seconds) => self.scrub = Some(seconds),
             Message::SeekCommit => self.commit_seek(),
             Message::SeekStep(delta) => self.seek_step(delta),
@@ -2489,7 +2502,7 @@ impl App {
                 }
             }
             Message::Tick => self.poll(),
-            Message::Keyboard(event) => self.handle_key(event),
+            Message::Keyboard(event) => return self.handle_key(event),
             Message::Close => {
                 // Quitting while a file is open would otherwise leave the session
                 // row `active`: the last periodic checkpoint is within a second of
@@ -2589,11 +2602,11 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, event: keyboard::Event) {
+    fn handle_key(&mut self, event: keyboard::Event) -> Task<Message> {
         use iced::keyboard::Key;
         use iced::keyboard::key::Named;
         let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
-            return;
+            return Task::none();
         };
 
         // Screen switching uses a modifier on purpose: a bare letter would also
@@ -2611,16 +2624,26 @@ impl App {
                 }
                 _ => {}
             }
-            return;
+            return Task::none();
         }
-        // Every branch must produce `()`, so the mutating calls are statements.
+        // Most branches only mutate state; the platform-level ones (fullscreen)
+        // have to hand a task back to iced, which is why this returns one.
         match self.screen {
             Screen::Player => match key {
-                Key::Named(Named::Escape) => self.leave_player(),
+                Key::Named(Named::Escape) => {
+                    // Escape leaves fullscreen first. A viewer who pressed it to get
+                    // the pointer back would not expect to lose the film as well.
+                    if self.fullscreen {
+                        return self.toggle_fullscreen();
+                    }
+                    self.leave_player();
+                }
                 Key::Named(Named::Space) => self.toggle_play(),
                 Key::Named(Named::ArrowLeft) => self.seek_step(-SEEK_STEP),
                 Key::Named(Named::ArrowRight) => self.seek_step(SEEK_STEP),
                 Key::Character(character) => match character.as_str() {
+                    "f" => return self.toggle_fullscreen(),
+                    "m" => self.toggle_mute(),
                     "s" => self.skip_segment(),
                     "i" => self.toggle_segment_mark("intro"),
                     "c" => self.toggle_segment_mark("credits"),
@@ -2658,6 +2681,25 @@ impl App {
                 _ => {}
             },
         }
+        Task::none()
+    }
+
+    /// Enters or leaves the platform's fullscreen mode.
+    ///
+    /// The mode change belongs to the window, not to the app, so it is asked for
+    /// as a task rather than being simulated by resizing. With no window — as in a
+    /// test — the flag still tracks what was asked, and nothing is drawn on screen
+    /// that could disagree with it.
+    fn toggle_fullscreen(&mut self) -> Task<Message> {
+        self.fullscreen = !self.fullscreen;
+        let mode = if self.fullscreen {
+            iced::window::Mode::Fullscreen
+        } else {
+            iced::window::Mode::Windowed
+        };
+        // `and_then` over `Task<Option<Id>>` skips the change when no window
+        // answers, which is exactly a test with no window attached.
+        iced::window::latest().and_then(move |id| iced::window::set_mode(id, mode))
     }
 
     /// Seeks by `delta` seconds, clamped to the media.
@@ -2725,6 +2767,17 @@ impl App {
             Screen::Player => self.player_view(),
             Screen::Settings => self.settings_view(),
         };
+        // A fullscreen player is the film and nothing else: the window is the
+        // screen, so a header and footer would be chrome around the picture rather
+        // than a frame the picture sits in.
+        if self.fullscreen && self.screen == Screen::Player {
+            return container(body)
+                .style(|_theme| design::page_style())
+                .padding(0)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        }
         let mut shell = column![self.header()];
         if let Some(strip) = self.scan_strip() {
             shell = shell.push(strip);
@@ -2848,7 +2901,8 @@ impl App {
         };
         let hint = match self.screen {
             Screen::Player => {
-                "Space play/pause · ←/→ seek 10s · s skip segment · i intro mark · c credits mark · Esc back"
+                "Space play/pause · ←/→ seek 10s · m mute · f fullscreen · s skip segment · \
+                 i intro mark · c credits mark · Esc back"
             }
             Screen::Detail => "Enter play · f favourite · w watchlist · m watched · Esc back",
             Screen::Settings => "Esc back · ⌘1 Home · ⌘2 Library",
@@ -3771,10 +3825,29 @@ impl App {
         };
 
         let header = row![
-            button(text("Back").size(tokens.type_scale.label))
-                .on_press(Message::BackFromPlayer)
-                .style(design::quiet_style(false))
-                .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+            // The way out is absent in fullscreen, because Escape (or f) is the way
+            // out there and a button would be a target the pointer cannot reach
+            // without leaving the picture.
+            button(
+                text(if self.fullscreen {
+                    "Windowed"
+                } else {
+                    "Fullscreen"
+                })
+                .size(tokens.type_scale.label)
+            )
+            .on_press(Message::ToggleFullscreen)
+            .style(design::quiet_style(false))
+            .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+            if self.fullscreen {
+                Element::from(Space::new().width(0.0))
+            } else {
+                button(text("Back").size(tokens.type_scale.label))
+                    .on_press(Message::BackFromPlayer)
+                    .style(design::quiet_style(false))
+                    .padding([tokens.spacing.field_y, tokens.spacing.field_x])
+                    .into()
+            },
             text(title).size(tokens.type_scale.subtitle),
             text(state)
                 .size(tokens.type_scale.micro)
@@ -4464,6 +4537,44 @@ mod tests {
         let (position_low, position_high) = screenroom_player::SUB_POSITION_RANGE;
         assert!(position_low <= f64::from(Preferences::SUBTITLE_POSITION_MIN_PERCENT));
         assert!(position_high >= f64::from(Preferences::SUBTITLE_POSITION_MAX_PERCENT));
+    }
+
+    #[test]
+    fn fullscreen_is_a_window_mode_the_player_can_leave_with_escape() {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::{Event, Key, Modifiers};
+
+        let (mut app, _directory) = app_with(2);
+        let press = |key: Key| Event::KeyPressed {
+            key,
+            modified_key: Key::Unidentified,
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::Escape),
+            location: iced::keyboard::Location::Standard,
+            modifiers: Modifiers::empty(),
+            text: None,
+            repeat: false,
+        };
+
+        assert!(!app.fullscreen);
+        let _ = app.update(Message::ToggleFullscreen);
+        assert!(
+            app.fullscreen,
+            "the flag follows the mode that was asked for"
+        );
+
+        // The player is the screen where a fullscreen mode means anything.
+        app.screen = Screen::Player;
+        let _ = app.handle_key(press(Key::Named(Named::Escape)));
+        assert!(
+            !app.fullscreen,
+            "Escape leaves fullscreen before it leaves the film"
+        );
+        assert_eq!(app.screen, Screen::Player, "the film is still open");
+
+        // And a second Escape, now that there is no fullscreen to leave, does
+        // leave the player rather than doing nothing at all.
+        let _ = app.handle_key(press(Key::Named(Named::Escape)));
+        assert_ne!(app.screen, Screen::Player);
     }
 
     #[test]
