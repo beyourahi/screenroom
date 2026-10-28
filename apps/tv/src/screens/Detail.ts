@@ -203,7 +203,7 @@ export default Blits.Component('Detail', {
       // to say than which key does what: the remedy is outside this screen.
       this.footer = item.available
         ? 'Enter selects · Back returns'
-        : 'This file cannot be read now — plug the drive in, then scan from Settings (Info)'
+        : 'This file cannot be read now — plug the drive in, then scan from Media Sources'
       this.barFill = Math.round(this.barWidth * progressFraction(item.positionMs, item.durationMs))
       const workHidden = library().isHidden(item.workId)
       const rows: { kind: string; label: string; detail: string }[] = []

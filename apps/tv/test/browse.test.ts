@@ -3,17 +3,16 @@ import assert from 'node:assert/strict'
 
 import type { LibraryItem } from '../src/core/contract.ts'
 import {
-  clampPage,
   continueWatching,
   emptyState,
   filterItems,
   formatPosition,
+  homeShelf,
+  itemsFor,
   kindOf,
   NO_FILTER,
-  pageCount,
-  pageItems,
-  PAGE_SIZE,
   progressFraction,
+  sortForDisplay,
 } from '../src/core/browse.ts'
 
 function item(overrides: Partial<LibraryItem> = {}): LibraryItem {
@@ -38,28 +37,65 @@ function item(overrides: Partial<LibraryItem> = {}): LibraryItem {
   }
 }
 
-test('a page is a whole number of rows', () => {
-  assert.equal(PAGE_SIZE % 5, 0)
-})
-
-test('paging covers every item exactly once and never ends mid-row', () => {
-  const items = Array.from({ length: PAGE_SIZE + 3 }, (_value, index) =>
-    item({ id: `item-${index}`, workId: `work-${index}` }),
+test('the library is sorted by title, then season and episode', () => {
+  const items = [
+    item({ id: 'b-ep2', title: 'Severance', kind: 'series', season: 1, episode: 2 }),
+    item({ id: 'a', title: 'Arrival', kind: 'movie' }),
+    item({ id: 'b-ep1', title: 'Severance', kind: 'series', season: 1, episode: 1 }),
+    item({ id: 'b-ep10', title: 'Severance', kind: 'series', season: 1, episode: 10 }),
+  ]
+  assert.deepEqual(
+    sortForDisplay(items).map((entry) => entry.id),
+    ['a', 'b-ep1', 'b-ep2', 'b-ep10'],
+    'episode 10 comes after episode 2, not before it',
   )
-  const first = pageItems(items, 0)
-  const second = pageItems(items, 1)
-  assert.equal(first.length, PAGE_SIZE)
-  assert.equal(second.length, 3)
-  assert.equal(new Set([...first, ...second].map((entry) => entry.id)).size, items.length)
 })
 
-test('a page number outside the range is clamped rather than showing nothing', () => {
-  const items = Array.from({ length: 4 }, (_value, index) => item({ id: `i${index}` }))
-  assert.equal(clampPage(-2, items.length), 0)
-  assert.equal(clampPage(99, items.length), 0, 'one page of items is page zero')
-  assert.equal(pageCount(0), 1)
-  assert.equal(pageCount(PAGE_SIZE), 1)
-  assert.equal(pageCount(PAGE_SIZE + 1), 2)
+test('Movies keeps files the name rule could not read, and TV Shows keeps episodes', () => {
+  const items = [
+    item({ id: 'film', title: 'Heat', kind: 'movie' }),
+    item({ id: 'unknown', title: 'bdrip-a', kind: 'other' }),
+    item({ id: 'ep', title: 'Show', kind: 'series', season: 1, episode: 1 }),
+  ]
+  assert.deepEqual(
+    itemsFor(items, 'movies').map((entry) => entry.id),
+    ['unknown', 'film'],
+    'an unreadable name is still a film the owner put on the drive, in title order',
+  )
+  assert.deepEqual(itemsFor(items, 'series').map((entry) => entry.id), ['ep'])
+  assert.equal(itemsFor(items, 'all').length, 3, 'nothing is unreachable from All media')
+})
+
+test('Home shows the whole library when nothing is in progress', () => {
+  // The defect this replaces: the scan catalogued 1,200 files and Home drew no cards,
+  // because Home only ever showed resume points and nothing had been played.
+  const library = Array.from({ length: 1200 }, (_value, index) =>
+    item({ id: `i${index}`, workId: `w${index}`, title: `Film ${String(index)}` }),
+  )
+  const shelf = homeShelf(library)
+  assert.equal(shelf.fromResume, false)
+  assert.equal(shelf.heading, 'Your library')
+  assert.equal(shelf.items.length, 1200, 'every catalogued file is reachable from Home')
+  assert.match(shelf.note, /1200 files in the library/)
+})
+
+test('Home prefers resume points once there are any', () => {
+  const items = [
+    item({ id: 'resumed', workId: 'w1', positionMs: 60_000, updatedMs: 5 }),
+    item({ id: 'unstarted', workId: 'w2' }),
+  ]
+  const shelf = homeShelf(items)
+  assert.equal(shelf.fromResume, true)
+  assert.equal(shelf.heading, 'Continue watching')
+  assert.deepEqual(shelf.items.map((entry) => entry.id), ['resumed'])
+  assert.match(shelf.note, /1 in progress · 2 files in the library/)
+})
+
+test('an empty library gets an empty shelf, not a fake card', () => {
+  const shelf = homeShelf([])
+  assert.equal(shelf.items.length, 0)
+  assert.equal(shelf.heading, 'Your library')
+  assert.match(shelf.note, /0 files in the library/)
 })
 
 test('the kind filter maps onto the stored kinds', () => {

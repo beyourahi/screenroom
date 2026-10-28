@@ -21,6 +21,7 @@
 import Blits from '@lightningjs/blits'
 
 import { clampIndex } from '../core/focus.ts'
+import { moveNav, RAIL_ENTRIES, railIndexFor, type NavZone } from '../core/nav.ts'
 import { describeScan, type ScanReport } from '../core/scan.ts'
 import {
   describeAudio,
@@ -28,6 +29,9 @@ import {
   forgetChoices,
   type DeviceSettings,
 } from '../core/settings.ts'
+import { APP_WIDTH } from '../design/cards.ts'
+import { railRows, RAIL_WIDTH, type RailRow } from '../design/rail.ts'
+import Rail from '../components/Rail.ts'
 import { hex, TOKENS } from '../design/tokens.ts'
 import {
   cancelScan,
@@ -37,6 +41,7 @@ import {
   library,
   mediaRoots,
   onTv,
+  nav,
   refreshMediaRoots,
   saveSettings,
   scanDrives,
@@ -79,6 +84,12 @@ interface Entry {
 /** How many drives and sources are listed before the list is summarised. */
 const MAX_LISTED = 4
 
+/** The route, which is also this screen's focus-memory key. */
+const ROUTE = '/settings'
+
+/** Where the list starts, just right of the rail. */
+const CONTENT_LEFT = RAIL_WIDTH + Math.round(TOKENS.spacing.shellPad * 0.6)
+
 /** Whole milliseconds as a short "how long ago", never as an invented date. */
 function sinceMs(timestampMs: number, nowMs: number): string {
   if (timestampMs <= 0) {
@@ -97,16 +108,28 @@ function sinceMs(timestampMs: number, nowMs: number): string {
 }
 
 export default Blits.Component('Settings', {
+  components: { Rail },
   template: `
     <Element w="1920" h="1080" :color="$background">
-      <Text :x="$pad" :y="$pad" content="Settings" :size="$titleSize" :color="$foreground" />
-      <Text :x="$pad" :y="$subY" :content="$subtitle" :size="$bodySize" :color="$muted" />
+      <Rail :rows="$railRows" />
+
+      <Text :x="$contentLeft" :y="$pad" content="Settings" :size="$titleSize" :color="$foreground" />
+      <Text
+        :x="$contentLeft"
+        :y="$subY"
+        :content="$subtitle"
+        :size="$bodySize"
+        :color="$muted"
+        maxlines="1"
+        textoverflow="ellipsis"
+        :maxwidth="$noteWidth"
+      />
 
       <Element
         :for="row in $rows"
         key="$row.key"
         :show="$row.visible"
-        :x="$pad"
+        :x="$contentLeft"
         :y="$row.y"
         :w="$listWidth"
         :h="$rowHeight"
@@ -131,16 +154,19 @@ export default Blits.Component('Settings', {
         />
       </Element>
 
-      <Text :x="$pad" :y="$footY" :content="$footer" :size="$captionSize" :color="$disabled" />
+      <Text :x="$contentLeft" :y="$footY" :content="$footer" :size="$captionSize" :color="$disabled" />
     </Element>
   `,
   state() {
     return {
+      railRows: [] as RailRow[],
       background: hex(TOKENS.palette.background),
       foreground: hex(TOKENS.palette.foreground),
       muted: hex(TOKENS.palette.inkMuted),
       disabled: hex(TOKENS.palette.disabledForeground),
       pad: Math.round(TOKENS.spacing.shellPad),
+      contentLeft: CONTENT_LEFT,
+      noteWidth: APP_WIDTH - CONTENT_LEFT - Math.round(TOKENS.spacing.shellPad),
       radius: Math.round(TOKENS.radius.surface),
       titleSize: Math.round(TOKENS.type.title),
       bodySize: Math.round(TOKENS.type.body),
@@ -148,7 +174,7 @@ export default Blits.Component('Settings', {
       subY: Math.round(TOKENS.spacing.shellPad + TOKENS.type.title * 1.4),
       subtitle: '',
       footer: '',
-      listWidth: 1720,
+      listWidth: 0,
       rowHeight: 0,
       fieldX: 0,
       valueX: 0,
@@ -156,6 +182,8 @@ export default Blits.Component('Settings', {
       footY: 0,
       rows: [] as Row[],
       focusIndex: 0,
+      zone: 'content' as NavZone,
+      railIndex: 0,
       busy: false,
       /** The list is scrolled in whole rows when it is longer than the screen. */
       scroll: 0,
@@ -199,10 +227,16 @@ export default Blits.Component('Settings', {
    */
   input: {
     up() {
-      this.up()
+      this.press('up')
     },
     down() {
-      this.down()
+      this.press('down')
+    },
+    left() {
+      this.press('left')
+    },
+    right() {
+      this.press('right')
     },
     enter() {
       void this.enter()
@@ -217,6 +251,7 @@ export default Blits.Component('Settings', {
       this.rowLabelY = layout.rowLabelY
       this.footY = layout.footY
       this.visibleRows = layout.visibleRows
+      this.listWidth = APP_WIDTH - CONTENT_LEFT - Math.round(TOKENS.spacing.shellPad)
     },
     /** Reads every host fact again and rebuilds the list. */
     reload() {
@@ -377,7 +412,7 @@ export default Blits.Component('Settings', {
       // so the window is clamped rather than left scrolled past the end.
       this.scroll = Math.min(Math.max(0, entries.length - this.visibleRows), Math.max(0, this.scroll))
       this.rows = entries.map((entry, index) => {
-        const focused = index === this.focusIndex
+        const focused = this.zone === 'content' && index === this.focusIndex
         return {
           key: entry.key,
           label: entry.label,
@@ -397,16 +432,22 @@ export default Blits.Component('Settings', {
           visible: index >= this.scroll && index < this.scroll + this.visibleRows,
         }
       })
-      this.focusIndex = clampIndex(this.focusIndex, this.rows.length)
+      this.focusIndex = Math.max(0, clampIndex(this.focusIndex, this.rows.length))
+      this.railRows = railRows(railIndexFor(ROUTE), this.railIndex, this.zone === 'rail')
       this.footer = onTv()
-        ? 'Enter acts on the highlighted row · Back returns'
+        ? 'Enter acts on the highlighted row · Left opens the menu · Back returns'
         : 'Browser preview: none of these readings prove TV behaviour'
+      nav().set(
+        ROUTE,
+        { zone: this.zone, rail: this.railIndex, content: this.focusIndex },
+        { railCount: RAIL_ENTRIES.length, contentCount: this.rows.length, columns: 1 },
+      )
     },
     /** Rebuilds only the ink, for a cursor move. */
     markFocus() {
       const layout = this.layout
       this.rows = this.rows.map((row, index) => {
-        const focused = index === this.focusIndex
+        const focused = this.zone === 'content' && index === this.focusIndex
         return {
           ...row,
           focused,
@@ -418,28 +459,58 @@ export default Blits.Component('Settings', {
         }
       })
     },
-    move(direction: 'up' | 'down') {
-      if (this.rows.length === 0) {
+    /**
+     * One press, across the rail and the list.
+     *
+     * The list is one column, so `left` from it goes to the rail — which is the only
+     * way back to the menu from a full-width row. Scrolling is kept inside the visible
+     * window here: a highlighted row nobody can see is a cursor that has been lost.
+     */
+    press(direction: 'up' | 'down' | 'left' | 'right') {
+      const next = moveNav(
+        { zone: this.zone, rail: this.railIndex, content: this.focusIndex },
+        direction,
+        { railCount: RAIL_ENTRIES.length, contentCount: this.rows.length, columns: 1 },
+      )
+      if (
+        next.zone === this.zone &&
+        next.rail === this.railIndex &&
+        Math.max(0, next.content) === this.focusIndex
+      ) {
         return
       }
-      const next = direction === 'up' ? this.focusIndex - 1 : this.focusIndex + 1
-      if (next < 0 || next >= this.rows.length) {
-        return
-      }
-      this.focusIndex = next
-      // Keep the cursor inside the visible window rather than letting it walk off the
-      // screen: a highlighted row nobody can see is a cursor that has been lost.
-      const first = this.scroll
-      const last = this.scroll + this.visibleRows - 1
-      if (next < first) {
-        this.scroll = next
-      } else if (next > last) {
-        this.scroll = next - this.visibleRows + 1
+      this.zone = next.zone
+      this.railIndex = next.rail
+      this.focusIndex = Math.max(0, next.content)
+      if (this.zone === 'content') {
+        const first = this.scroll
+        const last = this.scroll + this.visibleRows - 1
+        if (this.focusIndex < first) {
+          this.scroll = this.focusIndex
+        } else if (this.focusIndex > last) {
+          this.scroll = this.focusIndex - this.visibleRows + 1
+        }
       }
       this.markFocus()
     },
-    /** Enter: whichever action the highlighted row names. */
+    /** Enter: a destination on the rail, or whichever action the highlighted row names. */
     async enter() {
+      if (this.zone === 'rail') {
+        const entry = RAIL_ENTRIES[this.railIndex]
+        if (entry === undefined) {
+          return
+        }
+        if (entry.route !== ROUTE) {
+          this.$router.to(entry.route)
+          return
+        }
+        // OK on the destination already open hands the cursor to the list, so this row
+        // is never a dead key.
+        this.zone = 'content'
+        this.focusIndex = Math.max(0, this.focusIndex)
+        this.markFocus()
+        return
+      }
       const row = this.rows[this.focusIndex]
       if (row === undefined || row.action === null) {
         return
@@ -493,12 +564,6 @@ export default Blits.Component('Settings', {
     async refreshDrives() {
       await refreshMediaRoots()
       this.reload()
-    },
-    up() {
-      this.move('up')
-    },
-    down() {
-      this.move('down')
     },
   },
 })

@@ -22,7 +22,15 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const SCREENS = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'screens')
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
+
+/**
+ * Every directory that holds a component with a template.
+ *
+ * Screens were the first; the shared rail lives in `components/` and its template has
+ * the same contract, so it is checked by the same parser rather than trusted.
+ */
+const DIRECTORIES = ['screens', 'components']
 
 /**
  * Members Blits provides to every component, which no screen declares.
@@ -46,11 +54,19 @@ const FRAMEWORK_MEMBERS = new Set([
   'intercept',
 ])
 
-/** The screen files, in a stable order. */
-function screenFiles(): string[] {
-  return readdirSync(SCREENS)
-    .filter((name) => name.endsWith('.ts'))
-    .sort()
+/** The component files, in a stable order. */
+function componentFiles(): { readonly dir: string; readonly name: string }[] {
+  return DIRECTORIES.flatMap((dir) =>
+    readdirSync(join(ROOT, dir))
+      .filter((name) => name.endsWith('.ts'))
+      .sort()
+      .map((name) => ({ dir, name })),
+  )
+}
+
+/** The source of one component file, comments removed. */
+function sourceOf(dir: string, name: string): string {
+  return withoutComments(readFileSync(join(ROOT, dir, name), 'utf8'))
 }
 
 /** The source with its comments removed, so a prose line cannot look like a key. */
@@ -198,10 +214,10 @@ function references(template: string): Set<string> {
   return names
 }
 
-test('every template reference in every screen resolves to something the component declares', () => {
+test('every template reference in every component resolves to something it declares', () => {
   const problems: string[] = []
-  for (const file of screenFiles()) {
-    const source = withoutComments(readFileSync(join(SCREENS, file), 'utf8'))
+  for (const { dir, name } of componentFiles()) {
+    const source = sourceOf(dir, name)
     const template = templateBody(source)
     const known = new Set([
       ...declaredKeys(source),
@@ -210,7 +226,7 @@ test('every template reference in every screen resolves to something the compone
     ])
     const missing = [...references(template)].filter((name) => !known.has(name)).sort()
     if (missing.length > 0) {
-      problems.push(`${file}: ${missing.map((name) => `$${name}`).join(', ')}`)
+      problems.push(`${name}: ${missing.map((key) => `$${key}`).join(', ')}`)
     }
   }
   assert.deepEqual(
@@ -220,10 +236,34 @@ test('every template reference in every screen resolves to something the compone
   )
 })
 
+/**
+ * A `:for` variable must not be called `key`.
+ *
+ * This is the second regression test taken from the television. The search screen's
+ * keyboard loop was written `:for="key in $keys"` with `key="$key.id"`, which reads
+ * naturally and compiles to a collision: Blits assigns the loop variable to the scope
+ * slot named after it, and then the `key` attribute assigns the id to the *same* slot.
+ * The loop body therefore saw a string where it expected an object, every key was
+ * created with an undefined size and position, and the keyboard drew nothing at all —
+ * no error, no warning, an empty half-screen beside a correct header.
+ */
+test('no loop variable is named key, which the compiled scope overwrites', () => {
+  const problems: string[] = []
+  for (const { dir, name } of componentFiles()) {
+    const template = templateBody(sourceOf(dir, name))
+    for (const match of template.matchAll(/:?for="([A-Za-z_$][\w$]*)\s+in\b/g)) {
+      if (match[1] === 'key') {
+        problems.push(`${name}: a :for variable is named key`)
+      }
+    }
+  }
+  assert.deepEqual(problems, [], problems.join('\n'))
+})
+
 test('the checker itself sees the state it is supposed to see', () => {
   // A guard that silently found nothing would pass forever. `Home` declares `cards` and
   // computes `grid`, so both must come back from the parser.
-  const source = withoutComments(readFileSync(join(SCREENS, 'Home.ts'), 'utf8'))
+  const source = sourceOf('screens', 'Home.ts')
   const declared = declaredKeys(source)
   for (const key of ['cards', 'background', 'footY', 'grid']) {
     assert.ok(declared.has(key), `expected ${key} to be parsed out of Home.ts`)

@@ -45,12 +45,20 @@ export interface GridGeometry {
   readonly subtitleY: number
 }
 
-/** The vertical band a grid has to fit into, in app pixels. */
+/** The space a grid has to fit into, in app pixels. */
 export interface GridBounds {
   /** The first pixel the grid may use; the screen's header ends here. */
   readonly top: number
   /** The last pixel the grid may use; the footer starts here. */
   readonly bottom: number
+  /**
+   * The first pixel the grid may use horizontally, when something sits to its left.
+   *
+   * Every library screen now has the navigation rail down the left edge, so the grid
+   * has to start after it or the first column of cards is drawn underneath the menu.
+   * Absent means the shell padding, which is what a grid with no rail uses.
+   */
+  readonly left?: number
 }
 
 /**
@@ -78,7 +86,7 @@ export function gridFor(
   const safeColumns = countOrOne(columns)
   const safeRows = countOrOne(rows)
   const safeWidth = Number.isFinite(width) && width > 0 ? width : APP_WIDTH
-  const originX = Math.round(tokens.spacing.shellPad)
+  const originX = Math.round(bounds.left ?? tokens.spacing.shellPad)
   const originY = Number.isFinite(bounds.top) ? Math.round(bounds.top) : 0
   const bottom = Number.isFinite(bounds.bottom) ? Math.round(bounds.bottom) : APP_HEIGHT
 
@@ -91,7 +99,9 @@ export function gridFor(
   const subtitleLine = Math.round(tokens.type.caption * 1.6)
   const titleStrip = titleGap + titleLine + subtitleLine
 
-  const usable = safeWidth - originX * 2
+  // The right edge keeps the shell padding; the left edge is wherever `left` put it, so
+  // the rail's width is honoured without the grid also reserving it twice.
+  const usable = safeWidth - originX - Math.round(tokens.spacing.shellPad)
   const sectionGap = Math.round(tokens.spacing.section / 2)
   const gapX = Math.max(sectionGap, Math.round(tokens.type.body * 1.5))
   const gapY = gapX
@@ -134,14 +144,21 @@ function countOrOne(value: number): number {
   return whole >= 1 ? whole : 1
 }
 
-/** Where one cell sits, by index. */
+/**
+ * Where one cell sits, by index.
+ *
+ * `columns` defaults to the grid's own, and is passed only when a windowed grid has to
+ * be laid out with the column count of the list rather than of one page.
+ */
 export function cellPosition(
   index: number,
   geometry: GridGeometry,
+  columns: number = geometry.columns,
 ): { readonly x: number; readonly y: number } {
+  const span = Number.isFinite(columns) && columns >= 1 ? Math.trunc(columns) : geometry.columns
   const safe = Math.max(0, Math.trunc(index))
-  const column = safe % geometry.columns
-  const row = Math.floor(safe / geometry.columns)
+  const column = safe % span
+  const row = Math.floor(safe / span)
   return {
     x: geometry.originX + column * (geometry.cardWidth + geometry.gapX),
     y: geometry.originY + row * (geometry.cardHeight + geometry.gapY),
@@ -185,23 +202,45 @@ export interface Card {
 export type CardItem = LibraryItem
 
 /**
- * Builds the cards for one page.
+ * The slice of a list a grid is drawing, and where it starts in the whole list.
+ *
+ * A window is always a whole number of rows (`core/nav.ts`), which is what lets the card
+ * in the first column of the first drawn row be placed at index zero and every other
+ * card follow from it.
+ */
+export interface CardWindow {
+  /** Absolute index of the first item in `items`. */
+  readonly first: number
+  /** The list's column count, which is the geometry's unless a caller overrides it. */
+  readonly columns: number
+}
+
+/**
+ * Builds the cards for one window of the library.
  *
  * The subtitle is the one place the app tells the owner something they cannot see: the
  * episode number for a series, the year for a film, and — when the file cannot be
  * played right now — that fact, in place of the year. A card whose source is gone is
  * drawn muted and says so rather than being silently hidden, because the owner's
  * progress on it is still theirs (`docs/ADR-003`).
+ *
+ * `window` is what makes a thousand-file library drawable: the caller passes only the
+ * cards inside the band, and the geometry is computed from each card's position in the
+ * *whole* list so the first drawn row lands at the top of the band whichever card is
+ * focused.
  */
 export function buildCards(
   items: readonly CardItem[],
   focusIndex: number,
   geometry: GridGeometry,
   tokens: Tokens = TOKENS,
+  window: CardWindow = { first: 0, columns: geometry.columns },
 ): Card[] {
+  const columns = Number.isFinite(window.columns) && window.columns >= 1 ? window.columns : geometry.columns
   return items.map((item, index) => {
-    const position = cellPosition(index, geometry)
-    const focused = index === focusIndex
+    const absolute = window.first + index
+    const position = cellPosition(absolute - window.first, geometry, columns)
+    const focused = absolute === focusIndex
     const progress = progressFraction(item.positionMs, item.durationMs)
     return {
       id: item.id,

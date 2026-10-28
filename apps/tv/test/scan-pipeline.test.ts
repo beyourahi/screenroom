@@ -18,7 +18,9 @@ import assert from 'node:assert/strict'
  * a type and a state, and `listDirectory` reports entry names.
  */
 
-import { createMemoryStorage } from '../src/core/storage.ts'
+import { createMemoryStorage, LibraryService } from '../src/core/storage.ts'
+import { homeShelf } from '../src/core/browse.ts'
+import { MAX_STORE_CHARS } from '../src/core/store.ts'
 import { library, scanDrives, useStoragePort } from '../src/app/runtime.ts'
 
 /** A filesystem as a map from directory location to the names it holds. */
@@ -313,6 +315,77 @@ test('the scan report is stored, so Settings can describe it after a restart', a
   install({ removable1: MEDIA_DRIVE })
   const report = await scanDrives()
   assert.deepEqual(library().lastScan(), report)
+})
+
+/**
+ * A drive shaped like the owner's own: two top folders, films loose inside one of them,
+ * and twenty shows nested two levels deeper under `Season NN`.
+ *
+ * This is the shape the report came from — "a lot of movies and TV shows inside folders
+ * inside the USB" — and it is 1,200 files, which is also the size at which page-based
+ * browsing stopped being a library.
+ */
+function nestedDrive(): Tree {
+  const tree: Tree = { removable1: ['Movies', 'Shows'] }
+  const films: string[] = []
+  for (let index = 0; index < 600; index += 1) {
+    const number = String(index).padStart(4, '0')
+    const year = 1980 + (index % 40)
+    films.push(`Film ${number}.${String(year)}.1080p.mkv`)
+  }
+  tree['removable1/Movies'] = films
+
+  const shows: string[] = []
+  for (let show = 1; show <= 20; show += 1) {
+    const name = `Show ${String(show).padStart(2, '0')}`
+    shows.push(name)
+    tree[`removable1/Shows/${name}`] = ['Season 01']
+    const episodes: string[] = []
+    for (let episode = 1; episode <= 30; episode += 1) {
+      episodes.push(`${name}.S01E${String(episode).padStart(2, '0')}.mkv`)
+    }
+    tree[`removable1/Shows/${name}/Season 01`] = episodes
+  }
+  tree['removable1/Shows'] = shows
+  return tree
+}
+
+test('a thousand nested files reach the library, survive a restart, and show on Home', async () => {
+  // The defect this test pins: the scan reported over a thousand files and the
+  // screens showed none. Proving the walk is not enough — the catalogue has to be
+  // written, read back by a *new* service, and reachable from the screen's own rules.
+  const port = createMemoryStorage()
+  useStoragePort(port)
+  install({ removable1: nestedDrive() })
+
+  const report = await scanDrives()
+  assert.equal(report.complete, true)
+  assert.equal(report.imported, 1200)
+  assert.equal(library().items().length, 1200)
+  assert.equal(
+    library()
+      .items()
+      .filter((item) => item.kind === 'series').length,
+    600,
+    'the episodes two folders deep are catalogued, not just the loose films',
+  )
+
+  const stored = port.document()
+  assert.ok(stored !== null, 'the scan wrote the document')
+  assert.ok(
+    stored.length < MAX_STORE_CHARS,
+    `1,200 rows encode to ${stored.length} characters, which must fit the reader's ceiling`,
+  )
+
+  // A fresh service over the same bytes is what a restart does.
+  const restarted = new LibraryService(createMemoryStorage(stored))
+  assert.equal(restarted.items().length, 1200)
+  assert.equal(restarted.loadReport().lostStoredState, false)
+
+  // And the screen's own rule reaches every one of them.
+  const shelf = homeShelf(restarted.items())
+  assert.equal(shelf.fromResume, false)
+  assert.equal(shelf.items.length, 1200)
 })
 
 test('a host with no filesystem API says so instead of finding nothing', async () => {

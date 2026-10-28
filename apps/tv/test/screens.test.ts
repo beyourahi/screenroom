@@ -26,10 +26,15 @@ function inputBlock(file: string): string {
 }
 
 const REQUIRED: Readonly<Record<string, readonly string[]>> = {
-  'Home.ts': ['left', 'right', 'up', 'down', 'enter', 'info'],
-  'Browse.ts': ['left', 'right', 'up', 'down', 'enter', 'info', 'rewind', 'fastForward'],
+  // Every screen a viewer can reach must be fully navigable with the four arrows and
+  // OK. `info` is deliberately absent from this list: it is an optional shortcut, and a
+  // screen that would be unusable without it is the defect this map exists to catch.
+  'Home.ts': ['left', 'right', 'up', 'down', 'enter'],
+  'Browse.ts': ['left', 'right', 'up', 'down', 'enter'],
+  'Search.ts': ['left', 'right', 'up', 'down', 'enter'],
+  'Sources.ts': ['left', 'right', 'up', 'down', 'enter'],
   'Detail.ts': ['up', 'down', 'enter'],
-  'Settings.ts': ['up', 'down', 'enter'],
+  'Settings.ts': ['left', 'right', 'up', 'down', 'enter'],
   // Back is the one key a screen may claim from the router, and the player must: a Back
   // press closes the track menu before it leaves the file.
   'Player.ts': [
@@ -61,7 +66,19 @@ for (const [file, keys] of Object.entries(REQUIRED)) {
   })
 }
 
-test('the player claims Back so the track menu can close before the file does', () => {
+test('no screen tells the viewer to press a key the remote may not have', () => {
+  const screens = ['Home.ts', 'Browse.ts', 'Search.ts', 'Sources.ts', 'Detail.ts', 'Settings.ts']
+  for (const file of screens) {
+    const source = readFileSync(new URL(`../src/screens/${file}`, import.meta.url), 'utf8')
+    assert.equal(
+      /press Info|Info opens|Info key/i.test(source),
+      false,
+      `${file} still depends on the Info key`,
+    )
+  }
+})
+
+test('the player claims Back so the menu can close before the file does', () => {
   const block = inputBlock('Player.ts')
   assert.ok(block.includes('back() {'), 'the player must handle Back itself')
   assert.ok(block.includes('this.$router.back()'), 'and still leave the file afterwards')

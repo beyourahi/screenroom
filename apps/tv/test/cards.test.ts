@@ -184,6 +184,36 @@ test('a card for a file with no measured duration still reads honestly', () => {
   assert.equal(label, '1995 · 2:00')
 })
 
+test('a grid with a rail beside it starts after the rail and still fits', () => {
+  const left = 342
+  const geometry = gridFor(5, 2, TOKENS, APP_WIDTH, { top: 200, bottom: 980, left })
+  assert.equal(geometry.originX, left, 'the first column starts where the rail ends')
+  const last = cellPosition(4, geometry)
+  assert.ok(
+    last.x + geometry.cardWidth <= APP_WIDTH - Math.round(TOKENS.spacing.shellPad),
+    'the last column still clears the right edge',
+  )
+})
+
+test('a window of a long list is placed from the top of the band, not from the list', () => {
+  // A thousand files are drawn ten at a time. The cards in the window are placed from
+  // their position *in the window*, while the cursor is still an absolute index, so the
+  // first drawn row always lands at the top of the band.
+  const geometry = gridFor(5, 2, TOKENS, APP_WIDTH, { top: 200, bottom: 980, left: 342 })
+  const window = { first: 5, columns: 5 }
+  const items = Array.from({ length: 10 }, (_value, index) =>
+    item({ id: `item-${index + window.first}` }),
+  )
+  const cards = buildCards(items, 10, geometry, TOKENS, window)
+  assert.equal(cards.length, 10)
+  assert.equal(cards[0]?.y, geometry.originY, 'the window starts at the top of the band')
+  assert.equal(cards[0]?.x, geometry.originX)
+  assert.equal(cards[5]?.y, geometry.originY + geometry.cardHeight + geometry.gapY)
+  assert.equal(cards[5]?.x, geometry.originX, 'absolute index 10 is the first card of its row')
+  assert.equal(cards[5]?.focused, true, 'the focused card is the absolute index, not a window one')
+  assert.equal(cards[0]?.focused, false)
+})
+
 test('the token scale the grid derives from is the one the desktop uses', () => {
   // If the TV scale were re-derived by hand, the grid would drift with it and nothing
   // would catch it: the card widths are integers computed from these numbers.

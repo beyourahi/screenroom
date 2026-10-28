@@ -13,6 +13,7 @@
  */
 
 import { createFocusMemory, type FocusMemory } from '../core/focus.ts'
+import { createNavMemory, type NavMemory } from '../core/nav.ts'
 import { LibraryService, nextId, type StoragePort } from '../core/storage.ts'
 import type { LibraryItem, Source } from '../core/contract.ts'
 import {
@@ -43,6 +44,30 @@ let service: LibraryService | null = null
 
 /** Focus remembered per screen, so Back returns the cursor where it was. */
 const focusMemory: FocusMemory = createFocusMemory()
+
+/** The rail-and-grid cursor, remembered per route. */
+const navigation: NavMemory = createNavMemory()
+
+/** What a search screen needs to survive being unmounted while a match is opened. */
+export interface SearchSession {
+  readonly query: string
+  readonly keyIndex: number
+  readonly resultIndex: number
+  readonly railIndex: number
+  readonly zone: 'rail' | 'keys' | 'results'
+}
+
+/** The search as the viewer left it. Query first, because it is the only real state. */
+let search: SearchSession = {
+  query: '',
+  keyIndex: 0,
+  resultIndex: 0,
+  railIndex: 3,
+  zone: 'keys',
+}
+
+/** Where a running walk has reached, or `null` when no walk has reported yet. */
+let walkProgress: { folders: number; files: number } | null = null
 
 /** The granted sources, keyed by the label the platform reported. */
 let roots: readonly MediaRoot[] = []
@@ -112,6 +137,21 @@ export function focus(): FocusMemory {
   return focusMemory
 }
 
+/** The rail-and-grid cursor, remembered per route. */
+export function nav(): NavMemory {
+  return navigation
+}
+
+/** The search as the viewer last left it. */
+export function searchSession(): SearchSession {
+  return search
+}
+
+/** Remembers the search screen's state, so Back returns to the same query. */
+export function rememberSearch(next: SearchSession): void {
+  search = next
+}
+
 /** The drives the TV reported, as of the last refresh. */
 export function mediaRoots(): readonly MediaRoot[] {
   return roots
@@ -155,6 +195,11 @@ export function scanReport(): ScanReport {
 /** True while a walk is running, for a screen that wants to say so. */
 export function scanInProgress(): boolean {
   return scanning
+}
+
+/** How far the running walk has reached, or `null` before the first folder is read. */
+export function scanProgress(): { folders: number; files: number } | null {
+  return walkProgress
 }
 
 /**
@@ -329,6 +374,7 @@ export async function scanDrives(): Promise<ScanReport> {
   }
   scanning = true
   scanCancelled = false
+  walkProgress = null
   const startedMs = Date.now()
   try {
     const discovered = await refreshMediaRoots()
@@ -364,6 +410,10 @@ export async function scanDrives(): Promise<ScanReport> {
     let imported = 0
     let withdrawn = 0
     let scannedSources = 0
+    // Running totals across drives, so the screen's progress line counts the whole
+    // scan rather than restarting at zero on the second drive.
+    let foldersWalked = 0
+    let filesWalked = 0
     let complete = true
     let bounded = false
     let reason: string | null = null
@@ -384,7 +434,12 @@ export async function scanDrives(): Promise<ScanReport> {
       const walk = await walkRoot({
         root: source.rootPath,
         isCancelled: () => scanCancelled,
+        onProgress: (visited: number, files: number) => {
+          walkProgress = { folders: foldersWalked + visited, files: filesWalked + files }
+        },
       })
+      foldersWalked += walk.visited
+      filesWalked += walk.files.length
       if (walk.rootProblem !== null) {
         // The drive is mounted and will not list. That is a failed walk, so nothing
         // this source held is withdrawn; its rows are marked unreadable and the reason
@@ -436,6 +491,19 @@ export async function scanDrives(): Promise<ScanReport> {
     )
     library().applyScan({ items: catalog, sources: stamped, report })
     recordEvidence('scan', describeReport(report))
+    // A separate line from the scan report on purpose: one says what the walk found,
+    // the other says what the library now holds and whether the device kept it. The
+    // defect this replaces was a scan that reported a thousand files while the screens
+    // showed none, and these two lines are what tell that apart from a full drive.
+    recordEvidence(
+      'library',
+      [
+        `items=${catalog.length}`,
+        `available=${catalog.filter((item) => item.available).length}`,
+        `sources=${stamped.length}`,
+        `write=${library().writeFailure() === null ? 'accepted' : 'refused'}`,
+      ].join(' '),
+    )
     return report
   } finally {
     scanning = false

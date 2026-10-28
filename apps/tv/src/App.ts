@@ -21,7 +21,9 @@ import Browse from './screens/Browse.ts'
 import Detail from './screens/Detail.ts'
 import Home from './screens/Home.ts'
 import Player from './screens/Player.ts'
+import Search from './screens/Search.ts'
 import Settings from './screens/Settings.ts'
+import Sources from './screens/Sources.ts'
 
 /** True when a key event is the remote's Back key, in either spelling it arrives as. */
 function isBackKey(keyCode: number): boolean {
@@ -42,9 +44,15 @@ export default Blits.Application({
     </Element>
   `,
   router: {
+    // The routes the rail opens, plus the two leaf screens (a file, and the player).
+    // The `data` on Movies and TV Shows is the prop that decides which rows Browse
+    // draws; the router passes route data straight through as props.
     routes: [
       { path: '/', component: Home },
-      { path: '/browse', component: Browse },
+      { path: '/movies', component: Browse, data: { kind: 'movies' } },
+      { path: '/series', component: Browse, data: { kind: 'series' } },
+      { path: '/search', component: Search },
+      { path: '/sources', component: Sources },
       { path: '/detail', component: Detail },
       { path: '/settings', component: Settings },
       { path: '/player', component: Player },

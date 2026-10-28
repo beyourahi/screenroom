@@ -21,17 +21,18 @@ import type { LibraryItem, MediaKind, ResumeEntry } from './contract.ts'
 export const COLUMNS = 5
 
 /**
- * Rows per page.
+ * Rows drawn at once.
  *
- * Two, not three. A page of five-by-three only fits if the cards are shrunk until the
- * 42-pixel title no longer fits inside its own card; `design/cards.ts` sizes the grid
- * to the band between the header and the footer, and at this type scale that band holds
- * two rows of five readable cards. A third row was drawn below the bottom of the set.
+ * Two, not three. Three rows of five only fit if the cards are shrunk until the title
+ * no longer fits inside its own card; `design/cards.ts` sizes the grid to the band
+ * between the header and the footer, and at this type scale that band holds two rows of
+ * five readable cards. A third row was drawn below the bottom of the set.
+ *
+ * This is how many rows are *visible*, not how many the library has: the grid is a
+ * window over the whole list (`core/nav.ts`), so a thousand files scroll rather than
+ * paging.
  */
 export const ROWS = 2
-
-/** Items per page, always a whole number of rows. */
-export const PAGE_SIZE = COLUMNS * ROWS
 
 /** The kind filter the screen offers. */
 export type KindFilter = 'all' | 'movies' | 'series'
@@ -63,6 +64,59 @@ function normalise(text: string): string {
 }
 
 /**
+ * The order a library is shown in.
+ *
+ * Title first, then season and episode, then the stored path as a tie-break so the
+ * order is stable between renders. Sorting in the screen would have to be repeated in
+ * every screen that shows a list; sorting here means the rail's three library screens
+ * cannot disagree about what "alphabetical" means.
+ *
+ * The comparison is deliberately not `localeCompare`: a 2021 TV's collation differs by
+ * firmware, and a library whose order changed between two sets is a bug the owner
+ * cannot describe.
+ */
+export function sortForDisplay(items: readonly LibraryItem[]): LibraryItem[] {
+  const key = (item: LibraryItem): string => item.title.toLowerCase()
+  return [...items].sort((left, right) => {
+    const byTitle = key(left) < key(right) ? -1 : key(left) > key(right) ? 1 : 0
+    if (byTitle !== 0) {
+      return byTitle
+    }
+    const bySeason = (left.season ?? 0) - (right.season ?? 0)
+    if (bySeason !== 0) {
+      return bySeason
+    }
+    const byEpisode = (left.episode ?? 0) - (right.episode ?? 0)
+    if (byEpisode !== 0) {
+      return byEpisode
+    }
+    return left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0
+  })
+}
+
+/**
+ * The items one rail destination shows.
+ *
+ * `movies` includes files the filename rule could not read (`kind: 'other'`) on
+ * purpose. A container this app could not name is still a film the owner put on the
+ * drive, and a filter that hid it would make the file unreachable from every screen but
+ * Home — which is the defect this whole change exists to remove, in miniature.
+ */
+export function itemsFor(
+  items: readonly LibraryItem[],
+  kind: KindFilter,
+): LibraryItem[] {
+  switch (kind) {
+    case 'all':
+      return sortForDisplay(items)
+    case 'movies':
+      return sortForDisplay(items.filter((item) => item.kind !== 'series'))
+    case 'series':
+      return sortForDisplay(items.filter((item) => item.kind === 'series'))
+  }
+}
+
+/**
  * Applies a filter to the catalog.
  *
  * The text matches the title or the filename, because an owner searching for
@@ -87,36 +141,6 @@ export function filterItems(
       normalise(item.title).includes(needle) || normalise(item.relativePath).includes(needle)
     )
   })
-}
-
-/** How many pages a result set has, never fewer than one. */
-export function pageCount(count: number): number {
-  if (count <= 0) {
-    return 1
-  }
-  return Math.ceil(count / PAGE_SIZE)
-}
-
-/** The page a requested number resolves to, given how many there are. */
-export function clampPage(page: number, count: number): number {
-  const last = pageCount(count) - 1
-  if (!Number.isFinite(page)) {
-    return 0
-  }
-  const whole = Math.trunc(page)
-  if (whole < 0) {
-    return 0
-  }
-  return whole > last ? last : whole
-}
-
-/** The slice of items shown on one page. */
-export function pageItems(
-  items: readonly LibraryItem[],
-  page: number,
-): readonly LibraryItem[] {
-  const start = clampPage(page, items.length) * PAGE_SIZE
-  return items.slice(start, start + PAGE_SIZE)
 }
 
 /**
@@ -189,14 +213,14 @@ export function emptyState(input: EmptyInput): EmptyState | null {
       title: 'No media yet.',
       // A television has no folder picker: the remedy is a drive and a scan, in that
       // order, and saying so is the difference between a dead end and a next step.
-      detail: 'Plug a drive with films or episodes into the TV, then run Scan for media in Settings (press Info).',
+      detail: 'Plug a drive with films or episodes into the TV, then choose Media Sources in the menu and run Scan for media.',
     }
   }
   if (input.catalogCount === 0) {
     return {
       situation: 'empty_library',
       title: 'This drive has no media in it.',
-      detail: 'Put films or episodes on the drive, then Scan for media in Settings.',
+      detail: 'Put films or episodes on the drive, then scan again from Media Sources.',
     }
   }
   return null
@@ -232,6 +256,43 @@ export function continueWatching(
     })
     .slice(0, bounded)
     .map((item) => ({ item, positionMs: item.positionMs, durationMs: item.durationMs }))
+}
+
+/** What Home shows, and why. */
+export interface HomeShelf {
+  readonly heading: string
+  /** The line under the heading: a count, never a claim. */
+  readonly note: string
+  readonly items: readonly LibraryItem[]
+  /** True when the shelf is resume points rather than the whole library. */
+  readonly fromResume: boolean
+}
+
+/**
+ * What the Home screen draws.
+ *
+ * This is the fix for the defect the owner reported on this set: the scan catalogued
+ * over a thousand files and Home drew nothing, because Home only ever drew *Continue
+ * watching* and nothing had been played yet. A library is not only what you were in
+ * the middle of.
+ *
+ * So the rule is: resume points when there are any, and **the whole library** when there
+ * are not. The second half is the important one — a fresh install, a new drive, or a
+ * viewer who finished everything still opens onto their media, with the rail beside it
+ * for Movies, TV Shows and Search.
+ */
+export function homeShelf(items: readonly LibraryItem[]): HomeShelf {
+  const resume = continueWatching(items, Number.MAX_SAFE_INTEGER)
+  const total = `${items.length} ${items.length === 1 ? 'file' : 'files'} in the library`
+  if (resume.length > 0) {
+    return {
+      heading: 'Continue watching',
+      note: `${resume.length} in progress · ${total}`,
+      items: resume.map((entry) => entry.item),
+      fromResume: true,
+    }
+  }
+  return { heading: 'Your library', note: total, items: sortForDisplay(items), fromResume: false }
 }
 
 /**

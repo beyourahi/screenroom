@@ -28,13 +28,11 @@ import { formatPosition, progressFraction } from '../core/browse.ts'
 import { resolveLocator, subtitleStem } from '../core/locator.ts'
 import { rememberChoice, type DeviceSettings } from '../core/settings.ts'
 import {
-  buildTrackMenu,
-  chooseTracks,
-  nextEpisode,
-  sidecarFileNames,
-  type TrackChoice,
-  type TrackMenuRow,
-} from '../core/tracks.ts'
+  buildPlayerMenu,
+  MENU_SEEK_MS,
+  type PlayerMenuRow,
+} from '../core/player-menu.ts'
+import { chooseTracks, nextEpisode, sidecarFileNames, type TrackChoice } from '../core/tracks.ts'
 import type { LibraryItem } from '../core/contract.ts'
 import { hex, TOKENS } from '../design/tokens.ts'
 import { routeBoolean, routeString } from '../app/route-props.ts'
@@ -63,7 +61,7 @@ const SCRIM_ALPHA = 0.55
 const SCRIM_ALPHA_STUCK = 0.8
 
 /** One row of the drawn menu. */
-interface MenuRow extends TrackMenuRow {
+interface MenuRow extends PlayerMenuRow {
   readonly y: number
   readonly fill: string
   readonly labelColor: string
@@ -264,7 +262,7 @@ export default Blits.Component('Player', {
       footY: 1080 - Math.round(TOKENS.spacing.shellPad + TOKENS.type.body * 3),
       title: '',
       status: '',
-      footer: 'Play/pause · |◄ ►| jump a minute · ◄ ► ten seconds · ▲▼ tracks · Back stops',
+      footer: '▲▼ controls · OK selects · ◄ ► ten seconds · Back stops',
       /** Kept so the readout can fall back to the catalogued duration. */
       durationMs: 0,
       overlayAlpha: 0,
@@ -300,6 +298,8 @@ export default Blits.Component('Player', {
       nextId: '',
       nextLabel: '',
       finished: false,
+      /** True when nothing reached the decoder, so the menu offers no transport rows. */
+      failed: false,
       /** What happened to a subtitle file beside the video. */
       sidecarNote: '',
     }
@@ -458,6 +458,7 @@ export default Blits.Component('Player', {
       this.subtitleLine = ''
       this.menuOpen = false
       this.finished = false
+      this.failed = false
       this.nextId = ''
       this.nextLabel = ''
       this.sidecarNote = ''
@@ -469,13 +470,13 @@ export default Blits.Component('Player', {
       const source = library().source(item.sourceId)
       if (source === null) {
         this.reportFailure(
-          'The drive this file came from is no longer granted. Scan again from Settings.',
+          'The drive this file came from is no longer granted. Scan again from Media Sources.',
         )
         return
       }
       if (source.state !== 'available' || !item.available) {
         this.reportFailure(
-          'That drive is not readable right now. Plug it back in and scan again from Settings.',
+          'That drive is not readable right now. Plug it back in and scan again from Media Sources.',
         )
         return
       }
@@ -573,6 +574,9 @@ export default Blits.Component('Player', {
       this.status = message
       this.overlayAlpha = 1
       this.scrimAlpha = SCRIM_ALPHA_STUCK
+      // Nothing is running, so the track menu drops its transport rows: see
+      // `core/player-menu.ts`.
+      this.failed = true
     },
     playPause() {
       if (this.menuOpen) {
@@ -666,16 +670,21 @@ export default Blits.Component('Player', {
      */
     openMenu() {
       const tracks: readonly TrackChoice[] = player.tracks()
-      const rows = buildTrackMenu(tracks, {
-        audioIndex: this.audioIndex,
-        textIndex: this.textIndex,
-        silent: this.silent || player.subtitlesSilent(),
+      // The menu always has rows now: the three controls and the way out exist for every
+      // file, whether or not the decoder reported a single track. A control that opens
+      // onto nothing was the old behaviour, and it looked like a broken key.
+      const rows = buildPlayerMenu({
+        tracks,
+        state: {
+          audioIndex: this.audioIndex,
+          textIndex: this.textIndex,
+          silent: this.silent || player.subtitlesSilent(),
+        },
+        paused: player.view().paused,
+        running: !this.failed && player.view().running,
+        finished: this.finished,
+        nextLabel: this.nextLabel,
       })
-      if (rows.length === 0) {
-        this.showOverlay()
-        this.status = 'This file reports no audio or subtitle tracks to switch.'
-        return
-      }
       const layout = this.layout
       // The cursor is clamped *before* the rows are built, so a menu that shrank since
       // last time cannot start with nothing highlighted.
@@ -752,6 +761,35 @@ export default Blits.Component('Player', {
         this.closeMenu()
         return
       }
+      switch (row.kind) {
+        case 'playpause': {
+          this.closeMenu()
+          this.playPause()
+          return
+        }
+        case 'seekBack':
+        case 'seekForward': {
+          const delta = row.kind === 'seekBack' ? -MENU_SEEK_MS : MENU_SEEK_MS
+          this.closeMenu()
+          player.seekTo(player.view().positionMs + delta)
+          this.repaint()
+          return
+        }
+        case 'next':
+          this.closeMenu()
+          this.playNext()
+          return
+        case 'exit':
+          this.closeMenu()
+          this.$router.back()
+          return
+        case 'off':
+          break
+        case 'audio':
+        case 'text':
+          break
+      }
+
       if (row.kind === 'off') {
         const accepted = player.setSubtitlesSilent(true)
         this.silent = accepted
