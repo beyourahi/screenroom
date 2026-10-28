@@ -169,7 +169,7 @@ Items 3–7 are untouched. What a Mac could answer, it answered:
 | Question the gate depends on | State |
 | --- | --- |
 | Does a Lightning 3 bundle build for this engine at all? | **Yes.** `pnpm build` emits a single 462,142-byte `main.js` targeted at the 2021 engine, with no code splitting — a widget has no server to fetch a second chunk from — and relative asset paths, verified by the staging step rather than trusted |
-| Is the client's own logic exercised? | **183 tests, 0 failures**, off-device and in `pnpm test`: the D-pad rule index-for-index against the desktop's, the progress guard, the store's durability rules, locator validation, AVPlay's display-rect maths and track reading, the scan rules and a simulated-Tizen walk of a whole drive, the track menu and next-episode rules, decoder preferences, the remote-key wiring of every screen, tokens and grid geometry, and a template check that every `$name` a screen reads is one it declares |
+| Is the client's own logic exercised? | **189 tests, 0 failures**, off-device and in `pnpm test`: the D-pad rule index-for-index against the desktop's, the progress guard, the store's durability rules, locator validation, AVPlay's display-rect maths and track reading, the scan rules and a simulated-Tizen walk of a whole drive, the track menu and next-episode rules, decoder preferences, the remote-key wiring of every screen, tokens and grid geometry, and a template check that every `$name` a screen reads is one it declares |
 | Does the widget manifest ask for the right things? | **The privileges are the ones the code uses** — remote-key and filesystem-read, and the template's unused `application.launch` request is gone. The TV is still the only authority on whether it grants them, and a refused `listDirectory` is reported verbatim on the Settings screen rather than shown as an empty drive |
 | Can a signed package be produced? | **Yes.** `build/ScreenroomTV-0.1.0.wgt`, 157,202 bytes, sha256 `b7d82c49755ae1501bffe62040cd2263aaa181510d477d3c4196d8b5710ecc51`, produced by the `tizen-build-project` runner with **no** default-developer-certificate warning, and containing a `main.js` byte-identical to the tested bundle (`9b7cbda…97c4`) |
 | Is the TV authorised to install it? | **Yes, verified without printing either value.** The distributor chain is Samsung-issued (`CN=VD DEVELOPER Public CA Class` ← `VD DEVELOPER Public Root Class`), leaf valid 2026-10-27 → 2027-10-27, carrying exactly **one** `deviceid` binding; the DUID the set reports through `cert-manager acquire-duid` matches that binding (compared by hash, 2026-10-28) |
@@ -224,6 +224,21 @@ observable that settles each one.
    read returned nothing and the boot record said `model=unknown`. The value it returns
    is now kept honestly: `product=3.7` is the **product** version and is no longer shown
    under a "Tizen version" label, which would have been a confident false receipt.
+
+### A fourth defect, read out of the reference rather than off the screen (2026-10-29)
+
+The directory reader was written against a `listDirectory(path, names, error)` signature
+and filtered its result for `typeof name === 'string'`. Tizen implements the W3C
+Filesystem API, where `File.listFiles` calls back with **`File` objects** (`name`,
+`isFile`, `isDirectory`), and `tizen.filesystem` has `resolve`, not `listDirectory`. Both
+halves were wrong in the same direction: every folder would have read as **empty**, and
+because no issue was raised the walk would have called itself complete and withdrawn
+every item's availability. A drive full of films would have catalogued zero, without an
+error. The reader now resolves the location and lists it, keeps each `File`'s own
+`isDirectory`, accepts a name-only answer, and tries the device-API spelling once before
+reporting a refusal. Six tests pin the normalization (`test/listing.test.ts`, 189 total),
+and the fix is installed on the set — **but it is not verified until a scan runs**, so
+item 3 stays open.
 
 What this client now does off-device, and therefore does not have to be discovered on
 the television: it walks a mounted drive, parses film and episode identities from

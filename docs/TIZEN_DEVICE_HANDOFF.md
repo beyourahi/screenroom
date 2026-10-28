@@ -5,8 +5,8 @@ Tizen 6.0 web engine. This is the only TV in scope
 ([ADR-004](ADR-004_PERSONAL_EDITION_SCOPE.md)).
 
 **State (2026-10-29): the client is installed on the set, it runs there, and the owner
-has seen it.** The current package — 160,680 bytes,
-sha256 `01d601765a779e7b31b03c4301b50a1fa4245d5f5df8eeccb6d9d005e2fd2231` — installed with
+has seen it.** The current package — 160,893 bytes,
+sha256 `69a794b2fb1ef4452b805cc4ebd3afc561fe9b2ae324a8943dc5dcfbe7ed7e14` — installed with
 `install completed` and launched, and the set's own record reads
 `boot host=tizen avplay=1 filesystem=1 inputdevice=1 storage=1 keys=9/refused=0
 model=UAU8000 firmware=T-NKLAUABC-2310.0` plus
@@ -27,17 +27,17 @@ television is.
 cd apps/tv
 pnpm install                 # Blits 2.15.0, TypeScript 5.9, Vite 7
 pnpm typecheck               # app source and tests, separately
-pnpm test                    # 183 tests, 0 failures
+pnpm test                    # 189 tests, 0 failures
 pnpm build                   # typecheck + Vite + the Tizen staging step
 ```
 
 | Check | Result (2026-10-28) |
 | --- | --- |
 | `pnpm typecheck` | clean. Application source typechecks with **no ambient types at all** (`"types": []`), so a Node-only global cannot typecheck inside a component that has to run in a web widget; the tests are the only files that see Node's globals |
-| `pnpm test` | **183 tests, 0 failures** — the focus machine, the progress guard, the store and its durability rules, the scanner's rules, a whole-drive walk over a simulated Tizen filesystem, filename interpretation, the track menu and next-episode rule, decoder preferences, the remote-key wiring of every screen, relative-locator validation, AVPlay's display-rect maths and track reading, the design tokens and the card geometry. Per-suite counts are in [`TEST_PLAN.md`](TEST_PLAN.md) |
+| `pnpm test` | **189 tests, 0 failures** — the focus machine, the progress guard, the store and its durability rules, the scanner's rules, a whole-drive walk over a simulated Tizen filesystem, filename interpretation, the track menu and next-episode rule, decoder preferences, the remote-key wiring of every screen, relative-locator validation, AVPlay's display-rect maths and track reading, the design tokens and the card geometry. Per-suite counts are in [`TEST_PLAN.md`](TEST_PLAN.md) |
 | `pnpm build` | one 462,142-byte `main.js` and a 1,391-byte `index.html`; no code splitting (a widget has no server to fetch a second chunk from) |
 | `apps/tv/build/widget/` | the staged widget: `config.xml`, `icon.png`, `index.html`, `main.js`, and the Tizen project metadata. The staging step refuses to continue if the bundle is unlinked, missing, or referenced by an absolute path |
-| Signed package | **built and installed.** `apps/tv/build/ScreenroomTV-0.1.0.wgt`, **160,680 bytes, sha256 `01d60176…d2231` (2026-10-29)**; earlier builds were 157,202 → 157,986 → 158,079 → 158,101 → 158,462 → 158,500 bytes as the device defects below were fixed. The hash changes with every one of those; quote the one the TV actually has (see section 2) |
+| Signed package | **built and installed.** `apps/tv/build/ScreenroomTV-0.1.0.wgt`, **160,893 bytes, sha256 `69a794b2…7e14` (2026-10-29, carries the directory-listing fix)**; the build before it was 160,680 bytes, sha256 `01d60176…d2231`; earlier builds were 157,202 → 157,986 → 158,079 → 158,101 → 158,462 → 158,500 bytes as the device defects below were fixed. The hash changes with every one of those; quote the one the TV actually has (see section 2) |
 | The packaged bundle | byte-identical to the tested one, checked on every build: the `main.js` digest inside the `.wgt` equals the digest of `dist/main.js` printed by the staging step |
 | Package contents | exactly `author-signature.xml`, `config.xml`, `icon.png`, `index.html`, `main.js`, `signature1.xml` — nothing stray, and three privileges (`tv.inputdevice`, `filesystem.read`, `productinfo`) in the manifest |
 | Signing profile | one profile exists and is **active**: `screenroom` (name read only; no certificate material was inspected) |

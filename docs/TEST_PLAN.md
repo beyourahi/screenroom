@@ -45,7 +45,7 @@ Nothing in this document has been run against Windows or a TV.
 Its tests run off-device and are a **new tier**, not a device run:
 
 ```bash
-cd apps/tv && pnpm test      # 183 tests, 0 failures
+cd apps/tv && pnpm test      # 189 tests, 0 failures
 cd apps/tv && pnpm typecheck # app source and tests, separately
 cd apps/tv && pnpm build     # bundle + the Tizen staging step
 ```

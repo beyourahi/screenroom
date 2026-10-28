@@ -535,7 +535,7 @@ own storage adapter. What was written, and what each part rests on:
 ```bash
 cd apps/tv
 pnpm typecheck    # clean; application source sees no ambient Node types at all
-pnpm test         # 183 tests, 0 failures
+pnpm test         # 189 tests, 0 failures
 pnpm build        # 484,867-byte main.js + the staging step
 ```
 
