@@ -21,10 +21,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::render::{MAX_DIMENSION, SoftwareRenderer, UPDATE_FRAME, target_size};
-use crate::{Frame, LibMpv, Mpv, PlayerError, PlayerState, event};
-
-/// How long the worker blocks in libmpv before checking its command queue.
-const WAIT_SLICE: f64 = 0.02;
+use crate::{Frame, LibMpv, Mpv, PlayerError, PlayerState, WakeSignal, event};
 
 /// True when `SCREENROOM_PLAYER_TRACE` is set: prints worker steps to stderr.
 fn tracing() -> bool {
@@ -54,12 +51,14 @@ const ID_MISTIMED_FRAMES: u64 = 8;
 const ID_VOLUME: u64 = 9;
 const ID_MUTE: u64 = 10;
 const ID_TRACK_LIST: u64 = 11;
+const ID_HWDEC_CURRENT: u64 = 12;
 
 /// `mpv_format` values used when observing properties (`mpv/client.h`).
 const FORMAT_FLAG: i32 = 3;
 const FORMAT_INT64: i32 = 4;
 const FORMAT_DOUBLE: i32 = 5;
 const FORMAT_NODE: i32 = 6;
+const FORMAT_STRING: i32 = 1;
 
 /// An `mpv_event_property` (`mpv/client.h`).
 #[repr(C)]
@@ -156,6 +155,8 @@ pub struct PlayerSnapshot {
     pub volume: Option<f64>,
     /// Whether output is muted, read back from libmpv's `mute`.
     pub muted: Option<bool>,
+    /// Hardware decoder libmpv actually engaged (`no` means software decode).
+    pub hardware_decoder: Option<String>,
 }
 
 impl Default for PlayerSnapshot {
@@ -180,6 +181,7 @@ impl Default for PlayerSnapshot {
             subtitle_position: None,
             volume: None,
             muted: None,
+            hardware_decoder: None,
         }
     }
 }
@@ -325,11 +327,60 @@ pub const SUB_SCALE_RANGE: (f64, f64) = (0.1, 10.0);
 /// kept so a stored style from another client still means the same thing.
 pub const SUB_POSITION_RANGE: (f64, f64) = (0.0, 150.0);
 
+/// Hardware decode policy accepted by the software render bridge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HwdecMode {
+    /// Always decode on the CPU.
+    No,
+    /// Request VideoToolbox and copy decoded frames back into system memory.
+    VideoToolboxCopy,
+    /// Let mpv choose a safe copy-back hardware decoder.
+    AutoCopy,
+}
+
+impl Default for HwdecMode {
+    fn default() -> Self {
+        // Evidence was measured on macOS. Leave unmeasured platforms on the
+        // previously proven software path until their hardware gates are run.
+        if cfg!(target_os = "macos") {
+            Self::AutoCopy
+        } else {
+            Self::No
+        }
+    }
+}
+
+impl HwdecMode {
+    fn as_option(self) -> &'static str {
+        match self {
+            Self::No => "no",
+            Self::VideoToolboxCopy => "videotoolbox-copy",
+            Self::AutoCopy => "auto-copy",
+        }
+    }
+
+    fn from_environment() -> Result<Self, PlayerError> {
+        match std::env::var("SCREENROOM_HWDEC").as_deref() {
+            Ok("no") => Ok(Self::No),
+            Ok("videotoolbox-copy") => Ok(Self::VideoToolboxCopy),
+            Ok("auto-copy") => Ok(Self::AutoCopy),
+            Ok(value) => Err(PlayerError::Argument(format!(
+                "unsupported SCREENROOM_HWDEC value {value:?}; use no, videotoolbox-copy, or auto-copy"
+            ))),
+            Err(std::env::VarError::NotPresent) => Ok(Self::default()),
+            Err(error) => Err(PlayerError::Argument(format!(
+                "could not read SCREENROOM_HWDEC: {error}"
+            ))),
+        }
+    }
+}
+
 /// The interface's handle to the player thread.
 pub struct Player {
     shared: Arc<Mutex<PlayerSnapshot>>,
     commands: Sender<PlayerCommand>,
     thread: Option<JoinHandle<()>>,
+    wake: Arc<WakeSignal>,
     next_load_id: std::sync::atomic::AtomicU64,
     next_seek_serial: std::sync::atomic::AtomicU64,
 }
@@ -346,14 +397,21 @@ impl Player {
     /// Returns the reason when libmpv is missing or cannot initialise, so the
     /// caller can show it instead of a dead video area.
     pub fn start() -> Result<Self, PlayerError> {
+        Self::start_with_hwdec(HwdecMode::from_environment()?)
+    }
+
+    /// Starts with a specific hardware decoding policy.
+    pub fn start_with_hwdec(hwdec: HwdecMode) -> Result<Self, PlayerError> {
         let shared = Arc::new(Mutex::new(PlayerSnapshot::default()));
         let (commands, queue) = mpsc::channel();
         let (ready_sender, ready) = mpsc::channel();
+        let wake = Arc::new(WakeSignal::new());
+        let thread_wake = Arc::clone(&wake);
         let thread_shared = Arc::clone(&shared);
 
         let handle = thread::Builder::new()
             .name("screenroom-player".to_string())
-            .spawn(move || run(thread_shared, queue, ready_sender))
+            .spawn(move || run(thread_shared, queue, ready_sender, thread_wake, hwdec))
             .map_err(|error| {
                 PlayerError::Unavailable(format!("could not start player: {error}"))
             })?;
@@ -363,6 +421,7 @@ impl Player {
                 shared,
                 commands,
                 thread: Some(handle),
+                wake,
                 next_load_id: std::sync::atomic::AtomicU64::new(0),
                 next_seek_serial: std::sync::atomic::AtomicU64::new(0),
             }),
@@ -382,6 +441,12 @@ impl Player {
             .lock()
             .map(|snapshot| snapshot.clone())
             .unwrap_or_default()
+    }
+
+    /// Number of command, libmpv-event, and render notifications since start.
+    /// Primarily useful for diagnosing the worker's idle and wake behavior.
+    pub fn wake_notifications(&self) -> u64 {
+        self.wake.current()
     }
 
     /// Opens `path` and starts playback from the beginning.
@@ -465,13 +530,16 @@ impl Player {
     fn send(&self, command: PlayerCommand) {
         // A closed channel means the worker already exited; the snapshot then
         // carries the reason, so dropping the command is correct here.
-        let _ = self.commands.send(command);
+        if self.commands.send(command).is_ok() {
+            self.wake.notify();
+        }
     }
 }
 
 impl Drop for Player {
     fn drop(&mut self) {
         let _ = self.commands.send(PlayerCommand::Shutdown);
+        self.wake.notify();
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
@@ -483,8 +551,10 @@ fn run(
     shared: Arc<Mutex<PlayerSnapshot>>,
     commands: Receiver<PlayerCommand>,
     ready: Sender<Result<(), PlayerError>>,
+    wake: Arc<WakeSignal>,
+    hwdec: HwdecMode,
 ) {
-    let mut runner = match Runner::new() {
+    let mut runner = match Runner::new(hwdec, Arc::clone(&wake)) {
         Ok(runner) => {
             let _ = ready.send(Ok(()));
             runner
@@ -502,7 +572,7 @@ fn run(
             return;
         }
     };
-    runner.play_loop(&commands, &shared);
+    runner.play_loop(&commands, &shared, &wake);
 }
 
 /// Owns libmpv for the lifetime of the thread.
@@ -542,6 +612,7 @@ struct Runner {
     volume: Option<f64>,
     /// Whether output is muted, as libmpv reports it.
     muted: Option<bool>,
+    hardware_decoder: Option<String>,
     load_id: u64,
     position_ready: bool,
     current_entry_id: Option<i64>,
@@ -553,7 +624,7 @@ struct Runner {
 }
 
 impl Runner {
-    fn new() -> Result<Self, PlayerError> {
+    fn new(hwdec: HwdecMode, wake: Arc<WakeSignal>) -> Result<Self, PlayerError> {
         let library = LibMpv::load()?;
         // Every option is set before initialisation, which is the only moment
         // libmpv accepts them.
@@ -570,9 +641,8 @@ impl Runner {
             ("osc", "no"),
             ("input-default-bindings", "no"),
             ("input-vo-keyboard", "no"),
-            // The CPU bridge cannot consume GPU frames; hardware decoding
-            // arrives with the OpenGL/D3D11 adapters.
-            ("hwdec", "no"),
+            // Copy-back keeps the software renderer's CPU frame contract.
+            ("hwdec", hwdec.as_option()),
             ("audio-client-name", "Screenroom"),
             ("video-sync", "audio"),
         ];
@@ -581,8 +651,9 @@ impl Runner {
             options.push(("terminal", "yes"));
             options.push(("msg-level", "all=debug"));
         }
-        let core = Mpv::new_with_options(&library, &options)?;
-        let renderer = SoftwareRenderer::new(&core)?;
+        let mut core = Mpv::new_with_options(&library, &options)?;
+        core.set_wakeup_signal(Arc::clone(&wake));
+        let renderer = SoftwareRenderer::new(&core, Arc::clone(&wake))?;
 
         core.observe("time-pos", FORMAT_DOUBLE, ID_TIME_POS)?;
         core.observe("duration", FORMAT_DOUBLE, ID_DURATION)?;
@@ -601,6 +672,7 @@ impl Runner {
         core.observe("volume", FORMAT_DOUBLE, ID_VOLUME)?;
         core.observe("mute", FORMAT_FLAG, ID_MUTE)?;
         core.observe("track-list", FORMAT_NODE, ID_TRACK_LIST)?;
+        core.observe("hwdec-current", FORMAT_STRING, ID_HWDEC_CURRENT)?;
 
         Ok(Self {
             renderer,
@@ -620,6 +692,7 @@ impl Runner {
             subtitle_position: None,
             volume: None,
             muted: None,
+            hardware_decoder: None,
             load_id: 0,
             position_ready: false,
             current_entry_id: None,
@@ -635,8 +708,12 @@ impl Runner {
         &mut self,
         commands: &Receiver<PlayerCommand>,
         shared: &Arc<Mutex<PlayerSnapshot>>,
+        wake: &Arc<WakeSignal>,
     ) {
         loop {
+            // Take the epoch before draining. Any callback that races with the
+            // drain changes it, so the wait below cannot lose that notification.
+            let observed = wake.current();
             loop {
                 match commands.try_recv() {
                     Ok(PlayerCommand::Shutdown) => return,
@@ -647,9 +724,6 @@ impl Runner {
                 }
             }
 
-            if let Some(raw) = self.core.wait_event_raw(WAIT_SLICE) {
-                self.handle_event(raw, shared);
-            }
             while let Some(raw) = self.core.wait_event_raw(0.0) {
                 self.handle_event(raw, shared);
             }
@@ -664,6 +738,7 @@ impl Runner {
             if self.renderer.take_dirty() {
                 self.present(shared);
             }
+            wake.wait_after(observed);
         }
     }
 
@@ -712,6 +787,7 @@ impl Runner {
         self.position = 0.0;
         self.duration = 0.0;
         self.loaded = false;
+        self.hardware_decoder = None;
         self.tracks.clear();
         self.audio_pts = None;
         self.avsync = None;
@@ -729,6 +805,7 @@ impl Runner {
             snapshot.avsync = None;
             snapshot.total_avsync_change = None;
             snapshot.mistimed_frames = None;
+            snapshot.hardware_decoder = None;
             snapshot.failure = None;
             snapshot.ended = false;
             snapshot.frame = None;
@@ -902,6 +979,7 @@ impl Runner {
         self.avsync = None;
         self.total_avsync_change = None;
         self.mistimed_frames = None;
+        self.hardware_decoder = None;
         publish(shared, |snapshot| {
             snapshot.load_id = self.load_id;
             snapshot.position_ready = false;
@@ -916,6 +994,7 @@ impl Runner {
             snapshot.avsync = None;
             snapshot.total_avsync_change = None;
             snapshot.mistimed_frames = None;
+            snapshot.hardware_decoder = None;
         });
     }
 
@@ -987,6 +1066,10 @@ impl Runner {
         );
         if property.data.is_null() {
             // The property is currently unavailable (before load, after stop).
+            if raw.reply_userdata == ID_HWDEC_CURRENT {
+                self.hardware_decoder = None;
+                self.publish_snapshot(shared);
+            }
             return;
         }
         match raw.reply_userdata {
@@ -1049,6 +1132,16 @@ impl Runner {
                 self.muted = Some(unsafe { *(property.data as *const i32) } != 0);
             }
             ID_TRACK_LIST => self.tracks = read_tracks(&self.core),
+            ID_HWDEC_CURRENT => {
+                // MPV_FORMAT_STRING event data is a pointer to the stored `char *`.
+                // The event owns both levels only until the next wait_event call.
+                let value = unsafe { *(property.data.cast::<*const std::ffi::c_char>()) };
+                self.hardware_decoder = (!value.is_null()).then(|| {
+                    unsafe { std::ffi::CStr::from_ptr(value) }
+                        .to_string_lossy()
+                        .into_owned()
+                });
+            }
             _ => {}
         }
         self.publish_snapshot(shared);
@@ -1080,6 +1173,7 @@ impl Runner {
         trace!("event: file loaded");
         self.loaded = true;
         self.duration = self.core.get_f64("duration").unwrap_or(0.0).max(0.0);
+        self.hardware_decoder = self.core.get_string("hwdec-current").ok().flatten();
         self.tracks = read_tracks(&self.core);
         self.update_target();
 
@@ -1140,6 +1234,7 @@ impl Runner {
         if let Some(serial) = outstanding {
             self.seek_serial = self.seek_serial.max(serial);
         }
+        self.hardware_decoder = None;
         match reason {
             end_reason::EOF => {
                 self.set_state(PlayerState::Ended, shared);
@@ -1236,6 +1331,7 @@ impl Runner {
             (self.avsync, self.total_avsync_change, self.mistimed_frames);
         let (subtitle_scale, subtitle_position) = (self.subtitle_scale, self.subtitle_position);
         let (volume, muted) = (self.volume, self.muted);
+        let hardware_decoder = self.hardware_decoder.clone();
         let (load_id, position_ready, seek_serial) =
             (self.load_id, self.position_ready, self.seek_serial);
         publish(shared, |snapshot| {
@@ -1255,6 +1351,7 @@ impl Runner {
             snapshot.subtitle_position = subtitle_position;
             snapshot.volume = volume;
             snapshot.muted = muted;
+            snapshot.hardware_decoder = hardware_decoder;
         });
     }
 }

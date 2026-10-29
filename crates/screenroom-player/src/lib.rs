@@ -27,7 +27,7 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 
 use libloading::Library;
 
@@ -37,8 +37,8 @@ mod worker;
 
 pub use frame::Frame;
 pub use worker::{
-    MediaTrack, NO_TRACK, Player, PlayerCommand, PlayerFailure, PlayerSnapshot, SUB_POSITION_RANGE,
-    SUB_SCALE_RANGE, TrackKind,
+    HwdecMode, MediaTrack, NO_TRACK, Player, PlayerCommand, PlayerFailure, PlayerSnapshot,
+    SUB_POSITION_RANGE, SUB_SCALE_RANGE, TrackKind,
 };
 
 /// Default timeout for waiting on a libmpv event, in seconds.
@@ -338,6 +338,8 @@ type FnGetPropertyString = unsafe extern "C" fn(MpvHandle, *const c_char) -> *mu
 type FnFree = unsafe extern "C" fn(*mut c_void);
 type FnErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
 type FnWaitEvent = unsafe extern "C" fn(MpvHandle, f64) -> *mut RawEvent;
+type FnSetWakeupCallback =
+    unsafe extern "C" fn(MpvHandle, Option<unsafe extern "C" fn(*mut c_void)>, *mut c_void);
 type FnClientApiVersion = unsafe extern "C" fn() -> u64;
 type FnObserveProperty = unsafe extern "C" fn(MpvHandle, u64, *const c_char, c_int) -> c_int;
 
@@ -352,6 +354,7 @@ struct Symbols {
     free: FnFree,
     error_string: FnErrorString,
     wait_event: FnWaitEvent,
+    set_wakeup_callback: FnSetWakeupCallback,
     client_api_version: FnClientApiVersion,
     observe_property: FnObserveProperty,
     render: Option<RenderSymbols>,
@@ -432,6 +435,9 @@ impl LibMpv {
                 wait_event: *library
                     .get(b"mpv_wait_event\0")
                     .map_err(|error| missing(path, "mpv_wait_event", error))?,
+                set_wakeup_callback: *library
+                    .get(b"mpv_set_wakeup_callback\0")
+                    .map_err(|error| missing(path, "mpv_set_wakeup_callback", error))?,
                 client_api_version: *library
                     .get(b"mpv_client_api_version\0")
                     .map_err(|error| missing(path, "mpv_client_api_version", error))?,
@@ -557,6 +563,59 @@ fn describe(library: &Arc<LibMpv>) -> PlayerCapability {
 pub struct Mpv {
     handle: NonNull<c_void>,
     library: Arc<LibMpv>,
+    wakeup_data: Option<Arc<WakeSignal>>,
+}
+
+/// Shared notification for player commands, libmpv events and render updates.
+/// Callbacks only increment this sequence and notify; all libmpv work stays on
+/// the worker thread.
+pub(crate) struct WakeSignal {
+    sequence: Mutex<u64>,
+    changed: Condvar,
+}
+
+impl WakeSignal {
+    pub(crate) fn new() -> Self {
+        Self {
+            sequence: Mutex::new(0),
+            changed: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn notify(&self) {
+        let mut sequence = self
+            .sequence
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *sequence = sequence.wrapping_add(1);
+        self.changed.notify_one();
+    }
+
+    pub(crate) fn current(&self) -> u64 {
+        *self
+            .sequence
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub(crate) fn wait_after(&self, observed: u64) {
+        let mut sequence = self
+            .sequence
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while *sequence == observed {
+            sequence = self
+                .changed
+                .wait(sequence)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+}
+
+unsafe extern "C" fn wakeup_callback(userdata: *mut c_void) {
+    // Safety: Mpv retains an Arc<WakeSignal> until after the core is destroyed.
+    let signal = unsafe { &*userdata.cast::<WakeSignal>() };
+    signal.notify();
 }
 
 // The core handle is safe to send between threads for the client API calls wrapped
@@ -572,7 +631,21 @@ impl std::fmt::Debug for Mpv {
 
 impl Drop for Mpv {
     fn drop(&mut self) {
+        if self.wakeup_data.is_some() {
+            // Safety: replacing the callback prevents new uses of the stable userdata.
+            // The allocation remains alive through core destruction so an in-flight
+            // callback cannot observe freed memory.
+            unsafe {
+                (self.library.symbols.set_wakeup_callback)(
+                    self.handle.as_ptr(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            };
+        }
         unsafe { (self.library.symbols.terminate_destroy)(self.handle.as_ptr()) }
+        // Keep userdata alive until terminate_destroy has joined libmpv's workers.
+        self.wakeup_data.take();
     }
 }
 
@@ -596,6 +669,7 @@ impl Mpv {
         let core = Self {
             handle,
             library: Arc::clone(library),
+            wakeup_data: None,
         };
         for (name, value) in options {
             core.set_option(name, value)?;
@@ -613,6 +687,21 @@ impl Mpv {
     /// The raw `mpv_handle`, for the render API only.
     pub(crate) fn raw_handle(&self) -> MpvHandle {
         self.handle.as_ptr()
+    }
+
+    /// Wakes the owning event loop when libmpv queues events.
+    pub(crate) fn set_wakeup_signal(&mut self, signal: Arc<WakeSignal>) {
+        let pointer = Arc::as_ptr(&signal).cast_mut().cast::<c_void>();
+        // Safety: the Arc allocation has a stable address and is retained through
+        // core shutdown, including any callback already in flight.
+        unsafe {
+            (self.library.symbols.set_wakeup_callback)(
+                self.handle.as_ptr(),
+                Some(wakeup_callback),
+                pointer,
+            )
+        };
+        self.wakeup_data = Some(signal);
     }
 
     /// Watches a property, delivering changes with `userdata` as `reply_userdata`.

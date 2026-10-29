@@ -74,7 +74,7 @@ pub struct SoftwareRenderer {
     library: Arc<LibMpv>,
     context: NonNull<c_void>,
     /// Set from libmpv's update callback, cleared by the render loop.
-    dirty: Box<AtomicBool>,
+    callback_data: Box<RenderCallbackData>,
     width: u32,
     height: u32,
     stride: usize,
@@ -82,6 +82,11 @@ pub struct SoftwareRenderer {
     offset: usize,
     packed_buffers: Vec<Arc<Vec<u8>>>,
     generation: u64,
+}
+
+struct RenderCallbackData {
+    dirty: AtomicBool,
+    wake: Arc<crate::WakeSignal>,
 }
 
 impl std::fmt::Debug for SoftwareRenderer {
@@ -96,16 +101,17 @@ impl std::fmt::Debug for SoftwareRenderer {
 
 /// The callback libmpv invokes when a frame is available.
 ///
-/// It must not call back into libmpv, so it only raises a flag; the render
-/// thread does the work.
+/// It must not call back into libmpv, so it only marks work pending and wakes
+/// the worker; the render thread does the work.
 unsafe extern "C" fn mark_dirty(context: *mut c_void) {
     if context.is_null() {
         return;
     }
-    // Safety: the pointer is the `Box<AtomicBool>` owned by the renderer, which
-    // outlives the render context (see `Drop`).
-    let dirty = unsafe { &*(context as *const AtomicBool) };
-    dirty.store(true, Ordering::Release);
+    // Safety: the pointer is the boxed callback data owned by the renderer, which
+    // outlives callback removal and render-context destruction (see `Drop`).
+    let callback_data = unsafe { &*(context as *const RenderCallbackData) };
+    callback_data.dirty.store(true, Ordering::Release);
+    callback_data.wake.notify();
 }
 
 impl SoftwareRenderer {
@@ -113,7 +119,7 @@ impl SoftwareRenderer {
     ///
     /// The caller must already have set `vo=libmpv` on the core before
     /// initialisation, which is what tells libmpv to render on demand.
-    pub fn new(core: &crate::Mpv) -> Result<Self, PlayerError> {
+    pub fn new(core: &crate::Mpv, wake: Arc<crate::WakeSignal>) -> Result<Self, PlayerError> {
         let library = Arc::clone(core.library());
         let symbols = library.render_symbols().ok_or_else(|| {
             PlayerError::Unavailable(format!(
@@ -122,8 +128,11 @@ impl SoftwareRenderer {
             ))
         })?;
 
-        let mut dirty = Box::new(AtomicBool::new(false));
-        let callback_data = (&mut *dirty as *mut AtomicBool).cast::<c_void>();
+        let mut callback_data = Box::new(RenderCallbackData {
+            dirty: AtomicBool::new(false),
+            wake,
+        });
+        let callback_pointer = (&mut *callback_data as *mut RenderCallbackData).cast::<c_void>();
 
         let api_type = c"sw";
         let mut params = [
@@ -151,12 +160,14 @@ impl SoftwareRenderer {
             PlayerError::Unavailable("mpv_render_context_create returned null".into())
         })?;
 
-        unsafe { (symbols.set_update_callback)(context.as_ptr(), Some(mark_dirty), callback_data) };
+        unsafe {
+            (symbols.set_update_callback)(context.as_ptr(), Some(mark_dirty), callback_pointer)
+        };
 
         Ok(Self {
             library,
             context,
-            dirty,
+            callback_data,
             width: 0,
             height: 0,
             stride: 0,
@@ -171,7 +182,7 @@ impl SoftwareRenderer {
 
     /// True when libmpv signalled that new output is available.
     pub fn take_dirty(&self) -> bool {
-        self.dirty.swap(false, Ordering::AcqRel)
+        self.callback_data.dirty.swap(false, Ordering::AcqRel)
     }
 
     /// `mpv_render_context_update` flags.

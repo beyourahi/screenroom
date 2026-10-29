@@ -9,7 +9,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use screenroom_player::{
-    NO_TRACK, Player, PlayerSnapshot, PlayerState, SUB_POSITION_RANGE, SUB_SCALE_RANGE, TrackKind,
+    HwdecMode, NO_TRACK, Player, PlayerSnapshot, PlayerState, SUB_POSITION_RANGE, SUB_SCALE_RANGE,
+    TrackKind,
 };
 use tempfile::TempDir;
 
@@ -43,6 +44,30 @@ fn clip(directory: &TempDir) -> PathBuf {
         .expect("ffmpeg should be installed");
     assert!(status.success(), "ffmpeg could not build the test clip");
     path
+}
+
+/// Builds a codec that mpv's default `hwdec-codecs` whitelist leaves on software decode.
+fn software_only_clip(directory: &TempDir) -> Option<PathBuf> {
+    let path = directory.path().join("software-only.mpg");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-nostdin",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=25:duration=3",
+            "-c:v",
+            "mpeg2video",
+            "-q:v",
+            "4",
+        ])
+        .arg(&path)
+        .status()
+        .ok()?;
+    status.success().then_some(path)
 }
 
 /// Starts a player, or explains why this host cannot run the test.
@@ -114,6 +139,69 @@ fn plays_a_real_file_and_presents_frames() {
         snapshot.position > 0.3
     });
     assert!(advanced.position > 0.3);
+}
+
+#[test]
+fn default_decode_policy_still_delivers_generated_frames() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = clip(&directory);
+    let Some(player) = player() else { return };
+
+    player.load(&path);
+    let loaded = wait_for(&player, Duration::from_secs(20), |snapshot| {
+        snapshot.loaded && snapshot.frame.is_some()
+    });
+    let frame = loaded.frame.expect("default policy must deliver a frame");
+    assert!(frame.is_well_formed());
+    assert!(!frame.is_blank(), "default policy returned a blank frame");
+    assert_eq!((frame.width, frame.height), (320, 240));
+    assert!(
+        loaded
+            .hardware_decoder
+            .as_deref()
+            .is_some_and(|decoder| { decoder == "no" || decoder.ends_with("-copy") }),
+        "libmpv did not report hwdec-current: {:?}",
+        loaded.hardware_decoder
+    );
+    player.stop();
+    let stopped = wait_for(&player, Duration::from_secs(10), |snapshot| {
+        !snapshot.loaded && snapshot.hardware_decoder.is_none()
+    });
+    assert!(stopped.hardware_decoder.is_none());
+}
+
+#[test]
+fn auto_copy_reports_software_for_a_codec_outside_the_hwdec_whitelist() {
+    if !screenroom_player::capability().available {
+        eprintln!("SKIPPED: libmpv unavailable");
+        return;
+    }
+    let directory = TempDir::new().expect("temp dir");
+    let Some(path) = software_only_clip(&directory) else {
+        eprintln!("SKIPPED: FFmpeg has no usable MPEG-2 encoder");
+        return;
+    };
+    let player = match Player::start_with_hwdec(HwdecMode::AutoCopy) {
+        Ok(player) => player,
+        Err(error) => {
+            eprintln!("SKIPPED: {error}");
+            return;
+        }
+    };
+    player.set_muted(true);
+    player.load(path);
+    let snapshot = wait_for(&player, Duration::from_secs(20), |snapshot| {
+        snapshot.loaded && snapshot.frame.is_some() && snapshot.hardware_decoder.is_some()
+    });
+    assert_eq!(
+        snapshot.hardware_decoder.as_deref(),
+        Some("no"),
+        "auto-copy should report software decoding when this codec has no allowed copy-back decoder"
+    );
+    assert!(
+        snapshot.frame.is_some_and(|frame| !frame.is_blank()),
+        "software fallback must still deliver a decoded frame"
+    );
 }
 
 #[test]
