@@ -1,6 +1,6 @@
 [package]
 name = "screenroom-desktop"
-description = "Screenroom Windows/Linux/macOS desktop client (iced + wgpu + libmpv)"
+description = "Screenroom macOS/Windows desktop client (iced + wgpu + libmpv)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
