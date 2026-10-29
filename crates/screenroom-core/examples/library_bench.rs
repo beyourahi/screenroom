@@ -108,6 +108,26 @@ fn main() {
         },
     );
     measure("count everything", &LibraryQuery::page(24));
+    // What the desktop's Browse screen runs: one card per work, for a viewer,
+    // with the watched filter applied. Grouping is a window function, so it is
+    // timed on its own rather than assumed to cost what a flat page does.
+    let viewer = library.profiles().expect("profiles").remove(0).id;
+    for (label, offset) in [
+        ("grouped first page", 0),
+        ("grouped last page", count as i64 - 24),
+    ] {
+        measure(
+            label,
+            &LibraryQuery {
+                profile_id: Some(viewer.clone()),
+                group_by_work: true,
+                watched: Some(false),
+                offset: offset.max(0),
+                sort: Sort::Title,
+                ..LibraryQuery::page(24)
+            },
+        );
+    }
 
     // The Browse and Home screens ask the catalogue for its facets before they
     // draw a single card, on the UI thread, so these are timed separately from
