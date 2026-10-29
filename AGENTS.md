@@ -73,11 +73,12 @@ labels; active code and docs use Screenroom.
   interpretation, fingerprints. No UI, no network, no platform player.
 - `crates/screenroom-player` — libmpv runtime boundary and the player state
   machine. libmpv is loaded at runtime, never linked into Git.
-- `apps/desktop` — iced + wgpu desktop client (Windows/Linux/macOS), including the
+- `apps/desktop` — iced + wgpu desktop client (macOS and Windows), including the
   libmpv → wgpu presentation bridge.
-- `apps/tv` — the LightningJS 3 + Blits client for the owner's Samsung Tizen TV
-  only (not started; webOS and Android TV were retired by ADR-004). TV clients do
-  not run the Rust core; they follow the documented core contract.
+- `apps/tv` — the LightningJS 3 + Blits 2.15 client for the owner's Samsung Tizen
+  TV (pnpm; tests in `apps/tv/test`). It does not run the Rust core; it follows
+  the documented core contract. Device state lives in
+  [`docs/TIZEN_DEVICE_HANDOFF.md`](docs/TIZEN_DEVICE_HANDOFF.md).
 - `docs/` — ADRs, architecture, roadmap, progress ledger, gates, licensing.
 - `reference/` — preserved historical prototype and handoff. Read-only source of
   ideas; never the active build.
@@ -101,7 +102,7 @@ are external and are not part of Git.
   bypass or distribution of protected works without a rights check. A user-listed
   source is a bookmark and a capability question, never an assumed permission.
 - **Source state ≠ user approval ≠ hardware certification.** No invented Samsung,
-  Windows, macOS, Linux, Tizen, webOS or Android TV receipts. A mock or a browser-only test is
+  Tizen, Windows or macOS receipts. A mock or a browser-only test is
   not a device test.
 - Verify version-sensitive work against current official docs for the *actual*
   selected release, and respect the lockfiles. Current provisional pins: iced
@@ -214,20 +215,52 @@ cargo fmt --all --check
 cargo run -p screenroom-player --example capability   # libmpv on this device
 cargo run --release -p screenroom-core --example library_bench      # paging budget
 cargo run --release -p screenroom-player --example render_bench     # offscreen frame budget
-cargo run --release -p screenroom-desktop                           # desktop shell
+cargo run --release -p screenroom-player --example hwdec_measure    # decode rate per file
+cargo run --release -p screenroom-desktop                           # desktop shell (opens a window)
+
+cd apps/tv && pnpm install && pnpm typecheck && pnpm test   # TV logic, node --test
+cd apps/tv && pnpm build        # typecheck + Vite + Tizen staging into dist/
 ```
 
 Prefer the `--example` measurements over opening the app: they report real numbers
-and need no window, so they never interrupt the owner.
+and need no window, so they never interrupt the owner. Sign and install the `.wgt`
+through the Tizen skills (`tizen-build-project`, `tizen-install-app`), never by hand.
 
-Evidence helpers (`scripts/`, all local, nothing published):
+Helpers (`scripts/`, all local, nothing published):
 
 ```bash
+scripts/package-macos.sh [DEST]              # dist/Screenroom.app, ad-hoc signed, bundled libmpv
+scripts/verify-bundle.sh [APP]               # bundle checks without opening it
+scripts/check-quit-routing.sh                # hidden-window model check
+scripts/probe-library.sh ROOT OUT.jsonl      # read-only ffprobe of a real library
 scripts/capture-window.sh OUT.png            # Screenshot of Screenroom's own window
-scripts/drive-app.sh library|enter|space|left|right|capture NAME
-scripts/capture-window.swift                  # Window-number resolver behind the above
+scripts/drive-app.sh library|enter|space|left|right|capture NAME   # foreground, gated
 cargo run -p screenroom-core --example prepare_library -- LIB.DB MEDIA_ROOT
 ```
+
+## Gotchas
+
+Full context for each is in `.trail/learnings/`.
+
+- mpv event ids come from `mpv/client.h`, never memory. A seek or resume is done
+  only after `PLAYBACK_RESTART` for the same entry; store progress only from a
+  snapshot matching the current `load_id` with `position_ready` and a high enough
+  `seek_serial`, or a fresh load writes position 0 over the resume point. Every
+  early return in `Worker::seek` must still settle its serial, or checkpoints stop.
+- Any automatic, position-driven action in the desktop `poll()` (skip intro, skip
+  credits, chapter jumps) must check `snapshot_is_current` first.
+- macOS decodes with `auto-copy` hwdec: the software render bridge needs CPU frames.
+- A Dock-launched app has no Homebrew `PATH`; find `ffmpeg`/`ffprobe` by absolute path.
+- Windows cannot be cross-checked from macOS (bundled SQLite needs MSVC headers);
+  its gate stays BLOCKED until it runs on the Windows machine.
+- Blits only re-renders attributes prefixed with `:`; a bare `content="$x"` is read
+  once at creation and shows nothing set later.
+- A Tizen widget is a `file://` origin, so `type="module"` scripts never run (black
+  screen); the staging step ships a classic script. `webapis` is a sibling of
+  `tizen`, not a child.
+- TV app source typechecks with no ambient types; only tests see Node globals.
+- On the TV over TCP, `sdb shell` is whitelisted and `sdb dlog` returns nothing; the
+  app's own storage (`sdb pull`) is the only evidence channel.
 
 Capture the **window number**, never a screen rectangle: a rectangle records
 whatever is on top of it, so on a multi-display desktop it can silently contain a
