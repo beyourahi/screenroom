@@ -256,15 +256,22 @@ impl Library {
         let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
             let root: String = row.get(4)?;
             let relative: String = row.get(5)?;
-            Ok(ArtworkCandidate {
+            let Some(path) = super::media_info::under_root(&root, &relative) else {
+                return Ok(None);
+            };
+            Ok(Some(ArtworkCandidate {
                 work_id: row.get(0)?,
                 file_id: row.get(1)?,
                 title: row.get(2)?,
                 duration_ms: row.get(3)?,
-                path: PathBuf::from(root).join(relative),
-            })
+                path,
+            }))
         })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect())
     }
 
     /// How many works still have no artwork.

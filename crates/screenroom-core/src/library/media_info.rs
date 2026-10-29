@@ -7,7 +7,7 @@
 //! duration here; the player's own report on first play still wins, because it is
 //! only written where the stored value is still unknown.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use rusqlite::params;
 
@@ -22,6 +22,20 @@ pub struct UnprobedFile {
     pub file_id: String,
     /// Absolute location under its granted root.
     pub path: PathBuf,
+}
+
+/// `root` joined with a stored relative path, or `None` when that path could
+/// leave the root (`..`, an absolute path, a drive prefix) or is empty.
+///
+/// A scan never stores such a path, but a restored or hand-edited library could,
+/// and these paths go straight to ffprobe and ffmpeg.
+pub(crate) fn under_root(root: &str, relative: &str) -> Option<PathBuf> {
+    let relative = Path::new(relative);
+    let mut parts = relative.components().peekable();
+    parts.peek()?;
+    parts
+        .all(|part| matches!(part, Component::Normal(_)))
+        .then(|| PathBuf::from(root).join(relative))
 }
 
 impl Library {
@@ -45,12 +59,16 @@ impl Library {
             statement.query_map(params![after.unwrap_or(""), limit.clamp(1, 500)], |row| {
                 let root: String = row.get(1)?;
                 let relative: String = row.get(2)?;
-                Ok(UnprobedFile {
-                    file_id: row.get(0)?,
-                    path: PathBuf::from(root).join(relative),
-                })
+                let file_id: String = row.get(0)?;
+                Ok(under_root(&root, &relative).map(|path| UnprobedFile { file_id, path }))
             })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        // shortcut: a page made only of escaping paths reads as the end of the
+        // walk; only a tampered library can hold one, and the next launch resumes.
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect())
     }
 
     /// Records a probed duration for the file's edition, if it is still unknown.
@@ -96,6 +114,16 @@ mod tests {
                 .expect("ingest");
         }
         (directory, library)
+    }
+
+    #[test]
+    fn a_stored_path_that_could_leave_its_root_is_never_handed_out() {
+        use super::under_root;
+        assert!(under_root("/media", "Films/A.mkv").is_some());
+        assert_eq!(under_root("/media", "../etc/passwd"), None);
+        assert_eq!(under_root("/media", "Films/../../x.mkv"), None);
+        assert_eq!(under_root("/media", "/etc/passwd"), None);
+        assert_eq!(under_root("/media", ""), None);
     }
 
     #[test]
