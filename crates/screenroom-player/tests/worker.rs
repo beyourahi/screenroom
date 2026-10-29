@@ -188,12 +188,22 @@ fn resume_position_is_honoured_when_loading() {
     let Some(player) = player() else { return };
 
     let load_id = player.load_at(&path, Some(1.2));
-    let resumed = wait_for(&player, Duration::from_secs(20), |snapshot| {
-        snapshot.load_id == load_id
-            && snapshot.loaded
-            && snapshot.position_ready
-            && snapshot.position > 0.9
-    });
+    // Sampled continuously, because the defect was transient: a ready snapshot at
+    // ~0 s before the resume landed, which the app would store over the real point.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let resumed = loop {
+        let snapshot = player.snapshot();
+        if snapshot.load_id == load_id && snapshot.loaded && snapshot.position_ready {
+            assert!(
+                snapshot.position > 0.9,
+                "a settled snapshot reported {} s before the resume point",
+                snapshot.position
+            );
+            break snapshot;
+        }
+        assert!(std::time::Instant::now() < deadline, "the file never settled");
+        std::thread::sleep(Duration::from_millis(1));
+    };
     assert!(
         resumed.position > 0.9,
         "resume did not take effect: {}",
