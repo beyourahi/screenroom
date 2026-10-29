@@ -397,6 +397,19 @@ struct Active {
     seek_serial: u64,
 }
 
+/// The next episode, waiting out its countdown after one finishes.
+struct UpNext {
+    file_id: String,
+    title: String,
+    starts_at: std::time::Instant,
+}
+
+/// How long a finished episode waits before the next one starts.
+///
+/// Long enough to read the title and reach Cancel, short enough not to feel like
+/// the app stopped. The PRD's proposed default, not a ratified number.
+const UP_NEXT_DELAY: Duration = Duration::from_secs(5);
+
 /// Progress reported by a background scan.
 #[derive(Debug)]
 enum ScanEvent {
@@ -471,6 +484,8 @@ pub struct App {
     /// on release, after which the player's own value is what is drawn.
     volume_drag: Option<f64>,
 
+    /// The next episode offered after this one ended, with its countdown.
+    up_next: Option<UpNext>,
     /// Intro and credits markers stored for the file now open.
     markers: Vec<SegmentMarker>,
     /// A segment whose start was pinned and is waiting for its end.
@@ -667,6 +682,10 @@ pub enum Message {
 
     /// Leave the player and return to the library.
     BackFromPlayer,
+    /// Start the offered next episode without waiting for its countdown.
+    PlayNextNow,
+    /// Stay on the finished episode instead of continuing the series.
+    CancelNext,
     /// Play, pause, or replay a finished file.
     TogglePlay,
     /// The scrub control moved; nothing is committed yet.
@@ -733,6 +752,17 @@ fn ticks(interval: Duration) -> Subscription<Message> {
         });
         receiver.map(|()| Message::Tick)
     })
+}
+
+/// A file's location, only if it exists and resolves inside its granted root.
+///
+/// The relative path comes from the database, which a restored backup can
+/// supply; `..` or a link inside the folder must not let playback read outside
+/// what the owner granted.
+fn contained_media_path(root: &Path, relative: &str) -> Option<PathBuf> {
+    let root = std::fs::canonicalize(root).ok()?;
+    let path = std::fs::canonicalize(root.join(relative)).ok()?;
+    (path.starts_with(&root) && path.is_file()).then_some(path)
 }
 
 /// Whether a snapshot may be stored as this viewing's progress.
@@ -854,6 +884,7 @@ impl App {
             fullscreen: false,
             markers: Vec::new(),
             mark_pending: None,
+            up_next: None,
             auto_skipped: None,
             window_width: INITIAL_WINDOW_WIDTH,
             preferences,
@@ -1451,11 +1482,9 @@ impl App {
     /// Absolute path of a library item, resolved through its authorized source.
     fn media_path(&self, item: &LibraryItem) -> Option<PathBuf> {
         let source = self.library.source(&item.source_id).ok()?;
-        let path = Path::new(&source.root_path).join(&item.relative_path);
-        path.exists().then_some(path)
+        contained_media_path(Path::new(&source.root_path), &item.relative_path)
     }
 
-    /// Stores progress and closes the session, then returns to the library.
     /// Ends any viewing before another screen takes the window.
     ///
     /// The header's Home, Library and Settings buttons (and ⌘1–3) are reachable
@@ -1473,6 +1502,7 @@ impl App {
         Task::none()
     }
 
+    /// Stores progress and closes the session, then returns to the library.
     fn leave_player(&mut self) {
         let origin = self
             .active
@@ -1567,6 +1597,13 @@ impl App {
         if ended {
             self.advance_to_next_episode();
         }
+        if self
+            .up_next
+            .as_ref()
+            .is_some_and(|up| std::time::Instant::now() >= up.starts_at)
+        {
+            self.play_up_next();
+        }
         // After the save, so skipping does not jump the checkpoint around, and
         // last, so a finished file is never seeked away from its end.
         if !ended {
@@ -1608,6 +1645,7 @@ impl App {
     /// Used both when the window closes and when the app quits, so the two paths
     /// cannot disagree about what happens to an open file.
     fn stop_playback(&mut self) {
+        self.up_next = None;
         // The player's own snapshot is the newest truth; the held one is the
         // fallback, and is what makes this path testable without a player.
         let snapshot = self
@@ -1696,16 +1734,29 @@ impl App {
             ));
             return;
         }
+        // Offered, not taken: the next episode starts after a countdown the viewer
+        // can cut short or cancel, rather than the app jumping on its own.
+        self.status = Some(format!("Finished {title}."));
+        self.up_next = Some(UpNext {
+            file_id: next.id,
+            title: next.title,
+            starts_at: std::time::Instant::now() + UP_NEXT_DELAY,
+        });
+    }
+
+    /// Starts the offered next episode, keeping the viewing's way back.
+    fn play_up_next(&mut self) {
+        let Some(next) = self.up_next.take() else {
+            return;
+        };
         let origin = self.active.as_ref().map(|active| active.origin);
         self.finish_active();
-        self.open_player(&next.id, false);
+        self.open_player(&next.file_id, false);
         if let (Some(origin), Some(active)) = (origin, self.active.as_mut()) {
             active.origin = origin;
         }
-        // Say that the switch was automatic, so it reads as continuing the series
-        // rather than as the app jumping somewhere on its own.
         if self.screen == Screen::Player {
-            self.status = Some(format!("Finished {title}. Playing next: {}", next.title));
+            self.status = Some(format!("Playing next: {}", next.title));
         }
     }
 
@@ -1908,7 +1959,6 @@ impl App {
         self.profile_id = profile_id.clone();
         self.focus = 0;
         self.detail = None;
-        self.error = None;
         // The library is stored as the profile to open with, so the choice
         // survives a restart instead of resetting to the first profile.
         let preferences = Preferences {
@@ -1982,10 +2032,9 @@ impl App {
     /// Stores the whole preference set, keeping the in-memory copy in step.
     fn save_preferences(&mut self, preferences: Preferences) {
         match self.library.set_preferences(&preferences) {
-            Ok(()) => {
-                self.preferences = preferences;
-                self.error = None;
-            }
+            // An unrelated error (a failed scan, say) stays until it is dismissed;
+            // a volume or toggle save is not an answer to it.
+            Ok(()) => self.preferences = preferences,
             Err(error) => self.report(&error),
         }
     }
@@ -2771,6 +2820,12 @@ impl App {
             }
 
             Message::BackFromPlayer => self.leave_player(),
+            Message::PlayNextNow => self.play_up_next(),
+            Message::CancelNext => {
+                if self.up_next.take().is_some() {
+                    self.status = Some("Autoplay cancelled.".to_string());
+                }
+            }
             Message::TogglePlay => self.toggle_play(),
             Message::Volume(percent) => self.drag_volume(percent),
             Message::VolumeCommit => self.commit_volume(),
@@ -2930,6 +2985,11 @@ impl App {
         match self.screen {
             Screen::Player => match key {
                 Key::Named(Named::Escape) => {
+                    // A pending next episode is the nearest thing to undo.
+                    if self.up_next.take().is_some() {
+                        self.status = Some("Autoplay cancelled.".to_string());
+                        return Task::none();
+                    }
                     // Escape leaves fullscreen first. A viewer who pressed it to get
                     // the pointer back would not expect to lose the film as well.
                     if self.fullscreen {
@@ -2938,6 +2998,7 @@ impl App {
                     self.leave_player();
                 }
                 Key::Named(Named::Space) => self.toggle_play(),
+                Key::Named(Named::Enter) if self.up_next.is_some() => self.play_up_next(),
                 Key::Named(Named::ArrowLeft) => self.seek_step(-SEEK_STEP),
                 Key::Named(Named::ArrowRight) => self.seek_step(SEEK_STEP),
                 Key::Character(character) => match character.as_str() {
@@ -3003,7 +3064,12 @@ impl App {
 
     /// Seeks by `delta` seconds, clamped to the media.
     fn seek_step(&mut self, delta: f64) {
-        let target = (self.snapshot.position + delta).clamp(0.0, self.snapshot.duration.max(0.0));
+        // Until libmpv reports a length there is nothing to clamp to, and clamping
+        // to 0 turned every arrow press into "back to the start".
+        if !(self.snapshot.duration.is_finite() && self.snapshot.duration > 0.0) {
+            return;
+        }
+        let target = (self.snapshot.position + delta).clamp(0.0, self.snapshot.duration);
         self.seek_to(target);
     }
 
@@ -3729,29 +3795,32 @@ impl App {
             );
             content = content.push(Space::new().height(Length::Fixed(4.0)));
         }
+        // A focused card is drawn on the focus fill, which is nearly white in the
+        // pinned palette: muted grey and the near-white accent were unreadable or
+        // invisible there, so every line takes the focus foreground instead.
+        let (muted, accent) = if focused {
+            (
+                tokens.palette.focus_foreground,
+                tokens.palette.focus_foreground,
+            )
+        } else {
+            (tokens.palette.ink_muted, tokens.palette.signal)
+        };
         content = content
             .push(text(title).size(tokens.type_scale.label))
-            .push(
-                text(subtitle)
-                    .size(tokens.type_scale.micro)
-                    .color(tokens.palette.ink_muted),
-            )
+            .push(text(subtitle).size(tokens.type_scale.micro).color(muted))
             .push(Space::new().height(Length::Fixed(4.0)))
-            .push(
-                text(position)
-                    .size(tokens.type_scale.micro)
-                    .color(tokens.palette.ink_muted),
-            )
+            .push(text(position).size(tokens.type_scale.micro).color(muted))
             .push(
                 text(truncate(&item.filename, 30))
                     .size(tokens.type_scale.micro)
-                    .color(tokens.palette.ink_muted),
+                    .color(muted),
             );
         if let Some(note) = note {
             content = content.push(
                 text(truncate(note, 34))
                     .size(tokens.type_scale.micro)
-                    .color(tokens.palette.signal),
+                    .color(accent),
             );
         }
 
@@ -4230,7 +4299,27 @@ impl App {
                 .color(tokens.palette.ink_muted),
         ]
         .spacing(tokens.spacing.field_x)
-        .align_y(Alignment::Center);
+        .align_y(Alignment::Center)
+        .push(self.up_next.as_ref().map(|up| {
+            let left = up
+                .starts_at
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs_f32()
+                .ceil();
+            row![
+                text(format!("Up next: {} in {left:.0} s", up.title)).size(tokens.type_scale.label),
+                button(text("Play now").size(tokens.type_scale.label))
+                    .on_press(Message::PlayNextNow)
+                    .style(design::action_style(false))
+                    .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+                button(text("Cancel").size(tokens.type_scale.label))
+                    .on_press(Message::CancelNext)
+                    .style(design::quiet_style(false))
+                    .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+            ]
+            .spacing(tokens.spacing.field_x)
+            .align_y(Alignment::Center)
+        }));
 
         let surface: Element<'_, Message> = match (&self.snapshot.failure, &self.frame) {
             (Some(failure), _) => container(
@@ -4312,26 +4401,23 @@ impl App {
                     .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
             );
         }
-        segment_row = segment_row.push(
-            button(
-                text(match &self.mark_pending {
-                    Some((kind, start)) => {
-                        format!("End {kind} at {}", clock(*start as f64 / 1_000.0))
-                    }
-                    None => "Mark intro start".to_string(),
-                })
-                .size(tokens.type_scale.label),
-            )
-            .on_press(Message::MarkSegment("intro".to_string()))
-            .style(design::quiet_style(false))
-            .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
-        );
-        segment_row = segment_row.push(
-            button(text("Mark credits start").size(tokens.type_scale.label))
-                .on_press(Message::MarkSegment("credits".to_string()))
-                .style(design::quiet_style(false))
-                .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
-        );
+        // Each button names what it will do to its own kind. One shared label
+        // read "End credits at…" on the intro button, which actually started a
+        // new intro mark and dropped the pinned credits start.
+        for kind in ["intro", "credits"] {
+            let label = match &self.mark_pending {
+                Some((pending, start)) if pending == kind => {
+                    format!("End {kind} (from {})", clock(*start as f64 / 1_000.0))
+                }
+                _ => format!("Mark {kind} start"),
+            };
+            segment_row = segment_row.push(
+                button(text(label).size(tokens.type_scale.label))
+                    .on_press(Message::MarkSegment(kind.to_string()))
+                    .style(design::quiet_style(false))
+                    .padding([tokens.spacing.field_y, tokens.spacing.field_x]),
+            );
+        }
         if self.mark_pending.is_some() {
             segment_row = segment_row.push(
                 button(text("Finish segment").size(tokens.type_scale.label))
@@ -5522,6 +5608,44 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_episode_offers_the_next_with_a_cancelable_countdown() {
+        let (mut app, ids, _directory) = series_app();
+        let opened =
+            PlaybackTracker::open(&app.library, &app.profile_id, &ids[0]).expect("a session");
+        app.active = Some(Active {
+            tracker: opened.tracker,
+            file_id: ids[0].clone(),
+            title: "Pilot".to_string(),
+            resume_from_ms: 0,
+            origin: Screen::Detail,
+            load_id: 0,
+            seek_serial: 0,
+        });
+        app.screen = Screen::Player;
+
+        app.advance_to_next_episode();
+        let up = app.up_next.as_ref().expect("the next episode is offered");
+        assert_eq!(up.file_id, ids[1]);
+        assert!(
+            up.starts_at > std::time::Instant::now(),
+            "it waits rather than starting at once"
+        );
+        assert_eq!(
+            app.active.as_ref().map(|active| active.file_id.as_str()),
+            Some(ids[0].as_str()),
+            "the finished episode stays open during the countdown"
+        );
+
+        let _ = app.update(Message::CancelNext);
+        assert!(app.up_next.is_none(), "Cancel withdraws the offer");
+
+        app.advance_to_next_episode();
+        assert!(app.up_next.is_some());
+        let _ = app.update(Message::GoHome);
+        assert!(app.up_next.is_none(), "leaving the player drops the offer");
+    }
+
+    #[test]
     fn autoplay_follows_the_next_verified_episode() {
         let (app, ids, _directory) = series_app();
         let next = app
@@ -6076,6 +6200,23 @@ mod tests {
                 ..current
             }
         ));
+    }
+
+    #[test]
+    fn playback_never_resolves_outside_the_granted_folder() {
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let root = directory.path().join("granted");
+        write_settled(&root.join("Film.2020.mkv"), b"inside");
+        write_settled(&directory.path().join("secret.mkv"), b"outside");
+        assert!(contained_media_path(&root, "Film.2020.mkv").is_some());
+        assert!(contained_media_path(&root, "../secret.mkv").is_none());
+        assert!(contained_media_path(&root, "missing.mkv").is_none());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(directory.path().join("secret.mkv"), root.join("link.mkv"))
+                .expect("link");
+            assert!(contained_media_path(&root, "link.mkv").is_none());
+        }
     }
 
     #[test]
