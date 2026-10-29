@@ -1894,6 +1894,15 @@ impl App {
         if !self.preferences.auto_skip_intro {
             return;
         }
+        // Before the resume point lands the player reports 0, which sits inside an
+        // intro marked from 0:00; a skip then would replace the resume point.
+        if !self
+            .active
+            .as_ref()
+            .is_some_and(|active| snapshot_is_current(active, &self.snapshot))
+        {
+            return;
+        }
         let position = self.snapshot.position_ms();
         let found = self
             .markers
@@ -5287,7 +5296,40 @@ mod tests {
             end_ms: 120_000,
             duration_ms: 3_600_000,
         }];
+        let file_id = app.browse.items[0].id.clone();
+        let opened =
+            PlaybackTracker::open(&app.library, &app.profile_id, &file_id).expect("a session");
+        app.active = Some(Active {
+            tracker: opened.tracker,
+            file_id,
+            title: "Film".to_string(),
+            resume_from_ms: 1_500_000,
+            origin: Screen::Browse,
+            load_id: 1,
+            seek_serial: 0,
+        });
+
+        // A resume at 25:00: until it lands the player reports 0:00 for this load,
+        // or the previous file's position; neither may trigger a skip.
+        app.preferences.auto_skip_intro = true;
+        app.markers[0].start_ms = 0;
+        app.snapshot = PlayerSnapshot {
+            position_ready: false,
+            load_id: 1,
+            ..App::playing_snapshot(0.0, 3_600.0)
+        };
+        app.maybe_auto_skip_intro();
         app.snapshot = App::playing_snapshot(90.0, 3_600.0);
+        app.maybe_auto_skip_intro();
+        assert!(
+            app.auto_skipped.is_none(),
+            "a skip before the resume point landed would replace it"
+        );
+        app.preferences.auto_skip_intro = false;
+        app.snapshot = PlayerSnapshot {
+            load_id: 1,
+            ..App::playing_snapshot(90.0, 3_600.0)
+        };
 
         // Off by default: nothing moves on its own.
         app.maybe_auto_skip_intro();

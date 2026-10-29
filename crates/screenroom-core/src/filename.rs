@@ -111,7 +111,8 @@ pub fn parse_filename(filename: &str, folder: Option<&str>) -> ParsedName {
             // the title (`Blade.Runner.2049.2017`).
             let mut chosen = years.first()?;
             for next in &years[1..] {
-                if next.start() != chosen.end() + 1 {
+                let between = &name[chosen.end()..next.start()];
+                if between.is_empty() || between.chars().any(char::is_alphanumeric) {
                     break;
                 }
                 chosen = next;
@@ -306,6 +307,7 @@ mod tests {
                 2017,
             ),
             ("Alien.1979.Directors.Cut.2003.1080p.mkv", "Alien", 1979),
+            ("Blade Runner 2049 - 2017.mkv", "Blade Runner 2049", 2017),
             (
                 "2001.A.Space.Odyssey.1968.mkv",
                 "2001 A Space Odyssey",

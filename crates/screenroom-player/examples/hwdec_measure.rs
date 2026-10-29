@@ -11,9 +11,6 @@ use std::time::{Duration, Instant};
 
 use screenroom_player::{HwdecMode, Player};
 
-const EVIDENCE_DIR: &str =
-    "/Users/beyourahi/.local/state/dev-evidence/screenroom-macos-final/codex-hwdec";
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.len() != 4 {
@@ -44,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("label may contain ASCII letters, digits and hyphens only".into());
     }
 
-    std::fs::create_dir_all(EVIDENCE_DIR)?;
+    std::fs::create_dir_all(evidence_dir())?;
     let capability = screenroom_player::capability();
     if !capability.available {
         return Err(format!("libmpv unavailable: {}", capability.reason).into());
@@ -58,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let first_frame_at = began.elapsed();
     let expected_dimensions = (first_frame.width, first_frame.height);
     let first_frame_generation = first_frame.generation;
-    let png = Path::new(EVIDENCE_DIR).join(format!("{label}-{}-sampled-frame.png", args[0]));
+    let png = evidence_dir().join(format!("{label}-{}-sampled-frame.png", args[0]));
 
     let sampling_started = Instant::now();
     let sampling_duration = Duration::from_secs(seconds);
@@ -170,10 +167,10 @@ fn write_png(
     frame: &screenroom_player::Frame,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !output.starts_with(EVIDENCE_DIR) {
+    if !output.starts_with(evidence_dir()) {
         return Err("PNG output escaped the evidence directory".into());
     }
-    let mut child = Command::new("ffmpeg")
+    let mut child = Command::new(homebrew_or_path("ffmpeg"))
         .args([
             "-nostdin",
             "-y",
@@ -237,4 +234,21 @@ fn mean_max_u64(values: &[u64]) -> (f64, u64) {
     }
     let mean = values.iter().sum::<u64>() as f64 / values.len() as f64;
     (mean, values.iter().copied().max().unwrap_or(0))
+}
+
+/// Where frames and logs go: `SCREENROOM_EVIDENCE_DIR`, or a folder in the temp dir.
+fn evidence_dir() -> std::path::PathBuf {
+    std::env::var_os("SCREENROOM_EVIDENCE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("screenroom-hwdec"))
+}
+
+/// Homebrew's copy of a tool when present, so a launch without a shell `PATH` finds it.
+fn homebrew_or_path(name: &str) -> std::path::PathBuf {
+    let homebrew = Path::new("/opt/homebrew/bin").join(name);
+    if homebrew.is_file() {
+        homebrew
+    } else {
+        std::path::PathBuf::from(name)
+    }
 }

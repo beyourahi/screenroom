@@ -51,7 +51,7 @@ impl Library {
              FROM files f
              JOIN editions e ON e.id = f.edition_id
              JOIN sources s ON s.id = f.source_id
-             WHERE f.available = 1 AND s.state != 'removed' AND e.duration_ms = 0 AND f.id > ?1
+             WHERE f.available = 1 AND s.state = 'available' AND e.duration_ms = 0 AND f.id > ?1
              ORDER BY f.id
              LIMIT ?2",
         )?;

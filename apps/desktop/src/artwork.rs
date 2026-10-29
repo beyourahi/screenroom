@@ -448,9 +448,11 @@ mod tests {
             Some(expected) => assert_eq!(found, expected),
             None => assert_eq!(found, PathBuf::from("ffmpeg")),
         }
-        // A relative PATH entry is never searched, so a folder cannot plant a tool.
-        let planted = tool_in("ffmpeg", std::ffi::OsStr::new("."));
-        assert!(planted.is_absolute() || planted == std::path::Path::new("ffmpeg"));
+        // A tool on PATH wins over the Homebrew fallback, in PATH order.
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let planted = directory.path().join("ffmpeg");
+        std::fs::write(&planted, b"").expect("planted tool");
+        assert_eq!(tool_in("ffmpeg", directory.path().as_os_str()), planted);
     }
 
     #[test]

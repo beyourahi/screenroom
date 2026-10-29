@@ -628,15 +628,20 @@ impl Library {
             // A drive pulled during the loop makes every later file "not found".
             // Only a root that still resolves afterwards makes those answers true.
             if std::fs::canonicalize(root).is_ok() {
+                let root_listed = std::fs::read_dir(root).is_ok();
                 for id in missing {
                     tx.execute("UPDATE files SET available = 0 WHERE id = ?1", [id])?;
                 }
                 // The drive is back even if one file keeps failing; leaving the
                 // source unavailable would hide it from autoplay and suggestions.
-                tx.execute(
-                    "UPDATE sources SET state = 'available' WHERE id = ?1 AND state != 'removed'",
-                    [source_id],
-                )?;
+                // A root that resolves but cannot be listed (privacy denial, a
+                // failing disk) is not back.
+                if root_listed {
+                    tx.execute(
+                        "UPDATE sources SET state = 'available' WHERE id = ?1 AND state != 'removed'",
+                        [source_id],
+                    )?;
+                }
             }
         }
         tx.commit()?;

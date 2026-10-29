@@ -987,6 +987,18 @@ which needs mpv 0.38 or newer (this Mac has 0.41; the Windows build must check i
 drive can stall the UI briefly; **L6** an Escape during macOS's fullscreen animation
 can leave the player rather than fullscreen.
 
+A second fresh review of `2b71442..0652d0f` (the fixes above and the decoding work)
+confirmed the new event-driven player loop, then found:
+
+| Severity | Finding | Resolution |
+| --- | --- | --- |
+| High | Queuing early seeks let auto-skip-intro fire on the 0:00 the player reports before a resume lands, so an intro marked from 0:00 replaced a 25:00 resume point | auto-skip runs only on a settled snapshot of the current load (`automatic_skipping_only_happens_once_and_only_when_asked_for`, resume case) |
+| Medium (plausible) | A root that resolves but cannot be listed (privacy denial, failing disk) was marked available after a partial scan | the source is revived only when its root lists |
+| Low | A seek after the file ended put the player into Failed; `Blade Runner 2049 - 2017` misread the year; probing and posters still ran against absent sources; a test assertion could not fail; the measurement example committed a home-directory path | settled without a command; any separator run counts as adjacent; candidates require an available source; the tool test plants a file on `PATH`; the example uses `SCREENROOM_EVIDENCE_DIR` or the temp dir |
+
+Recorded: `hardware_decoder` in the snapshot is diagnostic and may stay empty for
+a file if libmpv sends no change after load.
+
 ### Functionality completed
 
 - **Runtimes before first play.** `Library::unprobed_files` / `record_duration`

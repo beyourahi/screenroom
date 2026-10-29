@@ -854,6 +854,11 @@ impl Runner {
             self.confirm_seek(serial, shared);
             return;
         }
+        if self.loaded && self.current_entry_id.is_none() {
+            // The file has ended and libmpv is idle; a seek has nothing to move.
+            self.confirm_seek(serial, shared);
+            return;
+        }
         if !self.loaded {
             // Too early to seek: run it once the file has loaded.
             self.queued_seek = Some((seconds, serial));
