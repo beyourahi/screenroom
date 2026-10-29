@@ -682,6 +682,8 @@ pub enum Message {
 
     /// Leave the player and return to the library.
     BackFromPlayer,
+    /// The window's real mode, read back after a resize.
+    ModeChanged(iced::window::Mode),
     /// Start the offered next episode without waiting for its countdown.
     PlayNextNow,
     /// Stay on the finished episode instead of continuing the series.
@@ -2777,6 +2779,13 @@ impl App {
                 if width.is_finite() && width > 0.0 {
                     self.window_width = width;
                 }
+                // Entering or leaving fullscreen resizes the window, including when
+                // macOS does it (the green button, ⌃⌘F). Ask which mode the window
+                // is really in, so the hidden chrome and Escape follow the window
+                // rather than what the app last requested.
+                return iced::window::latest()
+                    .and_then(iced::window::mode)
+                    .map(Message::ModeChanged);
             }
             Message::SubtitleScale(value) => self.apply_subtitle_style(
                 round_percent(
@@ -2821,6 +2830,9 @@ impl App {
 
             Message::BackFromPlayer => self.leave_player(),
             Message::PlayNextNow => self.play_up_next(),
+            Message::ModeChanged(mode) => {
+                self.fullscreen = mode == iced::window::Mode::Fullscreen;
+            }
             Message::CancelNext => {
                 if self.up_next.take().is_some() {
                     self.status = Some("Autoplay cancelled.".to_string());
@@ -6217,6 +6229,17 @@ mod tests {
                 .expect("link");
             assert!(contained_media_path(&root, "link.mkv").is_none());
         }
+    }
+
+    #[test]
+    fn the_window_mode_read_back_overrides_what_the_app_last_asked_for() {
+        let (mut app, _directory) = app_with(1);
+        app.fullscreen = true;
+        // macOS left fullscreen on its own (green button); the read-back says so.
+        let _ = app.update(Message::ModeChanged(iced::window::Mode::Windowed));
+        assert!(!app.fullscreen);
+        let _ = app.update(Message::ModeChanged(iced::window::Mode::Fullscreen));
+        assert!(app.fullscreen);
     }
 
     #[test]
