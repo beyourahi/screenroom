@@ -1,7 +1,7 @@
 //! Screenroom shared core.
 //!
 //! This crate is the single source of product truth for every Screenroom client
-//! (Windows/Linux/macOS desktop, and the TV clients through its contract). It holds the
+//! (macOS/Windows desktop, and the TV client through its contract). It holds the
 //! domain model, the SQLite library, filesystem scanning, filename
 //! interpretation and content fingerprints, and deliberately contains no UI,
 //! no platform player and no network code.
