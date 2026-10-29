@@ -250,7 +250,8 @@ Full context for each is in `.trail/learnings/`.
 - Any automatic, position-driven action in the desktop `poll()` (skip intro, skip
   credits, chapter jumps) must check `snapshot_is_current` first.
 - macOS decodes with `auto-copy` hwdec: the software render bridge needs CPU frames.
-- A Dock-launched app has no Homebrew `PATH`; find `ffmpeg`/`ffprobe` by absolute path.
+- A Dock-launched app has no Homebrew `PATH`; resolve `ffmpeg`/`ffprobe` through
+  `artwork::tool` (PATH, then `/opt/homebrew/bin` and `/usr/local/bin`).
 - Windows cannot be cross-checked from macOS (bundled SQLite needs MSVC headers);
   its gate stays BLOCKED until it runs on the Windows machine.
 - Blits only re-renders attributes prefixed with `:`; a bare `content="$x"` is read
