@@ -69,8 +69,11 @@ pub fn sample_position_ms(duration_ms: i64) -> i64 {
 /// searched first; Homebrew's two prefixes are the fallback. Only absolute
 /// directories are considered, so the working directory can never supply a tool.
 pub fn tool(name: &str) -> PathBuf {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path)
+    tool_in(name, &std::env::var_os("PATH").unwrap_or_default())
+}
+
+fn tool_in(name: &str, path: &std::ffi::OsStr) -> PathBuf {
+    std::env::split_paths(path)
         .chain([
             PathBuf::from("/opt/homebrew/bin"),
             PathBuf::from("/usr/local/bin"),
@@ -434,13 +437,20 @@ mod tests {
 
     #[test]
     fn a_tool_is_found_outside_a_minimal_launch_path() {
-        // The installed bundle's PATH; ffmpeg is never in it on this machine.
-        let found = tool("ffmpeg");
-        if found.is_absolute() {
-            assert!(found.is_file());
-        } else {
-            assert_eq!(found, PathBuf::from("ffmpeg"));
+        // The PATH a Dock launch gets; Homebrew's ffmpeg is never in it.
+        let launchd = std::ffi::OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin");
+        let homebrew = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|candidate| candidate.is_file());
+        let found = tool_in("ffmpeg", launchd);
+        match homebrew {
+            Some(expected) => assert_eq!(found, expected),
+            None => assert_eq!(found, PathBuf::from("ffmpeg")),
         }
+        // A relative PATH entry is never searched, so a folder cannot plant a tool.
+        let planted = tool_in("ffmpeg", std::ffi::OsStr::new("."));
+        assert!(planted.is_absolute() || planted == std::path::Path::new("ffmpeg"));
     }
 
     #[test]

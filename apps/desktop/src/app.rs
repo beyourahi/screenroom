@@ -1675,6 +1675,9 @@ impl App {
     /// another: the finished viewing has to be stored first in either case, and
     /// both must leave no open session behind.
     fn finish_active(&mut self) {
+        // An offer belongs to the viewing that ended; a replay or another file must
+        // not be cut short by its countdown.
+        self.up_next = None;
         if let Some(mut active) = self.active.take() {
             let snapshot = self.player.as_ref().map(|player| player.snapshot());
             if let Some(snapshot) = snapshot {
@@ -5655,6 +5658,27 @@ mod tests {
         assert!(app.up_next.is_some());
         let _ = app.update(Message::GoHome);
         assert!(app.up_next.is_none(), "leaving the player drops the offer");
+
+        // Replaying the finished episode during the countdown keeps the replay.
+        let opened =
+            PlaybackTracker::open(&app.library, &app.profile_id, &ids[0]).expect("a session");
+        app.active = Some(Active {
+            tracker: opened.tracker,
+            file_id: ids[0].clone(),
+            title: "Pilot".to_string(),
+            resume_from_ms: 0,
+            origin: Screen::Detail,
+            load_id: 0,
+            seek_serial: 0,
+        });
+        app.screen = Screen::Player;
+        app.advance_to_next_episode();
+        assert!(app.up_next.is_some());
+        app.replay();
+        assert!(
+            app.up_next.is_none(),
+            "a replay must not be replaced by the next episode five seconds later"
+        );
     }
 
     #[test]
@@ -6287,9 +6311,10 @@ mod tests {
         assert!(app.scan_token.is_some());
         app.new_root = directory.path().join("b").to_string_lossy().to_string();
         let _ = app.update(Message::AddFolder);
-        // Either still queued, or the first walk already finished and the second
-        // was started on the spot; never two walks sharing one progress row.
-        assert!(app.pending_scans.len() <= 1);
+        // A walk only ends on a Tick, and none has run, so the first is still in
+        // flight: the second must wait in the queue, not replace its progress row.
+        assert_eq!(app.pending_scans.len(), 1, "the second scan is queued");
+        assert!(app.scan_token.is_some());
         finish_scan(&mut app);
         assert!(app.pending_scans.is_empty());
         assert_eq!(

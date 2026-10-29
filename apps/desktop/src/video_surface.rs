@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn fit_changes_when_the_widget_resizes_without_a_new_frame() {
+    fn one_frame_fits_differently_at_two_widget_sizes() {
         let wide = fit_factors(1920, 1080, bounds(1280.0, 720.0));
         let ultrawide = fit_factors(1920, 1080, bounds(1920.0, 720.0));
         assert_ne!(wide, ultrawide);
