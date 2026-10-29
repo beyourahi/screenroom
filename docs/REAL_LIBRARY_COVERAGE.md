@@ -50,7 +50,8 @@ physical drive in hand.
 | Search (title, filename, literal wildcards, no-match) | PASS | 1 row for an exact title, 30 for a word, 0 for `%`, 0 for nonsense |
 | Kind partition | PASS | 291 films + 539 episodes + 0 unknown = 830; unknown kind refused |
 | Season grouping per work | PASS | seasons read from a real series; a season page holds only its own episodes |
-| Genre filter | SKIP | a scanned library stores no genres until enrichment exists; unit-tested on synthetic labels only |
+| Genre filter | SKIP | a scanned library stores no genres until enrichment exists; the picker is now **hidden** until genres exist (it was an always-empty control) |
+| Watched filter and one card per work | PASS (fixtures) | Browse groups episodes into their series and filters watched/unwatched; desktop tests, grouped page timed at 10k |
 | Available-only filter | PASS | 830 of 830 with the drive mounted |
 | Resume point from a checkpoint, and Continue Watching | PASS | checkpoint at 120 s became a Continue Watching row |
 | Stale seek generation refused | PASS | a pre-seek generation wrote nothing; the post-seek one was accepted |
@@ -71,11 +72,11 @@ physical drive in hand.
 | Playback: H.264 High 10 + DTS | PASS | 24.0 fps |
 | Playback: MPEG-4 | PASS | 24.0 fps |
 | Playback: 4 audio tracks, switching | PASS | switched to the last track and read it back |
-| Playback: anamorphic content | PASS | letterboxed inside the frame, not stretched |
+| Playback: anamorphic content | PASS | 1920×1080 SAR 9:8 now renders at its display size, 1920×960, with no bars inside the frame (was 1920×1080 with 60 px bars, then letterboxed again by the window) |
 | Playback: a corrupt MP4 | PASS | `decode_failed — unrecognized file format`, no crash, no fake success |
 | Subtitle style (scale/position) reaching the decoder | PASS | read back from libmpv on every file that has subtitles |
-| Stored durations / runtimes before first play | SKIP | `duration_ms` is 0 for all 830 until played — a known gap, see `IMPLEMENTATION_STATUS.md` |
-| Embedded cover art as poster source | SKIP | 115 files carry one; the extractor samples the video instead |
+| Stored durations / runtimes before first play | PASS | background ffprobe pass: **827 of 830** stored in ~80 s; the 3 truncated MP4s stay unknown; repeated by the packaged bundle under launchd's minimal `PATH` |
+| Embedded cover art as poster source | PASS | a file's `attached_pic` stream is the poster (400×600 from real files); otherwise a frame at a real 10 % (`examples/poster_check`) |
 | Hardware decoding (4K, battery) | SKIP | `hwdec=no` by design for the CPU bridge; the gate is still open |
 | On-screen frame rate, resume after quit, full screen, keyboard journey | MANUAL | every number is offscreen; needs a permissioned visible-window session |
 | Audio heard, not measured | MANUAL | gate G3b needs ears |
@@ -93,6 +94,9 @@ cargo run --release -p screenroom-core --example library_check -- .artifacts/ssd
 # poster audit; `fresh` also extracts a few new ones
 cargo run --release -p screenroom-core --example artwork_check -- .artifacts/ssd-test/library.db
 cargo run --release -p screenroom-core --example artwork_check -- .artifacts/ssd-test/checks/fresh.db fresh
+
+# the app's own poster path (cover first, else a frame), on a COPY
+cargo run --release -p screenroom-desktop --example poster_check -- .artifacts/ssd-test/checks/posters.db 20
 
 # bounded real playback, offscreen and muted
 cargo run --release -p screenroom-player --example play_file -- <file>...

@@ -3,7 +3,7 @@
 Live record of what exists, what was actually verified, and what is blocked.
 Future sessions resume from here instead of repeating completed work.
 
-Last updated: **2026-10-28**, host **macOS ARM64 (Apple silicon), Command Line
+Last updated: **2026-10-29**, host **macOS ARM64 (Apple silicon), Command Line
 Tools only, no full Xcode**.
 
 **Scope (2026-10-26, [ADR-003](ADR-003_DESKTOP_AND_TV_SCOPE.md)):** desktop/laptop
@@ -344,19 +344,13 @@ files an hour. That is real behaviour, not a test artefact.
 
 #### What the real library still does not do
 
-- **No stored durations.** `editions.duration_ms` is `0` for all 830 files until each
-  one is played, so the catalogue cannot show runtimes or a progress bar for an
-  unwatched film, and `mark_segment` answers `duration_unknown` before first play.
-  Deliberate so far (the player reports the truth when it opens the file), but on a
-  real library it is visible as a missing runtime on every card.
-- **Posters are film frames, not cover art.** 115 files carry an embedded cover
-  image which would be a better poster for those; the extractor samples 10% into
-  the video instead.
-- **Anamorphic content is letterboxed twice**: the frame already carries 60 px bars,
-  and the window fits the 1920×1080 frame as 16:9, so a 2:1 film is drawn smaller
-  than it needs to be. Not stretched, just not optimal.
-- **Hardware decoding is still off** (`hwdec=no` by design for the CPU bridge), which
-  is why a 4K HEVC film takes ~2 s to first frame and decodes in software.
+Updated 2026-10-29: durations (827 of 830), embedded cover art, anamorphic sizing
+and copy-back hardware decoding were closed by the macOS audit below. What remains:
+
+- **A 3240×2160 HEVC film is not real-time**: about 19 fps of 23.976 with copy-back
+  decode under mixed load. The limit is the CPU RGBA conversion and upload, so it
+  needs a GPU render bridge, not more decode tuning.
+- **Genres are hidden**: a scanned library stores none until enrichment exists.
 - **On-screen behaviour is unverified.** Every number above is offscreen: no window,
   no GPU surface, nothing heard. Resume-after-quit, full-screen, the D-pad-free
   keyboard journey and the on-screen frame budget still need a permissioned session.
@@ -464,8 +458,9 @@ assumed by the presentation shader.
 - **Audio/video sync** has no measured tolerance (gate G3b).
 - **Offline behaviour** was proven by holding zero network sockets during playback,
   not by disabling this machine's networking.
-- **4K / hardware decode**: the software bridge is `hwdec=no` by design and capped
-  at 1920 px, so 4K smoothness is neither claimed nor measured.
+- **4K / hardware decode**: measured on 2026-10-29 (`HWDEC_EVIDENCE.md`); macOS now
+  decodes with copy-back (`auto-copy`), but the bridge is still capped at 1920 px
+  and one 4K file is not real-time, so 4K smoothness is not claimed.
 - **Windows**: nothing here ran on Windows, including the D3D11 path (unbuilt) and
   the case-insensitive path folding. `WINDOWS_VALIDATION.md` is the handoff that
   turns each of these into a runnable check.
@@ -487,7 +482,7 @@ cargo test --release -p screenroom-player --test worker -- --nocapture
 | RSS after playback ended | 108 MB |
 
 The release figure is the one that ships. The software bridge is still a full-frame
-CPU copy per frame by design (`hwdec=no`, bounded to 1920 px), so this cost is
+CPU copy per frame by design (bounded to 1920 px; decode is copy-back on macOS since 2026-10-29), so this cost is
 expected and is the reason the zero-copy OpenGL/D3D11 paths remain the plan for 4K
 and HDR rather than an optimisation of this path.
 
@@ -839,24 +834,25 @@ cargo clippy --workspace --all-targets
 cargo fmt --all --check
 ```
 
-**225 tests, 0 failures**, clippy with no first-party warnings, formatting clean:
+**264 tests, 0 failures** (2026-10-29, after the audit and final review), clippy
+with no first-party warnings, formatting clean:
 
 | Suite | Tests |
 | --- | --- |
-| `screenroom-core` unit (filename, fingerprint, path identity, lists, recommend) | 38 |
-| `core/tests/library.rs` (incl. per-viewer isolation, path semantics) | 27 |
-| `core/tests/storage.rs` (preferences, subtitle style, backup) | 19 |
-| `core/tests/scanner.rs` (incl. an unplugged drive, a deleted folder, a withdrawn grant) | 12 |
+| `screenroom-core` unit (filename, fingerprint, path identity, lists, recommend, media info) | 46 |
+| `core/tests/library.rs` (incl. per-viewer isolation, path semantics) | 28 |
+| `core/tests/storage.rs` (preferences, subtitle style, backup, unique safety copies) | 20 |
+| `core/tests/scanner.rs` (incl. an unplugged drive, a deleted folder, a returned folder) | 16 |
 | `core/tests/recovery.rs` | 7 |
 | `core/tests/scale.rs` (10,000 items) | 2 |
-| `screenroom-player` unit (incl. the bundled-libmpv search order) | 20 |
-| `player/tests/worker.rs` (real decode, audio, tracks, subtitle style) | 13 |
+| `screenroom-player` unit (incl. the bundled-libmpv search order, decode policy) | 21 |
+| `player/tests/worker.rs` (real decode, audio, tracks, seeks, resume, software fallback) | 22 |
 | `player/tests/libmpv_smoke.rs` | 2 |
-| `screenroom-desktop` unit (incl. the window-width grid rule and the three real-folder journeys) | 76 |
+| `screenroom-desktop` unit (journeys, detail, up next, containment, fullscreen read-back) | 91 |
 | `desktop/tests/playback.rs` | 6 |
 | `desktop/tests/artwork.rs` | 3 |
 
-Workspace total after the real-library work: **225 passed, 0 failed**.
+Evidence: `~/.local/state/dev-evidence/screenroom-macos-final/hwdec-integrated-test.log`.
 
 The count is not the coverage. Two scanner tests have `#[cfg(unix)]` bodies, and the
 fourteen player tests print `skipped: …` and pass vacuously when no libmpv is found.
@@ -922,6 +918,122 @@ tested, but nobody has looked at a visible window since they were added. Drawing
 once-only auto-skip and the store's validation are tested.
 - Recommendations are exercised against synthetic libraries; how they read with a
 real 1,200-file library is unmeasured.
+
+---
+
+## macOS audit and completion (2026-10-29)
+
+**Status: host-verified headlessly on macOS; the visible-window, listening and
+drive-in-hand steps are PENDING in [`MACOS_ACCEPTANCE_CHECKLIST.md`](MACOS_ACCEPTANCE_CHECKLIST.md).**
+
+Three independent read-only reviews (core/data, player/FFI, desktop UI and
+packaging) audited everything from the first commit to `4719073`. Every finding
+below was checked against the code before it was fixed. Where a fix is reachable
+without a GPU device or a visible window it carries a regression test; the final
+review found three tests that could not fail, and they were corrected or renamed
+(see "Final independent review" below). Fixes came from the lead and from two
+Codex workers in isolated worktrees, and every worker commit was compiled, tested
+and reviewed by the lead before integration. The workers could not run Cargo in
+their sandbox, and three of their new tests failed once run here: two had wrong
+macOS temp-path fixtures, and one exposed a real numeric-title defect.
+
+### Findings fixed, by severity
+
+| Severity | Defect (root cause) | Fix / regression test |
+| --- | --- | --- |
+| Critical | Restoring the `.before-restore` safety copy overwrote that copy first, then "restored" the current library onto itself — the original was lost while success was reported | every safety copy has a unique name (`restore_safety_copies_are_unique_and_safe_to_restore_from`) |
+| High | Leaving the player by the header (Home/Library/Settings, ⌘1–3) kept libmpv playing out of sight; the next title replaced the open session without storing its position | `end_viewing` + `open_player` finishes any open viewing (`leaving_the_player_by_the_header_stores_the_viewing`) |
+| High | The installed bundle ran bare `ffmpeg`, which a Dock/Finder launch (launchd `PATH`) cannot find — every poster failed outside a terminal | `artwork::tool` resolves Homebrew prefixes; the packaged binary under launchd's `PATH` stored 30 posters and 827 runtimes |
+| High | A title starting with a year (`2001 A Space Odyssey (1968)`, `1917 (2019)`, `Blade Runner 2049 (2017)`) lost its title and could merge unrelated films | a bracketed year wins; otherwise the first bare year, unless another year follows it directly (`Blade.Runner.2049.2017`); a numeric title beside a year is a film (`prefers_release_year_after_numeric_title_years`) |
+| High | Scan root checked by normalised key, ingest by raw string: a differently spelled stored root failed every file and aborted the scan | ingest compares the stored root (`scan_ingest_accepts_the_stored_root_spelling`) |
+| High | Removing a profile deleted its whole history in one click | two-press confirm (`removing_a_profile_asks_first_and_the_choice_survives_a_reopen`) |
+| High | A restore left preferences stale in memory; the next unrelated save wrote the pre-restore set back | preferences, language fields and poster caches re-read (`a_restore_brings_back_the_backups_preferences_and_keeps_them`) |
+| High (plausible) | The worker published the resume position before the seek landed; a quit within ~2 s could store 0 over a real resume point | load starts at the resume point (`loadfile … start=`), positions are "ready" only after `PLAYBACK_RESTART`, and the app stores only `snapshot_is_current` snapshots (`resume_position_is_honoured_when_loading`, sampled continuously) |
+| Medium | Autoplay/replay could store the previous file's end position into the next session; a pre-seek position could be saved under the new seek generation | load id and seek serial carried in `PlayerSnapshot` and checked before every checkpoint (`only_the_current_loads_settled_position_is_stored`) |
+| Medium | Anamorphic video letterboxed twice: the render target used storage size, not display size | `VIDEO_RECONFIG` + `dwidth/dheight`; Tulsa King S01E01 (1920×1080, SAR 9:8) now renders 1920×960 instead of 1920×1080 with 60 px bars |
+| Medium | Event constants were wrong for client API 2.5: "track switched" (20) is `MPV_EVENT_SEEK`, 12 no longer exists | constants checked against `/opt/homebrew/include/mpv/client.h`; tracks follow the observed `track-list` |
+| Medium | Ended/Failed were terminal, so a new load never left them | load resets to Idle (`a_new_load_leaves_ended_state_and_plays_again`, `…recovers_from_a_failed_state`) |
+| Medium | One permanent scan issue blocked withdrawing deleted files forever; an incomplete scan still marked the source available | partial scans withdraw only stat-confirmed missing files **and only if the root still resolves afterwards** (a drive pulled mid-check withdraws nothing); state and `last_scan_ms` only on a complete scan |
+| Medium | Non-UTF-8 parent directories produced lossy paths | whole relative path validated (`non_utf8_parent_directory_is_skipped_as_invalid_name`) |
+| Medium | Recommendations re-offered titles in progress and late episodes of unstarted shows | in-progress works excluded, first episode chosen |
+| Medium | `mark_watched` kept the resume position; a rewatch never returned to Continue Watching | both reset (`explicit_watch_decisions_clear_resume_and_rewatch_clears_watched`) |
+| Medium | Enter on Detail played the opened file, not the highlighted episode; Back reset the grid to its first card; episode rows went stale after a viewing | `detail_starts_on_the_opened_episode_and_back_returns_to_its_card`, `back_from_detail_returns_to_the_card_and_the_watch_filter_narrows` |
+| Medium | A second scan replaced the first's token and channel (uncancellable, unreported) | queued (`a_second_scan_waits_for_the_first_instead_of_orphaning_it`) |
+| Medium | The genre picker was an always-empty dead control with no way back to "any" | hidden until genres exist, with an "Any genre" entry |
+| Medium | The chosen profile was not remembered across launches | `opening_profile` reads the stored default |
+| Medium | Paused picture stretched on resize/fullscreen | fit factors rewritten on every `prepare` (needs a GPU device to test; checklist step 6) |
+| Medium | Focused cards drew near-white text on the near-white focus fill | focused lines use the focus foreground |
+| Low | Arrow seeks with an unknown duration jumped to 0:00; the intro button was labelled "End credits…" while credits were pinned; preference saves erased unrelated errors; the window's own fullscreen exit was not noticed; playback could follow `..` or a link out of its granted folder; `Mpv::wait_event` was a data race from safe code; partial backups were left behind; resolution tokens (`720x480`) read as episodes; removed-source re-grant and default-profile clean-up; `.ok()` hiding SQLite errors; integrity check after migrations | fixed with tests where reachable (`playback_never_resolves_outside_the_granted_folder`, `the_window_mode_read_back_overrides_what_the_app_last_asked_for`, …) |
+
+### Final independent review (2026-10-29)
+
+A fresh read-only review of `4719073..2b71442` returned **accept with fixes**. Each
+finding was checked against the code first.
+
+| Severity | Finding | Resolution |
+| --- | --- | --- |
+| High | A seek sent while a file was still loading was dropped by the worker but never confirmed, so `snapshot_is_current` refused every checkpoint for the rest of that viewing (scrubbing during "Resolving" on a slow drive) | the worker queues an early seek until `FILE_LOADED`, and settles impossible or failed seeks at once (`a_seek_sent_before_the_file_loads_runs_once_it_has_and_is_confirmed`, `an_impossible_seek_is_settled_rather_than_left_pending`) |
+| Medium | Replaying during the "Up next" countdown was replaced by the next episode 5 s later | every viewing that ends drops its offer (`a_finished_episode_offers_the_next_with_a_cancelable_countdown`, replay case) |
+| Medium | A source that came back stayed unavailable while every rescan hit one recurring issue (a `.part` file), hiding it from autoplay and suggestions | a partial scan whose root still resolves marks the source available; `last_scan_ms` stays complete-only (`a_returned_folder_is_available_again_even_when_its_rescan_is_partial`) |
+| Medium (plausible) | A seek into the end gets no `PLAYBACK_RESTART`, so the watched checkpoint could be refused | `END_FILE` for the current entry settles every outstanding seek (`a_seek_into_the_end_is_settled_when_the_file_ends`) |
+| Low | `Alien.1979.Directors.Cut.2003` parsed as year 2003 | first bare year rule above |
+| Low | The duration pass and poster candidates joined stored paths unchecked, so a `..` path from a restored backup reached ffprobe/ffmpeg | `under_root` refuses any non-plain relative path; removed sources are skipped |
+| Low (plausible) | A pause sent before `START_FILE` was ignored | the worker records the requested pause |
+| Tests | the tool-resolver test never narrowed `PATH`; the fit test passes on the old code; the scan-queue test asserted `≤ 1` | resolver tested under launchd's `PATH`; fit test renamed to what it checks; queue asserted exactly |
+
+Recorded, not fixed: **L2** resume uses the four-argument `loadfile … start=` form,
+which needs mpv 0.38 or newer (this Mac has 0.41; the Windows build must check it);
+**L4** a partial scan's stat checks run inside the write transaction, so a sleeping
+drive can stall the UI briefly; **L6** an Escape during macOS's fullscreen animation
+can leave the player rather than fullscreen.
+
+### Functionality completed
+
+- **Runtimes before first play.** `Library::unprobed_files` / `record_duration`
+  plus a bounded background ffprobe pass (`apps/desktop/src/probe.rs`), paused
+  while a file plays and restarted after each scan. On the real library: **827 of
+  830 durations in ~80 s** (the three truncated MP4s stay unknown, honestly).
+- **Embedded cover art** is the poster when a file has one (115 of 830 do);
+  otherwise a frame at a real 10 % instead of a two-minute guess
+  (`examples/poster_check`: 2 covers at 400×600, 16 frames, 2 truncated files
+  refused).
+- **Browse shows one card per work** (a 149-episode show was 149 cards), with a
+  watched/unwatched filter.
+- **Cancelable autoplay countdown** (F10): "Up next … in 5 s", Play now (Enter),
+  Cancel (Escape).
+- **Copy-back hardware decoding** on macOS (`auto-copy`, measured above), with a
+  software fallback for codecs VideoToolbox does not take and `SCREENROOM_HWDEC=no`
+  to force CPU decode; the idle player now waits on libmpv's callbacks instead of a
+  20 ms poll.
+- **Packaging:** ad-hoc signed inside-out and verified strictly, removable-volume
+  and documents usage descriptions, media-tool presence reported;
+  `scripts/verify-bundle.sh` passes all checks.
+
+### Measured
+
+| Measure | Result |
+| --- | --- |
+| `cargo test --workspace` | see "Test totals" below |
+| Grouped Browse page (the query Browse now runs) | 44 ms first / 64 ms last page + 9 ms count at 10,000; 194 / 487 ms at 50,000 (flat paging 6 / 18 ms at 10,000) |
+| ffprobe per file on the USB SSD | ~80 ms |
+| Audio-clock test, formerly flaky under load | 5 of 5 passes, one beside two other test binaries |
+| Copy-back decode (`auto-copy`) vs software, 4K HEVC Main10 3240×2160 | CPU 344 % → 165 %, RSS 737 → 486 MiB, 13.5 → 19.4 fps (source 23.976), luma identical |
+| Same, 4K HEVC 3840×1600 / 1080p H.264 | CPU −13 % / −31 %, RSS −30 % / −20 %, both 23.95 fps |
+| Idle player | 0.00 % CPU before and after; 1,500 timer wakes per 30 s → 0 (event-driven) |
+| SSD integrity after the session | 830 videos, 0 files newer than the session start |
+
+### Accepted limits (recorded, not fixed)
+
+- **Dock Quit, logout and shutdown** send `terminate:` to the application, not
+  through the routed menu item, so the open session is not closed cleanly. The
+  position loss is bounded by the 1 s checkpoint interval, and the stale session
+  is closed on the next open.
+- **Accessibility:** iced 0.14 exposes no accessibility tree to VoiceOver, and
+  buttons take no keyboard focus, so Settings is mouse-only. Browse, Detail and
+  the player are fully keyboard-driven.
+- **Backup and restore run on the UI thread.** The real catalogue's backup is
+  1.5 MB, so the pause is short; a far larger library would need them moved off
+  it.
 
 ---
 
@@ -1033,17 +1145,19 @@ receipt.
    render target because `render::MAX_DIMENSION` caps it, so gate G2's 4K half is
    untouched by it.
 
-What is left before macOS acceptance, exactly, after the real-library pass:
+What is left before macOS acceptance, exactly (updated 2026-10-29, after the audit):
 
 | # | Remaining | Why it cannot be closed here |
 | --- | --- | --- |
-| 1 | A permissioned visible-window session: resume after quit, full screen, the keyboard journey, and the on-screen frame budget at 830 items | needs a window and the owner's consent; every number so far is offscreen |
-| 2 | Durations, so runtimes and progress bars exist before the first play | a scan does not probe `duration_ms`; a design decision to make, not a bug to fix blindly |
-| 3 | Embedded cover art as the poster source for the 115 files that carry it | the extractor samples 10% into the video instead |
-| 4 | Anamorphic display height from the frame's real content, not 16:9 | the window fits the frame as 16:9, so 2:1 content is drawn smaller than it needs to be |
-| 5 | The hardware-decode bridge | the gate that makes 4K and battery life defensible; `hwdec=no` by design for the CPU bridge |
-| 6 | The genre filter exercised on real data | a scanned library stores no genres until enrichment exists; only synthetic labels are tested |
-| 7 | A listening pass (G3b) and an offline check with networking actually off | needs ears, and a network state this session should not change unasked |
+| 1 | The owner's 15-step session in [`MACOS_ACCEPTANCE_CHECKLIST.md`](MACOS_ACCEPTANCE_CHECKLIST.md): resume after ⌘Q, fullscreen, keyboard journey, listening, anamorphic on screen, 4K on battery, drive unplug, backup/restore, profiles | needs a visible window, ears and a drive in hand; background-first testing forbids taking the screen unasked |
+| 2 | Real-time 4K above ~3K wide | needs a GPU (zero-copy) render bridge; copy-back decode alone reaches ~19 of 24 fps on the hardest file |
+| 3 | The genre filter on real data | no genres until enrichment exists; the control is hidden rather than dead |
+| 4 | An offline check with networking actually off, and a battery measurement | changes this Mac's network and power state, which this session should not do unasked |
+| 5 | VoiceOver and keyboard focus in Settings | iced 0.14 exposes no accessibility tree |
+
+Closed by the audit: runtimes before first play, embedded cover art, anamorphic
+sizing, copy-back hardware decoding (measured), and every finding in "macOS audit
+and completion" below.
 
 See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the full definitions of
 done.

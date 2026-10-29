@@ -10,7 +10,8 @@ built and tested; no physical-device test has been run. The archived v0.1 report
 Windows/Samsung hardware. Do not count source review as passed tests.
 
 **PENDING, needs a visible window and an owner-approved session** (recorded here so
-they are consolidated rather than quietly skipped):
+they are consolidated rather than quietly skipped). The macOS steps an owner runs by
+hand are in [`MACOS_ACCEPTANCE_CHECKLIST.md`](MACOS_ACCEPTANCE_CHECKLIST.md):
 
 - the keyboard journeys in §4 (`W-01`/`W-02` equivalents on macOS);
 - the disc-removal cases in §4 (`R-01`);
