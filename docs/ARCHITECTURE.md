@@ -57,7 +57,7 @@ screenroom/
       config.xml                 # the widget manifest and its privileges
       scripts/prepare-tizen-dist.mjs  # bundle -> installable widget directory
   scripts/                       # evidence helpers + the macOS .app packager
-  docs/  reference/  .worktrees/ #  .worktrees is Git-ignored, archive branches
+  docs/  reference/
 ```
 
 ### How `apps/tv` differs, and why it is not a port
@@ -89,9 +89,8 @@ The build is deliberately unlike the desktop's: one bundle, relative paths, targ
 the Mac can verify about it is verified; nothing about the engine, the renderer or
 AVPlay is claimed. See [`TIZEN_DEVICE_HANDOFF.md`](TIZEN_DEVICE_HANDOFF.md).
 
-The Flutter candidate lives on `archive/full-app-2026-10-25`,
-`archive/source-check-2026-10-25` and `archive/cache-controls-2026-10-25` and in
-`.worktrees/`. It is preserved, not built. `reference/` holds the historical
+The Flutter candidate's archive branches and worktrees were deleted on 2026-10-29.
+`reference/` holds the historical
 Svelte/Tauri prototype.
 
 ## Dependency direction

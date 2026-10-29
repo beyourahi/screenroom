@@ -6,8 +6,8 @@ Rust, tests carried over), **reused** (kept as-is because it is still correct),
 **rewritten** (same intent, new form), **discarded** (not carried forward), or
 **deferred** (still wanted, not yet moved).
 
-Nothing here is deleted. `reference/` and the `archive/*` branches are the audit
-trail.
+`reference/` is the audit trail. The `archive/*` branches and `.worktrees/` named
+below were deleted on 2026-10-29; their paths are kept as provenance only.
 
 ---
 

@@ -176,7 +176,6 @@ apps/tv/                    # LightningJS 3 + Blits Samsung Tizen client (not ye
 scripts/                    # local evidence helpers (capture, drive), macOS packager
 docs/                       # ADRs, architecture, roadmap, ledger, gates
 reference/                  # historical Svelte/Tauri prototype and handoff
-.worktrees/                 # archived agent worktrees (Git-ignored, recoverable)
 ```
 
 ## Hard constraints

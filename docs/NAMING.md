@@ -8,8 +8,7 @@
 - Historical documents that describe the name as undecided or as a "backup" label
   are superseded. They are retained as history and must not be acted on.
 - The alternate candidates and collision notes previously collected here are
-  archived in the `archive/full-app-2026-10-25` branch and in
-  `reference/SCREENROOM_CHATGPT_HANDOFF.md`; none of them was approved.
+  recorded in `reference/SCREENROOM_CHATGPT_HANDOFF.md`; none of them was approved.
 
 ## What this does and does not decide
 

@@ -10,7 +10,7 @@ Tools only, no full Xcode**.
 and smart TVs only, with equal priority. iOS/Android phone and tablet apps, UniFFI
 and the Flutter fallback are out of scope; none had been built, so no code was
 removed. The development host's Flutter, flutter-tizen and .NET toolchains were
-removed; the Flutter candidate stays archived on the `archive/*` branches.
+removed. The Flutter candidate's `archive/*` branches were deleted on 2026-10-29.
 
 ---
 
@@ -33,8 +33,7 @@ excluded by the worktrees' own `.gitignore`. Largest committed blobs are the
 pre-existing `reference/prototype-v0.1.zip` (573 KB) and a pre-existing test
 fixture (127 KB).
 
-`.worktrees/` remains Git-ignored in the root; the archive branches are the durable
-copy. Do not delete either.
+**Deleted 2026-10-29:** the `archive/*` branches and `.worktrees/` were removed at the owner's request (local-only, never pushed); the Flutter source is no longer recoverable.
 
 ---
 
@@ -361,8 +360,8 @@ and is migrated forward to the current version instead of being reset.
 
 ### Deliberately not ported yet
 
-These exist in the archived Dart candidate and must be ported or explicitly
-dropped before M3/M6 claims them:
+These existed in the Dart candidate (source deleted 2026-10-29) and must be
+reimplemented or explicitly dropped before M3/M6 claims them:
 
 | Dart API | Reason not ported now | Target |
 | --- | --- | --- |

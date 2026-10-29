@@ -82,8 +82,6 @@ labels; active code and docs use Screenroom.
 - `docs/` — ADRs, architecture, roadmap, progress ledger, gates, licensing.
 - `reference/` — preserved historical prototype and handoff. Read-only source of
   ideas; never the active build.
-- `.worktrees/` — archived agent worktrees, Git-ignored but recoverable through
-  the `archive/*` branches. Do not delete them.
 
 Keep **every first-party** app, crate, package, script, test, design source,
 decision and development document in this single root. No submodules, no sibling
@@ -181,7 +179,7 @@ independently verifiable. Never greenwash a missing gate.
 ## Implementation discipline
 
 1. Check actual repo state and uncommitted work before editing. Preserve, do not
-   overwrite. Archived worktrees stay on their `archive/*` branches.
+   overwrite.
 2. Record design/architecture/provider decisions as dated ADR entries with
    evidence; update the capability matrix and progress ledger when behaviour
    changes.

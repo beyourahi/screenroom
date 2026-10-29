@@ -91,7 +91,7 @@ toolchains on this host, Windows GPU/compositing, and any 4K/HDR path.
   entities through their storage layer (SQLite where available, documented
   fallback where not).
 - The Flutter candidate is archived, not deleted. Its domain rules and tests are
-  the source for the Rust port.
+  the source for the Rust port. *(Amended 2026-10-29: the archive was deleted.)*
 
 ### The libmpv → wgpu bridge (the main desktop risk)
 

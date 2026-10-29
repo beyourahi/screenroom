@@ -48,7 +48,7 @@ need their own platform-specific implementation and are not in scope today.
   This is why the Android SDK, ADB, Kotlin and Gradle stay in the toolchain.
 - **No Flutter fallback.** The Flutter candidate stays archived on the `archive/*`
   branches and in `.worktrees/` as history and as the source of the ported domain
-  rules. It is not a fallback any more. The Flutter, flutter-tizen and .NET
+  rules. It is not a fallback any more. *(Amended 2026-10-29: the archive was deleted.)* The Flutter, flutter-tizen and .NET
   toolchains were removed from the development machine.
 - **macOS stays.** Apple's Command Line Tools are enough for the Rust desktop
   build. Full Xcode and iOS simulators are not needed; they would only matter for a
