@@ -123,6 +123,31 @@ else
 fi
 
 echo
+echo "==> signature and permissions"
+if codesign --verify --deep --strict "$app" 2>/dev/null; then
+  ok "the bundle's ad-hoc signature verifies, libmpv included"
+else
+  fail "codesign --verify --deep --strict rejects the bundle"
+fi
+for key in NSRemovableVolumesUsageDescription NSDocumentsFolderUsageDescription; do
+  if plutil -extract "$key" raw "$app/Contents/Info.plist" >/dev/null 2>&1; then
+    ok "$key explains the access prompt"
+  else
+    fail "no $key, so macOS asks for drive access without saying why"
+  fi
+done
+
+echo
+echo "==> media tools the installed app runs (posters, runtimes)"
+for tool in ffmpeg ffprobe; do
+  if [ -x "/opt/homebrew/bin/$tool" ] || [ -x "/usr/local/bin/$tool" ]; then
+    ok "$tool is installed where a Dock launch can find it"
+  else
+    echo "  note: no $tool in /opt/homebrew/bin or /usr/local/bin; cards will have no posters or runtimes."
+  fi
+done
+
+echo
 if [ "$failures" -ne 0 ]; then
   echo "$failures check(s) failed." >&2
   exit 1

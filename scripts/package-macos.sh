@@ -8,8 +8,8 @@
 #
 # * The bundle carries its own copy of libmpv in `Contents/Frameworks`. The app
 #   looks there after the system paths (see `packaged_candidates` in
-#   `crates/screenroom-player`), so an app installed from `dist` keeps working
-#   after the Homebrew prefix changes or a development copy is removed.
+#   `crates/screenroom-player`), so the bundle does not depend on where libmpv
+#   itself is linked — but see the next point: libmpv's own dependencies still do.
 # * libmpv's *own* dependencies — FFmpeg, libass, libplacebo and the rest — are
 #   resolved by their absolute install names, which on this host point into
 #   `/opt/homebrew/opt`. So this bundle runs on a machine with the same Homebrew
@@ -17,9 +17,15 @@
 #   separate licensing decision (FFmpeg's build options decide which codecs may be
 #   redistributed) and is not implied by a personal install. The script checks the
 #   dependency situation and reports it rather than hiding it.
-# * No code signing and no notarization: this is the approved personal
-#   installation path, and neither is required to run an app you built yourself.
-#   Gatekeeper still asks once on first launch; see the note the script prints.
+# * Posters and runtimes come from Homebrew's `ffmpeg` and `ffprobe`, found by
+#   absolute path because an app opened from the Dock has no Homebrew `PATH`.
+#   Their absence is reported here; the app then shows title-only cards.
+# * An ad-hoc signature over the whole bundle, no Developer ID and no
+#   notarization: this is the approved personal installation path. Ad-hoc signing
+#   seals the bundled libmpv with the binary so `codesign --verify` can prove the
+#   bundle is intact. Gatekeeper still asks once on first launch, and macOS asks
+#   for removable-volume access again after each rebuild, because an ad-hoc
+#   identity changes with every build.
 #
 # Nothing here needs Xcode beyond the command line tools already used to build.
 set -euo pipefail
@@ -121,6 +127,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>LSApplicationCategoryType</key><string>public.app-category.video</string>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
   <key>CFBundleIconFile</key><string>Screenroom</string>
+  <key>NSRemovableVolumesUsageDescription</key><string>Screenroom reads the films and shows on drives you add to its library. It never changes them.</string>
+  <key>NSDocumentsFolderUsageDescription</key><string>Screenroom reads media folders and writes backups only where you choose.</string>
 </dict>
 </plist>
 PLIST
@@ -129,6 +137,30 @@ PLIST
 # Clearing the attribute here is correct for a bundle built on this machine and
 # has no effect on a copy that arrives with a quarantine flag already set.
 xattr -cr "$app" 2>/dev/null || true
+
+# ---------------------------------------------------------------- tools
+
+for tool in ffmpeg ffprobe; do
+  found=""
+  for directory in /opt/homebrew/bin /usr/local/bin; do
+    [ -x "$directory/$tool" ] && { found="$directory/$tool"; break; }
+  done
+  if [ -n "$found" ]; then
+    echo "==> $tool: $found"
+  else
+    echo "!! no $tool found; posters and runtimes will be missing. Install with: brew install ffmpeg" >&2
+  fi
+done
+
+# ---------------------------------------------------------------- signing
+
+# Inside out: the dylib first, then the bundle that seals it.
+if [ -f "$app/Contents/Frameworks/libmpv.2.dylib" ]; then
+  codesign --force --sign - "$app/Contents/Frameworks/libmpv.2.dylib"
+fi
+codesign --force --sign - "$app"
+codesign --verify --deep --strict "$app"
+echo "==> ad-hoc signed and verified"
 
 echo "==> built $app"
 plutil -lint "$app/Contents/Info.plist" >/dev/null && echo "    Info.plist is valid"
