@@ -308,6 +308,43 @@ fn partial_scan_withdraws_only_locators_that_are_confirmed_missing() {
 }
 
 #[test]
+fn a_returned_folder_is_available_again_even_when_its_rescan_is_partial() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("drive");
+    fs::create_dir_all(&root).unwrap();
+    write_settled(&root.join("Film.2020.mkv"), b"film");
+    let library = Library::open_in_memory().unwrap();
+    let source = library.add_source(&root, None).unwrap();
+    scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+
+    let held = dir.path().join("held");
+    fs::rename(&root, &held).unwrap();
+    scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+    assert_ne!(
+        library.source(&source.id).unwrap().state,
+        SourceState::Available
+    );
+
+    // Back, but one file is still downloading, so every rescan stays partial.
+    fs::rename(&held, &root).unwrap();
+    write_settled(&root.join("Downloading.2020.mkv"), b"partial");
+    fs::write(root.join("Downloading.2020.mkv.part"), b"downloading").unwrap();
+    let summary = scanner(&library)
+        .scan(&source.id, &ScanToken::new(), |_| {})
+        .unwrap();
+    assert!(!summary.complete);
+    assert_eq!(
+        library.source(&source.id).unwrap().state,
+        SourceState::Available,
+        "a recurring scan issue must not keep a returned drive out of autoplay"
+    );
+}
+
+#[test]
 fn an_unplugged_drive_is_not_an_empty_library() {
     // The worst failure this application could have is treating a missing disk as a
     // deleted library: a rescan of an unplugged drive must not withdraw availability,

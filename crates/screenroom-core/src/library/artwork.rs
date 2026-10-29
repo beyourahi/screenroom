@@ -232,7 +232,8 @@ impl Library {
              JOIN files f ON f.id = (
                  SELECT f2.id FROM files f2
                  JOIN editions e2 ON e2.id = f2.edition_id
-                 WHERE e2.work_id = w.id AND f2.available = 1
+                 JOIN sources s2 ON s2.id = f2.source_id
+                 WHERE e2.work_id = w.id AND f2.available = 1 AND s2.state != 'removed'
                  ORDER BY COALESCE(f2.season_number, 0), COALESCE(f2.episode_number, 0),
                           f2.relative_path
                  LIMIT 1)

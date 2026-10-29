@@ -631,6 +631,12 @@ impl Library {
                 for id in missing {
                     tx.execute("UPDATE files SET available = 0 WHERE id = ?1", [id])?;
                 }
+                // The drive is back even if one file keeps failing; leaving the
+                // source unavailable would hide it from autoplay and suggestions.
+                tx.execute(
+                    "UPDATE sources SET state = 'available' WHERE id = ?1 AND state != 'removed'",
+                    [source_id],
+                )?;
             }
         }
         tx.commit()?;

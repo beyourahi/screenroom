@@ -105,7 +105,19 @@ pub fn parse_filename(filename: &str, folder: Option<&str>) -> ParsedName {
             let after = name.as_bytes().get(matched.end());
             matches!(before, Some(b'(' | b'[')) && matches!(after, Some(b')' | b']'))
         })
-        .or_else(|| years.last())
+        .or_else(|| {
+            // The first bare year ends the title (`Alien.1979.Directors.Cut.2003`),
+            // unless a second year follows it directly: then the first was part of
+            // the title (`Blade.Runner.2049.2017`).
+            let mut chosen = years.first()?;
+            for next in &years[1..] {
+                if next.start() != chosen.end() + 1 {
+                    break;
+                }
+                chosen = next;
+            }
+            Some(chosen)
+        })
         .copied();
     let year = year_match
         .and_then(|m| m.as_str().parse::<i64>().ok())
@@ -288,6 +300,17 @@ mod tests {
             ("1917 (2019).mkv", "1917", 2019),
             ("Blade Runner 2049 (2017).mkv", "Blade Runner 2049", 2017),
             ("2001 Maniacs (2005).mkv", "2001 Maniacs", 2005),
+            (
+                "Blade.Runner.2049.2017.1080p.mkv",
+                "Blade Runner 2049",
+                2017,
+            ),
+            ("Alien.1979.Directors.Cut.2003.1080p.mkv", "Alien", 1979),
+            (
+                "2001.A.Space.Odyssey.1968.mkv",
+                "2001 A Space Odyssey",
+                1968,
+            ),
         ] {
             let parsed = parse_filename(filename, None);
             assert_eq!((parsed.title.as_str(), parsed.year), (title, Some(year)));
