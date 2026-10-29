@@ -182,6 +182,58 @@ fn rapid_seeks_confirm_only_after_the_latest_target_lands() {
 }
 
 #[test]
+fn a_seek_sent_before_the_file_loads_runs_once_it_has_and_is_confirmed() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = clip(&directory);
+    let Some(player) = player() else { return };
+
+    // The app can scrub while a slow drive is still opening the file. A dropped,
+    // never-confirmed serial blocked every checkpoint for the rest of the viewing.
+    let load_id = player.load_at(&path, None);
+    let early = player.seek(1.4);
+    let sought = wait_for(&player, Duration::from_secs(20), |snapshot| {
+        snapshot.load_id == load_id && snapshot.position_ready && snapshot.seek_serial >= early
+    });
+    assert!(sought.position >= 1.2, "position was {}", sought.position);
+}
+
+#[test]
+fn a_seek_into_the_end_is_settled_when_the_file_ends() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = clip(&directory);
+    let Some(player) = player() else { return };
+
+    let load_id = player.load_at(&path, None);
+    let loaded = wait_for(&player, Duration::from_secs(20), |snapshot| {
+        snapshot.load_id == load_id && snapshot.position_ready && snapshot.duration > 0.0
+    });
+    let last = player.seek(loaded.duration);
+    let ended = wait_for(&player, Duration::from_secs(20), |snapshot| {
+        snapshot.state == PlayerState::Ended
+    });
+    assert!(
+        ended.seek_serial >= last,
+        "the seek into the end was never settled: {ended:?}"
+    );
+}
+
+#[test]
+fn an_impossible_seek_is_settled_rather_than_left_pending() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = clip(&directory);
+    let Some(player) = player() else { return };
+
+    player.load(&path);
+    wait_for(&player, Duration::from_secs(20), |snapshot| {
+        snapshot.position_ready
+    });
+    let serial = player.seek(f64::NAN);
+    wait_for(&player, Duration::from_secs(5), |snapshot| {
+        snapshot.seek_serial >= serial
+    });
+}
+
+#[test]
 fn resume_position_is_honoured_when_loading() {
     let directory = TempDir::new().expect("temp dir");
     let path = clip(&directory);
@@ -201,7 +253,10 @@ fn resume_position_is_honoured_when_loading() {
             );
             break snapshot;
         }
-        assert!(std::time::Instant::now() < deadline, "the file never settled");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the file never settled"
+        );
         std::thread::sleep(Duration::from_millis(1));
     };
     assert!(

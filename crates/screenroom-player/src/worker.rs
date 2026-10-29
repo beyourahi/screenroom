@@ -655,6 +655,7 @@ impl Runner {
             }
 
             if self.pending_seek_serial.is_none()
+                && self.loaded
                 && let Some((seconds, serial)) = self.queued_seek.take()
             {
                 self.seek(seconds, serial, shared);
@@ -770,10 +771,15 @@ impl Runner {
     }
 
     fn seek(&mut self, seconds: f64, serial: u64, shared: &Arc<Mutex<PlayerSnapshot>>) {
-        if !self.loaded {
+        if !seconds.is_finite() || seconds < 0.0 {
+            // Nothing will move, so the request is settled now; leaving its serial
+            // unconfirmed would block every checkpoint for the rest of the viewing.
+            self.confirm_seek(serial, shared);
             return;
         }
-        if !seconds.is_finite() || seconds < 0.0 {
+        if !self.loaded {
+            // Too early to seek: run it once the file has loaded.
+            self.queued_seek = Some((seconds, serial));
             return;
         }
         let target = if self.duration > 0.0 {
@@ -789,15 +795,26 @@ impl Runner {
         {
             self.queued_seek = None;
             self.fail("seek_failed", error.to_string(), shared);
+            self.confirm_seek(serial, shared);
         } else {
             self.pending_seek_serial = Some(serial);
         }
+    }
+
+    /// Marks a seek as settled without a playback restart to prove it.
+    fn confirm_seek(&mut self, serial: u64, shared: &Arc<Mutex<PlayerSnapshot>>) {
+        self.seek_serial = self.seek_serial.max(serial);
+        self.publish_snapshot(shared);
     }
 
     fn set_paused(&mut self, paused: bool, shared: &Arc<Mutex<PlayerSnapshot>>) {
         let value = if paused { "yes" } else { "no" };
         if let Err(error) = self.core.command(&["set", "pause", value]) {
             self.fail("pause_failed", error.to_string(), shared);
+        } else {
+            // Before a file starts, its pause change is not observed; remember it
+            // so the load lands in the state that was asked for.
+            self.paused = paused;
         }
     }
 
@@ -1111,6 +1128,18 @@ impl Runner {
             return;
         }
         self.current_entry_id = None;
+        // A seek that ran into the end never gets a playback restart; the file is
+        // over, so every outstanding request is settled.
+        let outstanding = self
+            .pending_seek_serial
+            .take()
+            .into_iter()
+            .chain(self.queued_seek.take().map(|(_, serial)| serial))
+            .max();
+        self.seek_started = false;
+        if let Some(serial) = outstanding {
+            self.seek_serial = self.seek_serial.max(serial);
+        }
         match reason {
             end_reason::EOF => {
                 self.set_state(PlayerState::Ended, shared);
