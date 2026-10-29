@@ -617,9 +617,18 @@ impl Library {
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             drop(statement);
-            for (id, relative_path) in locators {
-                if matches!(std::fs::metadata(root.join(relative_path)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-                {
+            let missing: Vec<String> = locators
+                .into_iter()
+                .filter(|(_, relative_path)| {
+                    matches!(std::fs::metadata(root.join(relative_path)),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+                })
+                .map(|(id, _)| id)
+                .collect();
+            // A drive pulled during the loop makes every later file "not found".
+            // Only a root that still resolves afterwards makes those answers true.
+            if std::fs::canonicalize(root).is_ok() {
+                for id in missing {
                     tx.execute("UPDATE files SET available = 0 WHERE id = ?1", [id])?;
                 }
             }

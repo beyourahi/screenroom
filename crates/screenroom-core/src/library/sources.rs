@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Row, params};
 
 use super::{Library, validated};
 use crate::domain::{Source, SourceState};
@@ -217,7 +217,10 @@ mod tests {
     #[test]
     fn regrant_matches_removed_roots_by_location_key() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("media");
+        // Canonical first: on macOS the temp directory is reached through the
+        // `/var` symlink, and that is a different path, not a different spelling.
+        let base = std::fs::canonicalize(directory.path()).unwrap();
+        let root = base.join("media");
         std::fs::create_dir(&root).unwrap();
         let library = Library::open_in_memory().unwrap();
         let source = library.add_source(&root, None).unwrap();

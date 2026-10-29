@@ -1059,13 +1059,6 @@ impl Runner {
         self.publish_snapshot(shared);
     }
 
-    /// Re-reads the track list and publishes it.
-    fn refresh_tracks(&mut self, shared: &Arc<Mutex<PlayerSnapshot>>) {
-        self.tracks = read_tracks(&self.core);
-        trace!("tracks: {}", self.tracks.len());
-        self.publish_snapshot(shared);
-    }
-
     fn on_loaded(&mut self, shared: &Arc<Mutex<PlayerSnapshot>>) {
         trace!("event: file loaded");
         self.loaded = true;

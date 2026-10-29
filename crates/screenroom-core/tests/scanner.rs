@@ -56,10 +56,13 @@ fn scans_media_and_reports_skipped_entries() {
 #[test]
 fn scan_ingest_accepts_the_stored_root_spelling() {
     let dir = TempDir::new().unwrap();
-    let root = dir.path().join("media");
+    // Canonical first, so the only difference below is spelling (`//`), not the
+    // macOS `/var` symlink that the scanner rightly refuses as a replaced root.
+    let base = fs::canonicalize(dir.path()).unwrap();
+    let root = base.join("media");
     fs::create_dir_all(&root).unwrap();
     write_settled(&root.join("Film.2020.mkv"), b"film");
-    let db = dir.path().join("library.db");
+    let db = base.join("library.db");
     let library = Library::open(&db).unwrap();
     let source = library.add_source(&root, None).unwrap();
     drop(library);
@@ -69,7 +72,7 @@ fn scan_ingest_accepts_the_stored_root_spelling() {
     connection
         .execute(
             "UPDATE sources SET root_path = ?1 WHERE id = ?2",
-            rusqlite::params![alternate.to_string_lossy(), source.id],
+            rusqlite::params![alternate, source.id],
         )
         .unwrap();
     drop(connection);
@@ -287,13 +290,12 @@ fn partial_scan_withdraws_only_locators_that_are_confirmed_missing() {
 
     assert!(!summary.complete);
     let items = library.items(&LibraryQuery::page(10)).unwrap();
-    assert_eq!(
-        items
+    assert!(
+        !items
             .iter()
             .find(|item| item.filename.starts_with("Gone"))
             .unwrap()
-            .available,
-        false
+            .available
     );
     assert!(
         items

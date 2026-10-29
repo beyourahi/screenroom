@@ -483,8 +483,10 @@ mod tests {
         let library = Library::open_in_memory().unwrap();
         let profile = library.profiles().unwrap().remove(0);
         let guest = library.add_profile("Guest").unwrap();
-        let mut preferences = Preferences::default();
-        preferences.default_profile = Some(profile.id.clone());
+        let preferences = Preferences {
+            default_profile: Some(profile.id.clone()),
+            ..Preferences::default()
+        };
         library.set_preferences(&preferences).unwrap();
 
         let error = library.remove_profile("missing").unwrap_err();

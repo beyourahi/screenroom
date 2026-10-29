@@ -123,6 +123,7 @@ pub fn parse_filename(filename: &str, folder: Option<&str>) -> ParsedName {
             .flatten()
     });
 
+    let has_year = year_match.is_some();
     let cut = year_match
         .map(|m| m.start())
         .or_else(|| episodic.as_ref().map(|episode| episode.start))
@@ -146,7 +147,9 @@ pub fn parse_filename(filename: &str, folder: Option<&str>) -> ParsedName {
         };
     }
 
-    let unknown = name.is_empty() || NUMERIC_TITLE.is_match(&name);
+    // A bare number is a title only beside a separate release year: `1917 (2019)`
+    // and `300 (2006)` are films, while `01.mkv` or `2019.mkv` say nothing.
+    let unknown = name.is_empty() || (NUMERIC_TITLE.is_match(&name) && !has_year);
     let season = episodic.as_ref().map(|episode| episode.season);
     let episode = episodic.as_ref().map(|episode| episode.episode);
     let episode_end = match (episodic.as_ref().and_then(|episode| episode.end), episode) {

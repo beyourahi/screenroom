@@ -390,6 +390,11 @@ struct Active {
     resume_from_ms: i64,
     /// Where Back should return to.
     origin: Screen,
+    /// The player load this viewing belongs to. A snapshot from any other load
+    /// is the previous file's, still in flight during autoplay or replay.
+    load_id: u64,
+    /// The newest seek asked for; positions are stored only once it has landed.
+    seek_serial: u64,
 }
 
 /// Progress reported by a background scan.
@@ -728,6 +733,19 @@ fn ticks(interval: Duration) -> Subscription<Message> {
         });
         receiver.map(|()| Message::Tick)
     })
+}
+
+/// Whether a snapshot may be stored as this viewing's progress.
+///
+/// It must come from this viewing's own load (not the previous file during
+/// autoplay), report a position libmpv has actually reached (not the 0 it shows
+/// before the resume point lands), and postdate the newest seek, or a quit in
+/// that window would store the old place over the new one.
+fn snapshot_is_current(active: &Active, snapshot: &PlayerSnapshot) -> bool {
+    snapshot.loaded
+        && snapshot.position_ready
+        && snapshot.load_id == active.load_id
+        && snapshot.seek_serial >= active.seek_serial
 }
 
 /// The profile a library opens with: the stored choice while it still exists,
@@ -1408,13 +1426,15 @@ impl App {
         // Likewise the level: a viewer who turned the last film down should not be
         // greeted by full volume on the next one.
         player.set_volume(f64::from(self.preferences.volume_percent));
-        player.load_at(&path, Some(resume as f64 / 1_000.0));
+        let load_id = player.load_at(&path, Some(resume as f64 / 1_000.0));
         self.active = Some(Active {
             tracker: opened.tracker,
             file_id: item.id.clone(),
             title: item.title.clone(),
             resume_from_ms: resume,
             origin,
+            load_id,
+            seek_serial: 0,
         });
         self.snapshot = player.snapshot();
         self.frame = None;
@@ -1495,13 +1515,14 @@ impl App {
             position,
             duration,
             loaded: true,
+            position_ready: true,
             ..PlayerSnapshot::default()
         }
     }
 
     /// Writes one checkpoint, reporting failures instead of hiding them.
     fn save(&mut self, active: &mut Active, snapshot: &PlayerSnapshot, ended: bool) {
-        if !snapshot.loaded || snapshot.duration_ms() <= 0 {
+        if !snapshot_is_current(active, snapshot) || snapshot.duration_ms() <= 0 {
             return;
         }
         match active.tracker.record(
@@ -1705,7 +1726,10 @@ impl App {
             self.report(&error);
             return;
         }
-        player.seek(seconds);
+        let serial = player.seek(seconds);
+        if let Some(active) = &mut self.active {
+            active.seek_serial = serial;
+        }
     }
 
     // -------------------------------------------------------- skip segments
@@ -5948,6 +5972,8 @@ mod tests {
             title: item.title.clone(),
             resume_from_ms: opened.resume_from_ms,
             origin: Screen::Browse,
+            load_id: 0,
+            seek_serial: 0,
         });
         app.snapshot = App::playing_snapshot(42.5, 100.0);
 
@@ -5986,6 +6012,8 @@ mod tests {
                 title: item.title.clone(),
                 resume_from_ms: opened.resume_from_ms,
                 origin: Screen::Browse,
+                load_id: 0,
+                seek_serial: 0,
             });
             app.screen = Screen::Player;
             app.snapshot = App::playing_snapshot(30.0, 100.0);
@@ -6001,6 +6029,53 @@ mod tests {
             assert_eq!(watching.len(), 1);
             assert_eq!(watching[0].position_ms, 30_000);
         }
+    }
+
+    #[test]
+    fn only_the_current_loads_settled_position_is_stored() {
+        let (app, _directory) = app_with(1);
+        let item = app.browse.items[0].clone();
+        let opened =
+            PlaybackTracker::open(&app.library, &app.profile_id, &item.id).expect("a session");
+        let active = Active {
+            tracker: opened.tracker,
+            file_id: item.id.clone(),
+            title: item.title.clone(),
+            resume_from_ms: 0,
+            origin: Screen::Browse,
+            load_id: 7,
+            seek_serial: 3,
+        };
+        let current = PlayerSnapshot {
+            load_id: 7,
+            seek_serial: 3,
+            ..App::playing_snapshot(10.0, 100.0)
+        };
+        assert!(snapshot_is_current(&active, &current));
+        // The previous file, still reported while autoplay opens the next one.
+        assert!(!snapshot_is_current(
+            &active,
+            &PlayerSnapshot {
+                load_id: 6,
+                ..current.clone()
+            }
+        ));
+        // Loaded, but the resume point has not landed: its 0 must not be stored.
+        assert!(!snapshot_is_current(
+            &active,
+            &PlayerSnapshot {
+                position_ready: false,
+                ..current.clone()
+            }
+        ));
+        // A seek asked for and not yet confirmed.
+        assert!(!snapshot_is_current(
+            &active,
+            &PlayerSnapshot {
+                seek_serial: 2,
+                ..current
+            }
+        ));
     }
 
     #[test]
